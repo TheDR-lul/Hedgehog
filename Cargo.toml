@@ -1,8 +1,19 @@
 [package]
 name = "Hedgehog"
 version = "0.1.0"
-edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+edition = "2024"
 
 [dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+reqwest = { version = "0.12.15", features = ["json", "stream"] }
+config = "0.15.11"
+toml = "0.8.20"
+serde = { version = "1.0", features = ["derive"] }
+async-trait = "0.1"
+teloxide = { version = "0.15.0", features = ["macros"] }
+sqlx = { version = "0.8.5", features = ["postgres", "runtime-tokio-rustls", "macros"] }
+tracing = "0.1.41"
+hmac = "0.12"
+sha2 = "0.10"
+anyhow = "1.0"
+dotenv = "0.15"
