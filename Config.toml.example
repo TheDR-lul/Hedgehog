@@ -13,3 +13,14 @@ telegram_token   = "YOUR_TELEGRAM_BOT_TOKEN"
 # Дефолтные параметры стратегии
 default_volatility = 0.6    # 60%
 offset_points      = 10     # Понижение/повышение цены лимитки
+# 1) Тестнет (официальный sandbox):
+use_testnet = true
+
+# 2) Или ваш региональный прод‑домен:
+#bybit_base_url = "https://api.bybit.nl"    # Нидерланды
+#bybit_base_url = "https://api.byhkbit.com" # Гонконг
+#bybit_base_url = "https://api.bybit-tr.com" # Турция
+#bybit_base_url = "https://api.bybit.kz"    # Казахстан
+
+# 3) Для обычного продакшна (API.bybit.com)
+# Если neither use_testnet nor bybit_base_url set — будет https://api.bybit.com

@@ -1,28 +1,32 @@
+// src/notifier.rs
+
 use anyhow::Result;
 use teloxide::{prelude::*, utils::command::BotCommands};
-
 use crate::exchange::Exchange;
 use crate::hedger::Hedger;
 use crate::models::{HedgeRequest, UnhedgeRequest};
 
-/// Все команды бота
+/// All of our bot's commands
 #[derive(BotCommands, Clone)]
-#[command(description = "Хедж‑бот команды:")]
+#[command(rename_rule = "lowercase", description = "Доступные команды:")]
 pub enum Command {
-    /// Показать статус бота и API
+    /// This help message
+    #[command(description = "показать это сообщение", aliases = ["help", "?"])]
+    Help,
+
+    /// Show connection status
     #[command(description = "показать статус")]
     Status,
 
-    /// Захеджировать позицию: /hedge 1000 MNT 60
+    /// Hedge a position: /hedge <sum> <symbol> <volatility%>
     #[command(description = "захеджировать: /hedge <sum> <symbol> <volatility %>")]
     Hedge(String),
 
-    /// Расхеджировать позицию: /unhedge 500 MNT
+    /// Unhedge a position: /unhedge <sum> <symbol>
     #[command(description = "расхеджировать: /unhedge <sum> <symbol>")]
     Unhedge(String),
 }
 
-/// Центральный обработчик
 pub async fn handler<E>(
     bot: Bot,
     msg: Message,
@@ -35,14 +39,19 @@ where
     let chat_id = msg.chat.id;
 
     match cmd {
+        Command::Help => {
+            // send the generated help text
+            let text = Command::descriptions().to_string();
+            bot.send_message(chat_id, text).await?;
+        }
+
         Command::Status => {
             bot.send_message(chat_id, "✅ Бот запущен и подключён к бирже")
                 .await?;
         }
 
         Command::Hedge(args) => {
-            // /hedge <sum> <symbol> <vol%>
-            let parts: Vec<&str> = args.split_whitespace().collect();
+            let parts: Vec<_> = args.split_whitespace().collect();
             if parts.len() != 3 {
                 bot.send_message(
                     chat_id,
@@ -51,54 +60,45 @@ where
                 .await?;
                 return Ok(());
             }
-
-            // Разбор аргументов
-            let sum        : f64    = parts[0].parse().unwrap_or(0.0);
-            let symbol     : String = parts[1].to_uppercase();
-            let volatility : f64    = parts[2]
+            let sum: f64 = parts[0].parse().unwrap_or(0.0);
+            let symbol = parts[1].to_uppercase();
+            let volatility: f64 = parts[2]
                 .trim_end_matches('%')
                 .parse::<f64>()
-                .unwrap_or(0.0) / 100.0;
+                .unwrap_or(0.0)
+                / 100.0;
 
-            // Создаём Hedger на клонированной бирже
             let hedger = Hedger::new(exchange.clone());
-
-            // Расчёт
             match hedger
                 .run_hedge(HedgeRequest { sum, symbol: symbol.clone(), volatility })
                 .await
             {
                 Ok((spot, fut)) => {
-                    bot.send_message(
-                        chat_id,
-                        format!(
-                            "Хеджирование {sum} USDT {symbol} при V={:.2}%:\n\
-                             ▸ Спот  {spot:.4}\n▸ Фьючерс {fut:.4}",
-                            volatility * 100.0
-                        ),
-                    )
-                    .await?;
+                    let msg = format!(
+                        "Хеджирование {} USDT {} при V={:.1}%:\n▸ Спот {:.4}\n▸ Фьючерс {:.4}",
+                        sum,
+                        symbol,
+                        volatility * 100.0,
+                        spot,
+                        fut,
+                    );
+                    bot.send_message(chat_id, msg).await?;
                 }
                 Err(e) => {
-                    bot.send_message(chat_id, format!("❌ Ошибка хеджирования: {e}"))
-                        .await?;
+                    bot.send_message(chat_id, format!("❌ Ошибка: {}", e)).await?;
                 }
             }
         }
 
         Command::Unhedge(args) => {
-            // /unhedge <sum> <symbol>
-            let parts: Vec<&str> = args.split_whitespace().collect();
+            let parts: Vec<_> = args.split_whitespace().collect();
             if parts.len() != 2 {
                 bot.send_message(chat_id, "Использование: /unhedge <sum> <symbol>")
                     .await?;
                 return Ok(());
             }
-
-            let sum    : f64    = parts[0].parse().unwrap_or(0.0);
-            let symbol : String = parts[1].to_uppercase();
-
-            // Заглушка на будущее (UnhedgeRequest подготовлен)
+            let sum: f64 = parts[0].parse().unwrap_or(0.0);
+            let symbol = parts[1].to_uppercase();
             let _req = UnhedgeRequest { sum, symbol };
 
             bot.send_message(

@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Клиент Bybit (prod / testnet)
+/// Клиент Bybit (prod/testnet или региональный домен)
 #[derive(Debug, Clone)]
 pub struct Bybit {
     api_key:    String,
@@ -21,18 +21,13 @@ pub struct Bybit {
 }
 
 impl Bybit {
-    /// key/secret – API‑ключи, use_testnet – переключение на sandbox
-    pub fn new(key: &str, secret: &str, use_testnet: bool) -> Self {
+    /// Конструктор: ключи + полный base_url (например, "https://api-testnet.bybit.com")
+    pub fn new(key: &str, secret: &str, base_url: &str) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .expect("Failed to build HTTP client");
-
-        let base_url = if use_testnet {
-            Url::parse("https://api-testnet.bybit.com").unwrap()
-        } else {
-            Url::parse("https://api.bybit.com").unwrap()
-        };
+        let base_url = Url::parse(base_url).expect("Invalid Bybit base_url in config");
 
         Self {
             api_key:    key.to_owned(),
@@ -42,7 +37,7 @@ impl Bybit {
         }
     }
 
-    /// Генерация подписи по V5 схеме: payload = timestamp + api_key + recv_window + query
+    /// Подпись для V5: timestamp + api_key + recv_window + query
     fn sign_v5(&self, timestamp: &str, recv_window: &str, query: &str) -> String {
         let payload = format!("{timestamp}{}{}{}", self.api_key, recv_window, query);
         let mut mac = HmacSha256::new_from_slice(self.api_secret.as_bytes()).unwrap();
@@ -50,7 +45,6 @@ impl Bybit {
         hex::encode(mac.finalize().into_bytes())
     }
 
-    /// Текущий UNIX‑timestamp в миллисекундах
     fn timestamp_ms() -> String {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -62,9 +56,10 @@ impl Bybit {
 
 #[async_trait::async_trait]
 impl Exchange for Bybit {
-    /// Проверяем подключение к публичному V5-эндпоинту
+    /// Правильный эндпоинт Server Time: `/v5/market/time` :contentReference[oaicite:0]{index=0}
     async fn check_connection(&mut self) -> Result<()> {
-        let url = self.base_url.join("/v5/public/time")?;
+        let url = self.base_url.join("/v5/market/time")?;
+        println!("PING BYBIT AT {}", url);
         let resp = self.client.get(url).send().await?;
         if resp.status().is_success() {
             Ok(())
@@ -73,13 +68,15 @@ impl Exchange for Bybit {
         }
     }
 
-    /// Получаем баланс по V5 API (UNIFIED wallet)
+    /// Баланс через `/v5/account/wallet-balance`
     async fn get_balance(&self, symbol: &str) -> Result<Balance> {
         #[derive(Deserialize)]
         struct V5Resp {
-            retCode: i32,
-            retMsg:  String,
-            result:  WalletBalanceResult,
+            #[serde(rename = "retCode")]
+            ret_code: i32,
+            #[serde(rename = "retMsg")]
+            ret_msg:  String,
+            result:    WalletBalanceResult,
         }
         #[derive(Deserialize)]
         struct WalletBalanceResult {
@@ -87,13 +84,13 @@ impl Exchange for Bybit {
         }
         #[derive(Deserialize)]
         struct CoinBalance {
-            coin:                  String,
-            totalAvailableBalance: String,
-            // другие поля, если надо
+            coin:                    String,
+            #[serde(rename = "totalAvailableBalance")]
+            total_available_balance: String,
         }
 
-        let ts = Self::timestamp_ms();
-        let recv = "5000";
+        let ts    = Self::timestamp_ms();
+        let recv  = "5000";
         let query = format!("accountType=UNIFIED&coin={symbol}");
         let sign  = self.sign_v5(&ts, recv, &query);
 
@@ -108,43 +105,28 @@ impl Exchange for Bybit {
             .send().await?
             .json::<V5Resp>().await?;
 
-        if resp.retCode != 0 {
-            return Err(anyhow!("Bybit balance error {}: {}", resp.retCode, resp.retMsg));
+        if resp.ret_code != 0 {
+            return Err(anyhow!("Bybit balance error {}: {}", resp.ret_code, resp.ret_msg));
         }
+
         let coin = resp.result.list.into_iter()
             .find(|c| c.coin.eq_ignore_ascii_case(symbol))
             .ok_or_else(|| anyhow!("No balance entry for {}", symbol))?;
 
-        let free = coin.totalAvailableBalance.parse::<f64>()?;
+        let free = coin.total_available_balance.parse::<f64>()?;
         Ok(Balance { free, locked: 0.0 })
     }
 
-    async fn get_mmr(&self, _symbol: &str) -> Result<f64> {
-        unimplemented!()
-    }
-
-    async fn get_funding_rate(&self, _symbol: &str, _days: u16) -> Result<f64> {
-        unimplemented!()
-    }
+    async fn get_mmr(&self, _symbol: &str) -> Result<f64>            { unimplemented!() }
+    async fn get_funding_rate(&self, _symbol: &str, _days: u16) -> Result<f64> { unimplemented!() }
 
     async fn place_limit_order(
-        &self,
-        _symbol: &str,
-        _side: OrderSide,
-        _qty: f64,
-        _price: f64,
-    ) -> Result<Order> {
-        unimplemented!()
-    }
+        &self, _symbol: &str, _side: OrderSide, _qty: f64, _price: f64
+    ) -> Result<Order> { unimplemented!() }
 
     async fn place_market_order(
-        &self,
-        _symbol: &str,
-        _side: OrderSide,
-        _qty: f64,
-    ) -> Result<Order> {
-        unimplemented!()
-    }
+        &self, _symbol: &str, _side: OrderSide, _qty: f64
+    ) -> Result<Order> { unimplemented!() }
 
     async fn cancel_order(&self, _symbol: &str, _order_id: &str) -> Result<()> {
         unimplemented!()
