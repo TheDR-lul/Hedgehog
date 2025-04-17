@@ -58,8 +58,8 @@ offset_points      = 10   # price offset for limit orders
 
 1. **Clone repository**
    ```bash
-git clone https://github.com/your-repo/hedger_bot.git
-cd hedger_bot
+git clone https://github.com/TheDR-lul/Hedgehog
+cd hedgerbot
 ```
 
 2. **Configure**
