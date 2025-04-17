@@ -10,6 +10,7 @@ dependencies = [
  "async-trait",
  "config",
  "dotenv",
+ "hex",
  "hmac",
  "reqwest",
  "serde",
