@@ -5,16 +5,23 @@ use config::{Config as Loader, Environment, File};
 
 #[derive(Deserialize, Debug)]
 pub struct Config {
-    pub bybit_api_key: String,
+    // Bybit
+    pub bybit_api_key:    String,
     pub bybit_api_secret: String,
-    pub use_testnet:    bool,
-    /// опционально: если указано — будет использовано вместо тестнета или продакшна
-    pub bybit_base_url: Option<String>,
+    /// Если true — используем тестнет, иначе — прод
+    pub use_testnet:      bool,
+    /// Явно указать любой endpoint, вместо авто‑выбора
+    pub bybit_base_url:   Option<String>,
 
-    pub sqlite_path:    String,
-    pub telegram_token: String,
+    // SQLite
+    pub sqlite_path:      String,
+
+    // Telegram
+    pub telegram_token:   String,
+
+    // Стратегия
     pub default_volatility: f64,
-    pub offset_points:     u32,
+    pub offset_points:      u32,
 }
 
 impl Config {

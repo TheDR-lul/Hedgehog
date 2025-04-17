@@ -1,5 +1,3 @@
-// src/main.rs
-
 mod config;
 mod exchange;
 mod hedger;
@@ -21,18 +19,18 @@ static DB: OnceCell<storage::Db> = OnceCell::const_new();
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 1) Читаем конфиг и инициализируем логгер
+    // 1) Конфиг и логгер
     let cfg = Config::load()?;
     logger::init(&cfg);
 
-    // 2) Подключаемся к локальной SQLite
+    // 2) Подключение к SQLite
     let db = storage::Db::connect(&cfg.sqlite_path).await?;
     DB.set(db).unwrap();
 
-    // 3) Инициализируем Telegram Bot
+    // 3) Telegram Bot
     let bot = Bot::new(&cfg.telegram_token);
 
-    // 4) Собираем base_url для Bybit
+    // 4) Выбираем base_url
     let base_url: &str = cfg
         .bybit_base_url
         .as_deref()
@@ -44,7 +42,6 @@ async fn main() -> Result<()> {
                 "https://api.bybit.com"
             }
         });
-
     println!("Using Bybit base URL: {}", base_url);
 
     // 5) Создаём клиента биржи
@@ -57,7 +54,7 @@ async fn main() -> Result<()> {
     // 6) Пингуем Bybit
     exchange.check_connection().await?;
 
-    // 7) Запускаем Telegram‑диспетчер
+    // 7) Стартуем Telegram‑диспетчер
     telegram::run(bot, exchange).await;
     Ok(())
 }
