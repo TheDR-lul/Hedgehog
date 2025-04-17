@@ -156,9 +156,9 @@ impl Bybit {
 
 #[async_trait::async_trait]
 impl Exchange for Bybit {
-    /// GET /v5/public/time — проверяем HTTP 200
+    /// GET /v5/market/time — проверяем HTTP 200
     async fn check_connection(&mut self) -> Result<()> {
-        let url = self.build_url("v5/public/time");
+        let url = self.build_url("v5/market/time");
         tracing::info!("PING BYBIT → GET {}", url);
 
         let resp = self.client.get(&url).send().await?;
