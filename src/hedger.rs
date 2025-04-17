@@ -1,4 +1,4 @@
-use crate::exchange::Exchange;
+use crate::exchange::Bybit;
 use crate::models::*;
 
 pub struct Hedger<E: Exchange> { pub exchange: E, pub config: crate::config::Config }

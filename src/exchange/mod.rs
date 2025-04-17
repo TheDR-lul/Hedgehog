@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use crate::models::*;
 
 #[async_trait]
-pub trait Exchange {
+pub trait Bybit {
     async fn check_connection(&mut self) -> anyhow::Result<()>;
     async fn get_balance(&self, symbol: &str) -> anyhow::Result<Balance>;
     async fn get_mmr(&self, symbol: &str) -> anyhow::Result<f64>;
