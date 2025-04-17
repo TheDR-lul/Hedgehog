@@ -1,6 +1,8 @@
-use serde::Deserialize;
-use std::fs;
+// src/config.rs
 use anyhow::Result;
+use config::{Config as ConfigLoader, Environment, File};
+use serde::Deserialize;
+use std::env;
 
 #[derive(Deserialize, Debug)]
 pub struct Config {
@@ -14,8 +16,14 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let s = fs::read_to_string("Config.toml")?;
-        let cfg = toml::from_str(&s)?;
+        let file_path = env::var("HEDGER_CONFIG").unwrap_or_else(|_| "Config.toml".into());
+
+        let loader = ConfigLoader::builder()
+            .add_source(File::with_name(&file_path).required(false))
+            .add_source(Environment::with_prefix("HEDGER").separator("__"))
+            .build()?;
+
+        let cfg = loader.try_deserialize::<Config>()?;
         Ok(cfg)
     }
 }
