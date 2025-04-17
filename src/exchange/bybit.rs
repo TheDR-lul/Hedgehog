@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Клиент Bybit — продакшн или тестнет по флагу
+/// Клиент Bybit (prod / testnet)
 #[derive(Debug, Clone)]
 pub struct Bybit {
     api_key:    String,
@@ -21,7 +21,7 @@ pub struct Bybit {
 }
 
 impl Bybit {
-    /// key/secret — ваши ключи; use_testnet = true → тестовый API
+    /// key/secret – API‑ключи, use_testnet – переключение на sandbox
     pub fn new(key: &str, secret: &str, use_testnet: bool) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(10))
@@ -35,26 +35,23 @@ impl Bybit {
         };
 
         Self {
-            api_key:    key.to_string(),
-            api_secret: secret.to_string(),
+            api_key:    key.to_owned(),
+            api_secret: secret.to_owned(),
             client,
             base_url,
         }
     }
 
-    fn sign(&self, params: &mut Vec<(&str, String)>) {
-        let to_sign = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<_>>()
-            .join("&");
+    /// Генерация подписи по V5 схеме: payload = timestamp + api_key + recv_window + query
+    fn sign_v5(&self, timestamp: &str, recv_window: &str, query: &str) -> String {
+        let payload = format!("{timestamp}{}{}{}", self.api_key, recv_window, query);
         let mut mac = HmacSha256::new_from_slice(self.api_secret.as_bytes()).unwrap();
-        mac.update(to_sign.as_bytes());
-        let signature = hex::encode(mac.finalize().into_bytes());
-        params.push(("sign", signature));
+        mac.update(payload.as_bytes());
+        hex::encode(mac.finalize().into_bytes())
     }
 
-    fn timestamp() -> String {
+    /// Текущий UNIX‑timestamp в миллисекундах
+    fn timestamp_ms() -> String {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -65,7 +62,7 @@ impl Bybit {
 
 #[async_trait::async_trait]
 impl Exchange for Bybit {
-    /// Пинг через V5 публичный эндпоинт
+    /// Проверяем подключение к публичному V5-эндпоинту
     async fn check_connection(&mut self) -> Result<()> {
         let url = self.base_url.join("/v5/public/time")?;
         let resp = self.client.get(url).send().await?;
@@ -76,51 +73,79 @@ impl Exchange for Bybit {
         }
     }
 
-    /// Баланс по символу (USDT и т.д.)
+    /// Получаем баланс по V5 API (UNIFIED wallet)
     async fn get_balance(&self, symbol: &str) -> Result<Balance> {
         #[derive(Deserialize)]
-        struct Resp {
-            ret_code: i32,
-            result:   std::collections::HashMap<String, Data>,
+        struct V5Resp {
+            retCode: i32,
+            retMsg:  String,
+            result:  WalletBalanceResult,
         }
         #[derive(Deserialize)]
-        struct Data {
-            available_balance: String,
-            locked_balance:    String,
+        struct WalletBalanceResult {
+            list: Vec<CoinBalance>,
+        }
+        #[derive(Deserialize)]
+        struct CoinBalance {
+            coin:                  String,
+            totalAvailableBalance: String,
+            // другие поля, если надо
         }
 
-        let mut params = vec![
-            ("api_key",    self.api_key.clone()),
-            ("timestamp",  Self::timestamp()),
-            ("recv_window","5000".into()),
-        ];
-        self.sign(&mut params);
+        let ts = Self::timestamp_ms();
+        let recv = "5000";
+        let query = format!("accountType=UNIFIED&coin={symbol}");
+        let sign  = self.sign_v5(&ts, recv, &query);
 
-        let url = self.base_url.join("/v2/private/wallet/balance")?;
+        let url = self.base_url.join("/v5/account/wallet-balance")?;
         let resp = self.client
             .get(url)
-            .query(&params)
+            .header("X-BAPI-API-KEY",     &self.api_key)
+            .header("X-BAPI-TIMESTAMP",   &ts)
+            .header("X-BAPI-RECV-WINDOW", recv)
+            .header("X-BAPI-SIGN",        sign)
+            .query(&[("accountType","UNIFIED"),("coin",symbol)])
             .send().await?
-            .json::<Resp>().await?;
+            .json::<V5Resp>().await?;
 
-        if resp.ret_code != 0 {
-            return Err(anyhow!("Bybit balance error: code {}", resp.ret_code));
+        if resp.retCode != 0 {
+            return Err(anyhow!("Bybit balance error {}: {}", resp.retCode, resp.retMsg));
         }
-        let entry = resp.result.get(symbol)
-            .ok_or_else(|| anyhow!("Symbol {} not found in balance", symbol))?;
-        let free   = entry.available_balance.parse::<f64>()?;
-        let locked = entry.locked_balance.parse::<f64>()?;
-        Ok(Balance { free, locked })
+        let coin = resp.result.list.into_iter()
+            .find(|c| c.coin.eq_ignore_ascii_case(symbol))
+            .ok_or_else(|| anyhow!("No balance entry for {}", symbol))?;
+
+        let free = coin.totalAvailableBalance.parse::<f64>()?;
+        Ok(Balance { free, locked: 0.0 })
     }
 
-    async fn get_mmr(&self, _symbol: &str) -> Result<f64>           { unimplemented!() }
-    async fn get_funding_rate(&self, _symbol: &str, _days: u16) -> Result<f64> { unimplemented!() }
+    async fn get_mmr(&self, _symbol: &str) -> Result<f64> {
+        unimplemented!()
+    }
+
+    async fn get_funding_rate(&self, _symbol: &str, _days: u16) -> Result<f64> {
+        unimplemented!()
+    }
+
     async fn place_limit_order(
-        &self, _symbol: &str, _side: OrderSide, _qty: f64, _price: f64
-    ) -> Result<Order> { unimplemented!() }
+        &self,
+        _symbol: &str,
+        _side: OrderSide,
+        _qty: f64,
+        _price: f64,
+    ) -> Result<Order> {
+        unimplemented!()
+    }
+
     async fn place_market_order(
-        &self, _symbol: &str, _side: OrderSide, _qty: f64
-    ) -> Result<Order> { unimplemented!() }
+        &self,
+        _symbol: &str,
+        _side: OrderSide,
+        _qty: f64,
+    ) -> Result<Order> {
+        unimplemented!()
+    }
+
     async fn cancel_order(&self, _symbol: &str, _order_id: &str) -> Result<()> {
         unimplemented!()
     }
