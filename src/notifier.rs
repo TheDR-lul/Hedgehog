@@ -15,14 +15,8 @@ pub enum Command {
 
 pub async fn handler(cx: UpdateWithCx<AutoSend<Bot>, Message>, cmd: Command, exchange: &impl Exchange) {
     match cmd {
-        Command::Status => {
-            cx.answer("Бот работает").await.unwrap();
-        },
-        Command::Hedge(args) => {
-            // TODO: парсинг args и запуск hedger
-        },
-        Command::Unhedge(args) => {
-            // TODO
-        },
+        Command::Status => cx.answer("Бот работает").await.unwrap(),
+        Command::Hedge(_) => { /* TODO */ },
+        Command::Unhedge(_) => { /* TODO */ },
     }
 }

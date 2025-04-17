@@ -1,3 +1,5 @@
+// src/main.rs
+
 mod config;
 mod exchange;
 mod hedger;
@@ -6,6 +8,7 @@ mod logger;
 mod models;
 mod utils;
 mod storage;
+mod telegram;
 
 use anyhow::Result;
 use tokio::sync::OnceCell;
@@ -15,23 +18,20 @@ static DB: OnceCell<storage::Db> = OnceCell::const_new();
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Загружаем настройки (в том числе sqlite_path)
     let cfg = config::Config::load()?;
     logger::init(&cfg);
-    let db = storage::Db::connect(&cfg.db_url).await?;
+
+    // Подключаемся к локальной SQLite (папка и файл будут созданы автоматически)
+    let db = storage::Db::connect(&cfg.sqlite_path).await?;
     DB.set(db).unwrap();
+
+    // Инициализируем Telegram-бота и API биржи
     let bot = Bot::new(&cfg.telegram_token).auto_send();
-
     let mut exchange = exchange::Bybit::new(&cfg.bybit_api_key, &cfg.bybit_api_secret);
-    match exchange.check_connection().await {
-        Ok(_) => println!("Bybit API OK"),
-        Err(err) => eprintln!("Bybit API error: {}", err),
-    }
+    exchange.check_connection().await?;
 
-    teloxide::commands_repl(bot,
-        move |msg, cmd: notifier::Command| async move {
-            notifier::handler(msg, cmd, &exchange).await;
-        }
-    ).await;
-
+    // Запускаем Telegram‑логику
+    telegram::run(bot, exchange).await;
     Ok(())
 }
