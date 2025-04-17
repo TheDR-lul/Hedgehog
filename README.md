@@ -126,5 +126,5 @@ hedger_bot/
 
 ## License
 
-MIT © Your Name
+MIT © Anton Kalantarenko
 
