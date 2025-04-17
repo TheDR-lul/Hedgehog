@@ -11,55 +11,61 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Клиент Bybit (prod/testnet или региональный домен)
+/// Клиент Bybit (spot/futures), умеет работать с любым base_url
 #[derive(Debug, Clone)]
 pub struct Bybit {
-    api_key:    String,
+    api_key: String,
     api_secret: String,
-    client:     Client,
-    base_url:   Url,
+    client: Client,
+    base_url: Url,
 }
 
 impl Bybit {
-    /// Конструктор: ключи + полный base_url (например, "https://api-testnet.bybit.com")
-    pub fn new(key: &str, secret: &str, base_url: &str) -> Self {
+    /// Создаёт клиента, разбирая строку `base_url`
+    pub fn new(key: &str, secret: &str, base_url: &str) -> Result<Self> {
+        let base_url = Url::parse(base_url)
+            .map_err(|e| anyhow!("Invalid Bybit base URL `{}`: {}", base_url, e))?;
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-            .expect("Failed to build HTTP client");
-        let base_url = Url::parse(base_url).expect("Invalid Bybit base_url in config");
+            .map_err(|e| anyhow!("Failed to build HTTP client: {}", e))?;
 
-        Self {
-            api_key:    key.to_owned(),
-            api_secret: secret.to_owned(),
+        Ok(Self {
+            api_key: key.to_string(),
+            api_secret: secret.to_string(),
             client,
             base_url,
-        }
+        })
     }
 
-    /// Подпись для V5: timestamp + api_key + recv_window + query
-    fn sign_v5(&self, timestamp: &str, recv_window: &str, query: &str) -> String {
-        let payload = format!("{timestamp}{}{}{}", self.api_key, recv_window, query);
-        let mut mac = HmacSha256::new_from_slice(self.api_secret.as_bytes()).unwrap();
-        mac.update(payload.as_bytes());
-        hex::encode(mac.finalize().into_bytes())
-    }
-
-    fn timestamp_ms() -> String {
+    /// Текущий миллисекундный таймстамп
+    fn timestamp() -> String {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis()
             .to_string()
     }
+
+    /// Подписывает параметры HMAC-SHA256 и добавляет параметр `sign`
+    fn sign(&self, params: &mut Vec<(&str, String)>) {
+        let payload = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<_>>()
+            .join("&");
+        let mut mac = HmacSha256::new_from_slice(self.api_secret.as_bytes()).unwrap();
+        mac.update(payload.as_bytes());
+        let signature = hex::encode(mac.finalize().into_bytes());
+        params.push(("sign", signature));
+    }
 }
 
 #[async_trait::async_trait]
 impl Exchange for Bybit {
-    /// Правильный эндпоинт Server Time: `/v5/market/time` :contentReference[oaicite:0]{index=0}
+    /// Проверяем соединение через V5 `/v5/public/time`
     async fn check_connection(&mut self) -> Result<()> {
-        let url = self.base_url.join("/v5/market/time")?;
-        println!("PING BYBIT AT {}", url);
+        let url = self.base_url.join("/v5/public/time")?;
         let resp = self.client.get(url).send().await?;
         if resp.status().is_success() {
             Ok(())
@@ -68,66 +74,65 @@ impl Exchange for Bybit {
         }
     }
 
-    /// Баланс через `/v5/account/wallet-balance`
+    /// Баланс по символу (например, "USDT")
     async fn get_balance(&self, symbol: &str) -> Result<Balance> {
         #[derive(Deserialize)]
-        struct V5Resp {
-            #[serde(rename = "retCode")]
+        struct Resp {
             ret_code: i32,
-            #[serde(rename = "retMsg")]
-            ret_msg:  String,
-            result:    WalletBalanceResult,
+            result: std::collections::HashMap<String, Data>,
         }
         #[derive(Deserialize)]
-        struct WalletBalanceResult {
-            list: Vec<CoinBalance>,
-        }
-        #[derive(Deserialize)]
-        struct CoinBalance {
-            coin:                    String,
-            #[serde(rename = "totalAvailableBalance")]
-            total_available_balance: String,
+        struct Data {
+            available_balance: String,
+            locked_balance:    String,
         }
 
-        let ts    = Self::timestamp_ms();
-        let recv  = "5000";
-        let query = format!("accountType=UNIFIED&coin={symbol}");
-        let sign  = self.sign_v5(&ts, recv, &query);
+        let mut params = vec![
+            ("api_key",     self.api_key.clone()),
+            ("timestamp",   Self::timestamp()),
+            ("recv_window", "5000".into()),
+        ];
+        self.sign(&mut params);
 
-        let url = self.base_url.join("/v5/account/wallet-balance")?;
-        let resp = self.client
+        let url = self.base_url.join("/v2/private/wallet/balance")?;
+        let resp: Resp = self
+            .client
             .get(url)
-            .header("X-BAPI-API-KEY",     &self.api_key)
-            .header("X-BAPI-TIMESTAMP",   &ts)
-            .header("X-BAPI-RECV-WINDOW", recv)
-            .header("X-BAPI-SIGN",        sign)
-            .query(&[("accountType","UNIFIED"),("coin",symbol)])
-            .send().await?
-            .json::<V5Resp>().await?;
+            .query(&params)
+            .send()
+            .await?
+            .json()
+            .await?;
 
         if resp.ret_code != 0 {
-            return Err(anyhow!("Bybit balance error {}: {}", resp.ret_code, resp.ret_msg));
+            return Err(anyhow!("Bybit balance error: code {}", resp.ret_code));
         }
+        let entry = resp.result.get(symbol)
+            .ok_or_else(|| anyhow!("Symbol {} not found in balance", symbol))?;
+        let free   = entry.available_balance.parse()?;
+        let locked = entry.locked_balance.parse()?;
 
-        let coin = resp.result.list.into_iter()
-            .find(|c| c.coin.eq_ignore_ascii_case(symbol))
-            .ok_or_else(|| anyhow!("No balance entry for {}", symbol))?;
-
-        let free = coin.total_available_balance.parse::<f64>()?;
-        Ok(Balance { free, locked: 0.0 })
+        Ok(Balance { free, locked })
     }
 
-    async fn get_mmr(&self, _symbol: &str) -> Result<f64>            { unimplemented!() }
-    async fn get_funding_rate(&self, _symbol: &str, _days: u16) -> Result<f64> { unimplemented!() }
-
+    async fn get_mmr(&self, _symbol: &str) -> Result<f64> {
+        unimplemented!()
+    }
+    async fn get_funding_rate(&self, _symbol: &str, _days: u16) -> Result<f64> {
+        unimplemented!()
+    }
     async fn place_limit_order(
-        &self, _symbol: &str, _side: OrderSide, _qty: f64, _price: f64
-    ) -> Result<Order> { unimplemented!() }
-
-    async fn place_market_order(
-        &self, _symbol: &str, _side: OrderSide, _qty: f64
-    ) -> Result<Order> { unimplemented!() }
-
+        &self,
+        _symbol: &str,
+        _side: OrderSide,
+        _qty: f64,
+        _price: f64,
+    ) -> Result<Order> {
+        unimplemented!()
+    }
+    async fn place_market_order(&self, _symbol: &str, _side: OrderSide, _qty: f64) -> Result<Order> {
+        unimplemented!()
+    }
     async fn cancel_order(&self, _symbol: &str, _order_id: &str) -> Result<()> {
         unimplemented!()
     }
