@@ -1,33 +1,41 @@
 // src/exchange/bybit.rs
 
-use super::{Exchange};
+use super::Exchange;
 use crate::exchange::types::{Balance, OrderSide, Order};
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use reqwest::{Client, Url};
 use serde::Deserialize;
+use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 type HmacSha256 = Hmac<Sha256>;
 
-#[derive(Debug, Clone)] 
+/// Клиент Bybit — продакшн или тестнет по флагу
+#[derive(Debug, Clone)]
 pub struct Bybit {
-    api_key: String,
+    api_key:    String,
     api_secret: String,
-    client: Client,
-    base_url: Url,
+    client:     Client,
+    base_url:   Url,
 }
 
 impl Bybit {
-    pub fn new(key: &str, secret: &str) -> Self {
+    /// key/secret — ваши ключи; use_testnet = true → тестовый API
+    pub fn new(key: &str, secret: &str, use_testnet: bool) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .expect("Failed to build HTTP client");
-        let base_url = Url::parse("https://api.bybit.com").unwrap();
+
+        let base_url = if use_testnet {
+            Url::parse("https://api-testnet.bybit.com").unwrap()
+        } else {
+            Url::parse("https://api.bybit.com").unwrap()
+        };
+
         Self {
-            api_key: key.to_string(),
+            api_key:    key.to_string(),
             api_secret: secret.to_string(),
             client,
             base_url,
@@ -35,8 +43,9 @@ impl Bybit {
     }
 
     fn sign(&self, params: &mut Vec<(&str, String)>) {
-        let to_sign = params.iter()
-            .map(|(k,v)| format!("{}={}", k, v))
+        let to_sign = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
             .collect::<Vec<_>>()
             .join("&");
         let mut mac = HmacSha256::new_from_slice(self.api_secret.as_bytes()).unwrap();
@@ -56,8 +65,9 @@ impl Bybit {
 
 #[async_trait::async_trait]
 impl Exchange for Bybit {
+    /// Пинг через V5 публичный эндпоинт
     async fn check_connection(&mut self) -> Result<()> {
-        let url = self.base_url.join("/v2/public/time")?;
+        let url = self.base_url.join("/v5/public/time")?;
         let resp = self.client.get(url).send().await?;
         if resp.status().is_success() {
             Ok(())
@@ -66,21 +76,29 @@ impl Exchange for Bybit {
         }
     }
 
+    /// Баланс по символу (USDT и т.д.)
     async fn get_balance(&self, symbol: &str) -> Result<Balance> {
         #[derive(Deserialize)]
-        struct Resp { ret_code: i32, result: std::collections::HashMap<String, Data> }
+        struct Resp {
+            ret_code: i32,
+            result:   std::collections::HashMap<String, Data>,
+        }
         #[derive(Deserialize)]
-        struct Data { available_balance: String, locked_balance: String }
+        struct Data {
+            available_balance: String,
+            locked_balance:    String,
+        }
 
         let mut params = vec![
-            ("api_key", self.api_key.clone()),
-            ("timestamp", Self::timestamp()),
-            ("recv_window", "5000".into()),
+            ("api_key",    self.api_key.clone()),
+            ("timestamp",  Self::timestamp()),
+            ("recv_window","5000".into()),
         ];
         self.sign(&mut params);
 
         let url = self.base_url.join("/v2/private/wallet/balance")?;
-        let resp = self.client.get(url)
+        let resp = self.client
+            .get(url)
             .query(&params)
             .send().await?
             .json::<Resp>().await?;
@@ -90,14 +108,20 @@ impl Exchange for Bybit {
         }
         let entry = resp.result.get(symbol)
             .ok_or_else(|| anyhow!("Symbol {} not found in balance", symbol))?;
-        let free = entry.available_balance.parse::<f64>()?;
+        let free   = entry.available_balance.parse::<f64>()?;
         let locked = entry.locked_balance.parse::<f64>()?;
         Ok(Balance { free, locked })
     }
 
-    async fn get_mmr(&self, _symbol: &str) -> Result<f64> { unimplemented!() }
+    async fn get_mmr(&self, _symbol: &str) -> Result<f64>           { unimplemented!() }
     async fn get_funding_rate(&self, _symbol: &str, _days: u16) -> Result<f64> { unimplemented!() }
-    async fn place_limit_order(&self, _symbol: &str, _side: OrderSide, _qty: f64, _price: f64) -> Result<Order> { unimplemented!() }
-    async fn place_market_order(&self, _symbol: &str, _side: OrderSide, _qty: f64) -> Result<Order> { unimplemented!() }
-    async fn cancel_order(&self, _symbol: &str, _order_id: &str) -> Result<()> { unimplemented!() }
+    async fn place_limit_order(
+        &self, _symbol: &str, _side: OrderSide, _qty: f64, _price: f64
+    ) -> Result<Order> { unimplemented!() }
+    async fn place_market_order(
+        &self, _symbol: &str, _side: OrderSide, _qty: f64
+    ) -> Result<Order> { unimplemented!() }
+    async fn cancel_order(&self, _symbol: &str, _order_id: &str) -> Result<()> {
+        unimplemented!()
+    }
 }
