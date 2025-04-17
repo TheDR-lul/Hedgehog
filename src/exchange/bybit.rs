@@ -1,5 +1,7 @@
-use super::Exchange;
-use crate::exchange::types::*;
+// src/exchange/bybit.rs
+
+use super::{Exchange};
+use crate::exchange::types::{Balance, OrderSide, Order};
 use anyhow::{Result, anyhow};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -21,15 +23,22 @@ impl Bybit {
     pub fn new(key: &str, secret: &str) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(10))
-            .build().unwrap();
+            .build()
+            .expect("Failed to build HTTP client");
         let base_url = Url::parse("https://api.bybit.com").unwrap();
-        Self { api_key: key.into(), api_secret: secret.into(), client, base_url }
+        Self {
+            api_key: key.to_string(),
+            api_secret: secret.to_string(),
+            client,
+            base_url,
+        }
     }
 
     fn sign(&self, params: &mut Vec<(&str, String)>) {
         let to_sign = params.iter()
             .map(|(k,v)| format!("{}={}", k, v))
-            .collect::<Vec<_>>().join("&");
+            .collect::<Vec<_>>()
+            .join("&");
         let mut mac = HmacSha256::new_from_slice(self.api_secret.as_bytes()).unwrap();
         mac.update(to_sign.as_bytes());
         let signature = hex::encode(mac.finalize().into_bytes());
@@ -37,7 +46,11 @@ impl Bybit {
     }
 
     fn timestamp() -> String {
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis().to_string()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .to_string()
     }
 }
 
@@ -46,9 +59,13 @@ impl Exchange for Bybit {
     async fn check_connection(&mut self) -> Result<()> {
         let url = self.base_url.join("/v2/public/time")?;
         let resp = self.client.get(url).send().await?;
-        if resp.status().is_success() { Ok(()) }
-        else { Err(anyhow!("Bybit ping failed: {}", resp.status())) }
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(anyhow!("Bybit ping failed: {}", resp.status()))
+        }
     }
+
     async fn get_balance(&self, symbol: &str) -> Result<Balance> {
         #[derive(Deserialize)]
         struct Resp { ret_code: i32, result: std::collections::HashMap<String, Data> }
@@ -61,12 +78,23 @@ impl Exchange for Bybit {
             ("recv_window", "5000".into()),
         ];
         self.sign(&mut params);
+
         let url = self.base_url.join("/v2/private/wallet/balance")?;
-        let resp = self.client.get(url).query(&params).send().await?.json::<Resp>().await?;
-        if resp.ret_code != 0 { return Err(anyhow!("Bybit balance error code {}", resp.ret_code)); }
-        let entry = resp.result.get(symbol).ok_or_else(|| anyhow!("Balance for {} not found", symbol))?;
-        Ok(Balance { free: entry.available_balance.parse()?, locked: entry.locked_balance.parse()? })
+        let resp = self.client.get(url)
+            .query(&params)
+            .send().await?
+            .json::<Resp>().await?;
+
+        if resp.ret_code != 0 {
+            return Err(anyhow!("Bybit balance error: code {}", resp.ret_code));
+        }
+        let entry = resp.result.get(symbol)
+            .ok_or_else(|| anyhow!("Symbol {} not found in balance", symbol))?;
+        let free = entry.available_balance.parse::<f64>()?;
+        let locked = entry.locked_balance.parse::<f64>()?;
+        Ok(Balance { free, locked })
     }
+
     async fn get_mmr(&self, _symbol: &str) -> Result<f64> { unimplemented!() }
     async fn get_funding_rate(&self, _symbol: &str, _days: u16) -> Result<f64> { unimplemented!() }
     async fn place_limit_order(&self, _symbol: &str, _side: OrderSide, _qty: f64, _price: f64) -> Result<Order> { unimplemented!() }

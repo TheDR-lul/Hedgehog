@@ -1,12 +1,10 @@
-// src/telegram.rs
-
 use teloxide::prelude::*;
-use teloxide::commands::repl;                // <- импорт repl
+use teloxide::commands::repl;
 use teloxide::utils::command::BotCommands;
 use crate::notifier::{Command, handler};
 use crate::exchange::Exchange;
 
-/// Запускает бот на основе встроенного REPL команд
+/// Запускает бот на основе REPL команд
 pub async fn run<E>(bot: AutoSend<Bot>, exchange: E)
 where
     E: Exchange + Send + Sync + Clone + 'static,

@@ -15,6 +15,7 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Result<Self> {
+        // Файл можно указать через ENV HEDGER_CONFIG, иначе — Config.toml
         let file = env::var("HEDGER_CONFIG").unwrap_or_else(|_| "Config.toml".into());
         let loader = Loader::builder()
             .add_source(File::with_name(&file).required(false))

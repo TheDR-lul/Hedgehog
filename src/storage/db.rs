@@ -1,9 +1,11 @@
 // src/storage/db.rs
+
 use sqlx::SqlitePool;
 use anyhow::{Result, Context};
 use std::path::Path;
 
 /// Локальная база данных через SQLite
+#[derive(Debug)]
 pub struct Db {
     pub pool: SqlitePool,
 }
@@ -17,10 +19,10 @@ impl Db {
                 .with_context(|| format!("Не удалось создать директорию для БД: {:?}", dir))?;
         }
 
-        // Формируем URL для sqlite
+        // Формируем URL для sqlite (создаст файл, если его нет)
         let db_url = format!("sqlite://{}", path);
 
-        // Подключаемся к базе (создаст файл, если его нет)
+        // Подключаемся к базе
         let pool = SqlitePool::connect(&db_url).await?;
         Ok(Db { pool })
     }
