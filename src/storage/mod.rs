@@ -1,3 +1,3 @@
 mod schema;
-mod db_impl;
-pub use db_impl::Db;
+mod db;
+pub use db::Db;

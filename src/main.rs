@@ -6,32 +6,55 @@ mod logger;
 mod models;
 mod utils;
 mod storage;
+mod telegram;
 
 use anyhow::Result;
 use tokio::sync::OnceCell;
-use teloxide::prelude::*;
+use teloxide::Bot;
+
+use crate::config::Config;
+use crate::exchange::{Bybit, Exchange};
 
 static DB: OnceCell<storage::Db> = OnceCell::const_new();
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cfg = config::Config::load()?;
+    // 1) Конфиг и логгер
+    let cfg = Config::load()?;
     logger::init(&cfg);
-    let db = storage::Db::connect(&cfg.db_url).await?;
+
+    // 2) Подключение к SQLite
+    let db = storage::Db::connect(&cfg.sqlite_path).await?;
     DB.set(db).unwrap();
-    let bot = Bot::new(&cfg.telegram_token).auto_send();
 
-    let mut exchange = exchange::Bybit::new(&cfg.bybit_api_key, &cfg.bybit_api_secret);
-    match exchange.check_connection().await {
-        Ok(_) => println!("Bybit API OK"),
-        Err(err) => eprintln!("Bybit API error: {}", err),
-    }
+    // 3) Telegram Bot
+    let bot = Bot::new(&cfg.telegram_token);
 
-    teloxide::commands_repl(bot,
-        move |msg, cmd: notifier::Command| async move {
-            notifier::handler(msg, cmd, &exchange).await;
-        }
-    ).await;
+    // 4) Выбираем base_url
+    let base_url: &str = cfg
+        .bybit_base_url
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            if cfg.use_testnet {
+                "https://api-testnet.bybit.com"
+            } else {
+                "https://api.bybit.com"
+            }
+        });
+    println!("Using Bybit base URL: {}", base_url);
 
+    // 5) Создаём клиента биржи
+    let mut exchange = Bybit::new(
+        &cfg.bybit_api_key,
+        &cfg.bybit_api_secret,
+        base_url,
+    )?;
+
+    // 6) Пингуем Bybit
+    exchange.check_connection().await?;
+
+    // 7) Стартуем Telegram‑диспетчер
+    telegram::run(bot, exchange).await;
     Ok(())
 }

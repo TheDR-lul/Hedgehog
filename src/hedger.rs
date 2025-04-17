@@ -1,16 +1,26 @@
-use crate::exchange::Exchange;
-use crate::models::*;
+// src/hedger.rs
 
+use crate::exchange::Exchange;
+use crate::models::HedgeRequest;
+use anyhow::Result;
+
+/// Основная логика хеджирования
 pub struct Hedger<E: Exchange> {
-    pub exchange: E,
-    pub config: crate::config::Config,
+    exchange: E,
 }
 
-impl<E: Exchange + Send + Sync> Hedger<E> {
-    pub async fn run_hedge(&self, req: HedgeRequest) -> anyhow::Result<()> {
-        Ok(())
+impl<E: Exchange + Clone + Send + Sync> Hedger<E> {
+    pub fn new(exchange: E) -> Self {
+        Self { exchange }
     }
-    pub async fn run_unhedge(&self, req: UnhedgeRequest) -> anyhow::Result<()> {
-        Ok(())
+
+    /// Рассчитывает объёмы для хеджирования и возвращает (spot_qty, futures_qty)
+    pub async fn run_hedge(&self, req: HedgeRequest) -> Result<(f64, f64)> {
+        // Получаем поддерживающую маржу (MMR)
+        let mmr = self.exchange.get_mmr(&req.symbol).await?;
+        // Вычисляем объёмы
+        let spot_qty = req.sum / ((1.0 + req.volatility) * (1.0 + mmr));
+        let futures_qty = req.sum - spot_qty;
+        Ok((spot_qty, futures_qty))
     }
 }

@@ -1,29 +1,36 @@
-// src/config.rs
-use anyhow::Result;
-use config::{Config as ConfigLoader, Environment, File};
 use serde::Deserialize;
 use std::env;
+use anyhow::Result;
+use config::{Config as Loader, Environment, File};
 
 #[derive(Deserialize, Debug)]
 pub struct Config {
-    pub bybit_api_key: String,
+    // Bybit
+    pub bybit_api_key:    String,
     pub bybit_api_secret: String,
-    pub db_url: String,
-    pub telegram_token: String,
+    /// Если true — используем тестнет, иначе — прод
+    pub use_testnet:      bool,
+    /// Явно указать любой endpoint, вместо авто‑выбора
+    pub bybit_base_url:   Option<String>,
+
+    // SQLite
+    pub sqlite_path:      String,
+
+    // Telegram
+    pub telegram_token:   String,
+
+    // Стратегия
     pub default_volatility: f64,
-    pub offset_points: u32,
+    pub offset_points:      u32,
 }
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let file_path = env::var("HEDGER_CONFIG").unwrap_or_else(|_| "Config.toml".into());
-
-        let loader = ConfigLoader::builder()
-            .add_source(File::with_name(&file_path).required(false))
+        let file = env::var("HEDGER_CONFIG").unwrap_or_else(|_| "Config.toml".into());
+        let loader = Loader::builder()
+            .add_source(File::with_name(&file).required(false))
             .add_source(Environment::with_prefix("HEDGER").separator("__"))
             .build()?;
-
-        let cfg = loader.try_deserialize::<Config>()?;
-        Ok(cfg)
+        Ok(loader.try_deserialize()?)
     }
 }
