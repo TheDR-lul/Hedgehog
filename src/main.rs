@@ -10,27 +10,30 @@ mod telegram;
 
 use anyhow::Result;
 use tokio::sync::OnceCell;
-use teloxide::{Bot, prelude::*};
-use crate::exchange::Bybit;
+use teloxide::Bot;
+
+use crate::exchange::{Bybit, Exchange};   // импорт трейта!
 
 static DB: OnceCell<storage::Db> = OnceCell::const_new();
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Загружаем конфиг и инициализируем логгер
+    // 1) конфиг и логгер
     let cfg = config::Config::load()?;
     logger::init(&cfg);
 
-    // Подключаемся к SQLite (создаст файл/папку)
+    // 2) SQLite
     let db = storage::Db::connect(&cfg.sqlite_path).await?;
     DB.set(db).unwrap();
 
-    // Инициализируем бота и биржевой клиент
-    let bot = Bot::builder(&cfg.telegram_token).build().auto_send();
+    // 3) Telegram‑бот (нет метода builder в v0.15)
+    let bot = Bot::new(&cfg.telegram_token);
+
+    // 4) клиент биржи + ping
     let mut exchange = Bybit::new(&cfg.bybit_api_key, &cfg.bybit_api_secret);
     exchange.check_connection().await?;
 
-    // Запускаем Telegram‑логику
+    // 5) запускаем диспетчер
     telegram::run(bot, exchange).await;
     Ok(())
 }

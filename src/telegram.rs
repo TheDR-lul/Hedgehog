@@ -1,20 +1,33 @@
+// src/telegram.rs
+
 use teloxide::prelude::*;
-use teloxide::commands::repl;
-use teloxide::utils::command::BotCommands;
-use crate::notifier::{Command, handler};
+use teloxide::dptree;
+use crate::notifier::{self, Command};
 use crate::exchange::Exchange;
 
-/// Запускает бот на основе REPL команд
-pub async fn run<E>(bot: AutoSend<Bot>, exchange: E)
+/// Запускает Telegram‑бота
+pub async fn run<E>(bot: Bot, exchange: E)
 where
-    E: Exchange + Send + Sync + Clone + 'static,
+    E: Exchange + Clone + Send + Sync + 'static,
 {
-    repl(bot, "hedgehog_bot", move |cx, cmd: Command| {
-        let ex = exchange.clone();
-        async move {
-            handler(cx, cmd, &ex).await;
-            Ok(())
-        }
-    })
-    .await;
+    // Ветка, реагирующая только на сообщения‑команды
+    let commands_handler = Update::filter_message()
+        .filter_command::<Command>()        // парсим текст в Command
+        .endpoint(move |bot: Bot, msg: Message, cmd: Command| {
+            let ex = exchange.clone();
+            async move {
+                // передаём управление в notifier; ошибки логируем
+                if let Err(err) = notifier::handler(bot, msg, cmd, ex).await {
+                    tracing::error!("handler error: {:?}", err);
+                }
+                respond(())
+            }
+        });
+
+    // Dispatcher со встроенной обработкой Ctrl‑C
+    Dispatcher::builder(bot, dptree::entry().branch(commands_handler))
+        .enable_ctrlc_handler()
+        .build()
+        .dispatch()
+        .await;
 }

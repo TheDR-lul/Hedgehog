@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 type HmacSha256 = Hmac<Sha256>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)] 
 pub struct Bybit {
     api_key: String,
     api_secret: String,
