@@ -10,16 +10,26 @@ use crate::exchange::Exchange;
 use crate::hedger::Hedger;
 use crate::models::{HedgeRequest, UnhedgeRequest};
 
-/// Текстовые команды бота
+/// Все команды бота
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Доступные команды:")]
 pub enum Command {
+    /// Эта справка
     #[command(description = "показать это сообщение", aliases = ["help", "?"])]
     Help,
+    /// Проверить статус
     #[command(description = "показать статус")]
     Status,
+    /// Вывести весь баланс кошелька
+    #[command(description = "список всего баланса: /wallet")]
+    Wallet,
+    /// Баланс конкретной монеты
+    #[command(description = "баланс монеты: /balance <symbol>")]
+    Balance(String),
+    /// Хеджировать позицию
     #[command(description = "захеджировать: /hedge <sum> <symbol> <volatility %>")]
     Hedge(String),
+    /// Расхеджировать позицию
     #[command(description = "расхеджировать: /unhedge <sum> <symbol>")]
     Unhedge(String),
 }
@@ -41,9 +51,11 @@ where
             let keyboard = InlineKeyboardMarkup::new(vec![
                 vec![
                     InlineKeyboardButton::callback("✅ Статус", "status"),
-                    InlineKeyboardButton::callback("⚙️ Хедж",  "hedge"),
+                    InlineKeyboardButton::callback("💼 Баланс", "wallet"),
                 ],
                 vec![
+                    InlineKeyboardButton::callback("🪙 Баланс монеты", "balance"),
+                    InlineKeyboardButton::callback("⚙️ Хедж", "hedge"),
                     InlineKeyboardButton::callback("🛠 Расхедж", "unhedge"),
                 ],
             ]);
@@ -55,6 +67,27 @@ where
         Command::Status => {
             bot.send_message(chat_id, "✅ Бот запущен и подключён к бирже")
                 .await?;
+        }
+
+        Command::Wallet => {
+            let list = exchange.get_all_balances().await?;
+            let mut text = "💼 Баланс кошелька:\n".to_string();
+            for (coin, bal) in list {
+                if bal.free > 0.0 || bal.locked > 0.0 {
+                    text.push_str(&format!("• {}: free={:.4}, locked={:.4}\n", coin, bal.free, bal.locked));
+                }
+            }
+            bot.send_message(chat_id, text).await?;
+        }
+
+        Command::Balance(arg) => {
+            let coin = arg.trim().to_uppercase();
+            let bal = exchange.get_balance(&coin).await?;
+            bot.send_message(
+                chat_id,
+                format!("💰 {}: free={:.4}, locked={:.4}", coin, bal.free, bal.locked),
+            )
+            .await?;
         }
 
         Command::Hedge(args) => {
@@ -91,13 +124,25 @@ where
                 bot.send_message(chat_id, "✅ Бот запущен и подключён к бирже")
                     .await?;
             }
+            "wallet" => {
+                let list = exchange.get_all_balances().await?;
+                let mut text = "💼 Баланс кошелька:\n".to_string();
+                for (coin, bal) in list {
+                    if bal.free > 0.0 || bal.locked > 0.0 {
+                        text.push_str(&format!("• {}: free={:.4}, locked={:.4}\n", coin, bal.free, bal.locked));
+                    }
+                }
+                bot.send_message(chat_id, text).await?;
+            }
+            "balance" => {
+                bot.send_message(chat_id, "Введите: /balance <symbol>").await?;
+            }
             "hedge" => {
-                bot.send_message(chat_id, "Введите: /hedge <сумма> <символ> <волатильность %>")
+                bot.send_message(chat_id, "Введите: /hedge <sum> <symbol> <volatility %>")
                     .await?;
             }
             "unhedge" => {
-                bot.send_message(chat_id, "Введите: /unhedge <сумма> <символ>")
-                    .await?;
+                bot.send_message(chat_id, "Введите: /unhedge <sum> <symbol>").await?;
             }
             _ => {}
         }
@@ -158,8 +203,7 @@ async fn do_unhedge(
     bot: &Bot,
     chat_id: ChatId,
     args: String,
-) -> Result<()>
-{
+) -> Result<()> {
     let parts: Vec<_> = args.split_whitespace().collect();
     if parts.len() != 2 {
         bot.send_message(chat_id, "Использование: /unhedge <sum> <symbol>")

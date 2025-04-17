@@ -14,10 +14,10 @@ pub async fn run<E>(bot: Bot, exchange: E)
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
-    // Оборачиваем exchange в Arc, чтобы его можно было клонировать в замыканиях
+    // Оборачиваем exchange в Arc, чтобы можно было клонировать его в замыканиях
     let exchange = Arc::new(exchange);
 
-    // 1) Обработка текстовых команд /help, /status, /hedge, /unhedge
+    // 1) Текстовые команды
     let commands_branch = Update::filter_message()
         .filter_command::<Command>()
         .endpoint({
@@ -40,7 +40,7 @@ where
             }
         });
 
-    // 2) Обработка inline‑callback кнопок
+    // 2) Inline‑callbacks
     let callback_branch = Update::filter_callback_query()
         .endpoint({
             let exchange = exchange.clone();

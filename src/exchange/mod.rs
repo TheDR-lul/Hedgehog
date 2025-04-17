@@ -2,6 +2,7 @@
 
 pub mod types;
 pub mod bybit;
+use anyhow::Result;           
 
 pub use bybit::Bybit;
 pub use types::{Balance, OrderSide, Order};
@@ -21,6 +22,9 @@ pub trait Exchange {
 
     /// Получить среднюю ставку финансирования за заданное число дней
     async fn get_funding_rate(&self, symbol: &str, days: u16) -> anyhow::Result<f64>;
+
+    /// Получить все балансы
+    async fn get_all_balances(&self) -> Result<Vec<(String, Balance)>>;
 
     /// Разместить лимитный ордер
     async fn place_limit_order(
