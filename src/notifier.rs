@@ -81,13 +81,25 @@ where
         }
 
         Command::Balance(arg) => {
-            let coin = arg.trim().to_uppercase();
-            let bal = exchange.get_balance(&coin).await?;
-            bot.send_message(
-                chat_id,
-                format!("💰 {}: free={:.4}, locked={:.4}", coin, bal.free, bal.locked),
-            )
-            .await?;
+            let symbol = arg.trim();
+            if symbol.is_empty() {
+                bot.send_message(chat_id, "Использование: /balance <symbol>").await?;
+            } else {
+                let coin = symbol.to_uppercase();
+                match exchange.get_balance(&coin).await {
+                    Ok(bal) => {
+                        bot.send_message(
+                            chat_id,
+                            format!("💰 {}: free={:.4}, locked={:.4}", coin, bal.free, bal.locked),
+                        )
+                        .await?;
+                    }
+                    Err(_) => {
+                        bot.send_message(chat_id, format!("❌ Баланс {} не найден", coin))
+                            .await?;
+                    }
+                }
+            }
         }
 
         Command::Hedge(args) => {
@@ -112,17 +124,11 @@ where
     E: Exchange + Clone + Send + Sync + 'static,
 {
     if let Some(data) = q.data {
-        // берём ChatId из прикреплённого сообщения
-        let chat_id = q
-            .message
-            .unwrap()
-            .chat()
-            .id;
+        let chat_id = q.message.unwrap().chat().id;
 
         match data.as_str() {
             "status" => {
-                bot.send_message(chat_id, "✅ Бот запущен и подключён к бирже")
-                    .await?;
+                bot.send_message(chat_id, "✅ Бот запущен и подключён к бирже").await?;
             }
             "wallet" => {
                 let list = exchange.get_all_balances().await?;
@@ -183,7 +189,7 @@ where
     {
         Ok((spot, fut)) => {
             let text = format!(
-                "Хеджирование {} USDT {} при V={:.1}%:\n▸ Спот {:.4}\n▸ Фьючерс {:.4}",
+                "Хеджирование {} USDT {} при V={:.1}%:\n▸ Спот {:.4}\n▸ Фьючерс {:.4}",
                 sum,
                 symbol,
                 volatility * 100.0,
@@ -212,7 +218,6 @@ async fn do_unhedge(
     }
     let sum: f64 = parts[0].parse().unwrap_or(0.0);
     let symbol = parts[1].to_uppercase();
-    let _ = UnhedgeRequest { sum, symbol };
 
     bot.send_message(
         chat_id,
