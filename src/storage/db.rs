@@ -1,7 +1,6 @@
 // src/storage/db.rs
-
-use sqlx::SqlitePool;
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
+use sqlx::{Executor, SqlitePool};
 use std::path::Path;
 
 /// Локальная база данных через SQLite
@@ -11,19 +10,34 @@ pub struct Db {
 }
 
 impl Db {
-    /// Подключается к базе по пути `path`, создавая папку при необходимости
+    /// Подключается к базе по `path`, создаёт нужные каталоги,
+    /// файл `.db` и минимальную схему, если их ещё нет.
     pub async fn connect(path: &str) -> Result<Self> {
-        // Создаём родительскую директорию, если её нет
-        if let Some(dir) = Path::new(path).parent() {
+        // 1) создаём родительскую папку, если указана
+        if let Some(dir) = Path::new(path).parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)
-                .with_context(|| format!("Не удалось создать директорию для БД: {:?}", dir))?;
+                .with_context(|| format!("Не удалось создать директорию {:?}", dir))?;
         }
 
-        // Формируем URL для sqlite (создаст файл, если его нет)
-        let db_url = format!("sqlite://{}", path);
+        // 2) Подключаемся (SQLite сам создаст файл, если его нет)
+        let db_url = format!("sqlite:{}", path);
+        let pool   = SqlitePool::connect(&db_url).await?;
 
-        // Подключаемся к базе
-        let pool = SqlitePool::connect(&db_url).await?;
+        // 3) Минимальная схема — выполняется один раз
+        pool.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS orders (
+                id      TEXT    PRIMARY KEY,
+                symbol  TEXT    NOT NULL,
+                side    TEXT    NOT NULL,
+                qty     REAL    NOT NULL,
+                price   REAL,
+                ts      INTEGER NOT NULL
+            );
+            "#,
+        )
+        .await?;
+
         Ok(Db { pool })
     }
 }
