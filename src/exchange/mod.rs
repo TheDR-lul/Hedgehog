@@ -2,29 +2,32 @@
 
 pub mod types;
 pub mod bybit;
-use anyhow::Result;           
 
-pub use bybit::Bybit;
+pub use bybit::Bybit;                       // ← реэкспорт клиента Bybit
 pub use types::{Balance, OrderSide, Order};
 
+use anyhow::Result;
 use async_trait::async_trait;
+
+/// Статус исполнения ордера (если понадобится в других модулях)
+pub use types::OrderStatus;
 
 #[async_trait]
 pub trait Exchange {
     /// Проверить подключение к бирже
-    async fn check_connection(&mut self) -> anyhow::Result<()>;
+    async fn check_connection(&mut self) -> Result<()>;
 
-    /// Получить баланс по символу (например, "USDT")
-    async fn get_balance(&self, symbol: &str) -> anyhow::Result<Balance>;
+    /// Баланс по символу (например, "USDT")
+    async fn get_balance(&self, symbol: &str) -> Result<Balance>;
 
-    /// Получить поддерживающую маржу (MMR) по символу
-    async fn get_mmr(&self, symbol: &str) -> anyhow::Result<f64>;
-
-    /// Получить среднюю ставку финансирования за заданное число дней
-    async fn get_funding_rate(&self, symbol: &str, days: u16) -> anyhow::Result<f64>;
-
-    /// Получить все балансы
+    /// Все балансы
     async fn get_all_balances(&self) -> Result<Vec<(String, Balance)>>;
+
+    /// Поддерживающая маржа (MMR)
+    async fn get_mmr(&self, symbol: &str) -> Result<f64>;
+
+    /// Средняя ставка финансирования за N дней
+    async fn get_funding_rate(&self, symbol: &str, days: u16) -> Result<f64>;
 
     /// Разместить лимитный ордер
     async fn place_limit_order(
@@ -33,7 +36,7 @@ pub trait Exchange {
         side: OrderSide,
         qty: f64,
         price: f64,
-    ) -> anyhow::Result<Order>;
+    ) -> Result<Order>;
 
     /// Разместить рыночный ордер
     async fn place_market_order(
@@ -41,8 +44,14 @@ pub trait Exchange {
         symbol: &str,
         side: OrderSide,
         qty: f64,
-    ) -> anyhow::Result<Order>;
+    ) -> Result<Order>;
 
-    /// Отменить ордер по ID
-    async fn cancel_order(&self, symbol: &str, order_id: &str) -> anyhow::Result<()>;
+    /// Отменить ордер
+    async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<()>;
+
+    /// Получить текущую спотовую цену
+    async fn get_spot_price(&self, symbol: &str) -> Result<f64>;
+
+    /// Получить статус ордера (сколько исполнено и сколько осталось)
+    async fn get_order_status(&self, symbol: &str, order_id: &str) -> Result<OrderStatus>;
 }
