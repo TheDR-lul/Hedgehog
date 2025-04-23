@@ -387,7 +387,7 @@ impl Bybit {
     }
 
     /// Универсальный вызов Bybit API
-    async fn call_api<T: for<'de> Deserialize<'de> + Default>( // Добавляем Default для T
+    async fn call_api<T: for<'de> Deserialize<'de> + Default>(
         &self,
         method: Method,
         endpoint: &str,
@@ -396,10 +396,12 @@ impl Bybit {
         auth: bool,
     ) -> Result<T> {
         let url = self.url(endpoint);
+        // Логируем основные параметры вызова
         debug!(%url, method=%method, ?query, ?body, auth, "Bybit API Call ->");
 
         let mut req = self.client.request(method.clone(), &url);
 
+        // Обработка query string (без изменений)
         let qs = if let Some(q) = query {
             let encoded_query = q.iter()
                 .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
@@ -411,11 +413,15 @@ impl Bybit {
             String::new()
         };
 
+        // Обработка тела запроса
         let body_str = if let Some(ref b) = body {
             match serde_json::to_string(b) {
                 Ok(s) => {
-                    req = req.json(b);
-                    s
+                    // --- ДОБАВЛЕНО: Логируем тело запроса ---
+                    debug!(request_body=%s, "Serialized request body");
+                    // --- Конец добавления ---
+                    req = req.json(b); // Добавляем JSON тело в запрос reqwest
+                    s // Возвращаем строку для подписи
                 }
                 Err(e) => {
                     error!("Failed to serialize request body: {}", e);
@@ -423,9 +429,10 @@ impl Bybit {
                 }
             }
         } else {
-            String::new()
+            String::new() // Если тела нет, возвращаем пустую строку
         };
 
+        // Добавление заголовков аутентификации (без изменений)
         if auth {
             match self.auth_headers(&qs, &body_str).await {
                 Ok(headers) => {
@@ -439,6 +446,7 @@ impl Bybit {
             }
         }
 
+        // Отправка запроса и обработка ответа (без изменений)
         let resp = match req.send().await {
             Ok(r) => r,
             Err(e) => {
@@ -464,7 +472,7 @@ impl Bybit {
              }
         }
 
-        // Сначала парсим как Value, проверяем retCode, потом парсим result
+        // Парсинг ответа (без изменений)
         let json_value: Value = match serde_json::from_str(&raw_body) {
              Ok(v) => v,
              Err(e) => {
@@ -481,7 +489,6 @@ impl Bybit {
             return Err(anyhow!("Bybit API Error ({}): {}. Raw: {}", ret_code, ret_msg, raw_body));
         }
 
-        // Если retCode == 0, пытаемся извлечь и распарсить поле result в тип T
         match json_value.get("result") {
             Some(result_val) => {
                 match serde_json::from_value(result_val.clone()) {
@@ -490,10 +497,9 @@ impl Bybit {
                         Ok(result_data)
                     }
                     Err(e) => {
-                        // Если парсинг result не удался, но retCode=0, это может быть EmptyResult
                         if result_val.is_object() && result_val.as_object().map_or(false, |obj| obj.is_empty()) {
                              warn!("'result' field is an empty object, attempting to return default value for type.");
-                             Ok(T::default()) // Используем Default для T
+                             Ok(T::default())
                         } else {
                             error!(error=%e, result_value=?result_val, "Failed to deserialize 'result' field into expected type");
                             Err(anyhow!("Failed to deserialize 'result' field: {}", e))
@@ -502,9 +508,8 @@ impl Bybit {
                 }
             }
             None => {
-                // Если 'result' отсутствует, но retCode=0, это тоже может быть EmptyResult
                 warn!("'result' field missing in successful Bybit response, returning default value for type.");
-                Ok(T::default()) // Используем Default для T
+                Ok(T::default())
             }
         }
     }
