@@ -76,12 +76,22 @@ struct BalanceEntry {
 #[derive(Deserialize, Debug, Clone)]
 pub struct LotSizeFilter {
     #[serde(rename = "basePrecision")]
-    pub base_precision: String,
+    pub base_precision: Option<String>, // <-- Сделано опциональным
+    #[serde(rename = "qtyStep")]
+    pub qty_step: Option<String>, // <-- Добавлено поле qtyStep
     #[serde(rename = "maxOrderQty")]
     pub max_order_qty: String,
     #[serde(rename = "minOrderQty")]
     pub min_order_qty: String,
+    // Добавляем остальные поля из лога для полноты, если они понадобятся
+    #[serde(rename = "maxMktOrderQty")]
+    pub max_mkt_order_qty: Option<String>,
+    #[serde(rename = "minNotionalValue")]
+    pub min_notional_value: Option<String>,
+    #[serde(rename = "postOnlyMaxOrderQty")]
+    pub post_only_max_order_qty: Option<String>,
 }
+
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct PriceFilter {
@@ -743,7 +753,11 @@ impl Exchange for Bybit {
         let instrument_info = self.get_spot_instrument_info(symbol).await
             .map_err(|e| anyhow!("Failed to get instrument info for {}: {}", symbol, e))?;
         let tick_size_str = &instrument_info.price_filter.tick_size;
-        let base_precision_str = &instrument_info.lot_size_filter.base_precision;
+        // --- ИЗМЕНЕНО: Обрабатываем Option<String> для base_precision ---
+        let base_precision_str = instrument_info.lot_size_filter.base_precision
+            .as_deref() // Получаем &str из Option<String>
+            .ok_or_else(|| anyhow!("Missing basePrecision for spot symbol {}", spot_pair))?;
+        // --- Конец изменений ---
         let min_order_qty_str = &instrument_info.lot_size_filter.min_order_qty;
 
         let price_decimals = tick_size_str.split('.').nth(1).map_or(0, |s| s.trim_end_matches('0').len()) as u32;
@@ -833,11 +847,17 @@ impl Exchange for Bybit {
 
         let instrument_info = self.get_linear_instrument_info(base_symbol).await // Используем базовый символ
              .map_err(|e| anyhow!("Failed to get instrument info for {}: {}", base_symbol, e))?;
-        let base_precision_str = &instrument_info.lot_size_filter.base_precision;
+        // --- ИЗМЕНЕНО: Используем qty_step вместо base_precision ---
+        let qty_step_str = instrument_info.lot_size_filter.qty_step
+            .as_deref() // Получаем &str из Option<String>
+            .ok_or_else(|| anyhow!("Missing qtyStep for linear symbol {}", symbol))?;
+        // --- Конец изменений ---
         let min_order_qty_str = &instrument_info.lot_size_filter.min_order_qty;
 
-        let qty_decimals = base_precision_str.split('.').nth(1).map_or(0, |s| s.trim_end_matches('0').len()) as u32;
+        // --- ИЗМЕНЕНО: Считаем qty_decimals из qty_step_str ---
+        let qty_decimals = qty_step_str.split('.').nth(1).map_or(0, |s| s.trim_end_matches('0').len()) as u32;
         debug!("Using precision for {}: qty_decimals={}", symbol, qty_decimals);
+        // --- Конец изменений ---
 
         // --- ИСПРАВЛЕНО: Убираем лишние скобки ---
         let formatted_qty = match Decimal::from_f64(qty) {
@@ -847,9 +867,11 @@ impl Exchange for Bybit {
                  if rounded_down < min_qty && qty_d >= min_qty {
                      warn!("Quantity {} rounded down below min_order_qty {}. Using min_order_qty.", qty, min_order_qty_str);
                      min_qty.normalize().to_string()
+                 // --- ИЗМЕНЕНО: Используем qty_step_str в сообщении об ошибке ---
                  } else if rounded_down <= dec!(0.0) {
-                     error!("Requested quantity {} is less than the minimum precision {} for {}", qty, base_precision_str, symbol);
-                     return Err(anyhow!("Quantity {} is less than minimum precision {}", qty, base_precision_str));
+                     error!("Requested quantity {} is less than the minimum precision {} (qtyStep) for {}", qty, qty_step_str, symbol);
+                     return Err(anyhow!("Quantity {} is less than minimum precision {} (qtyStep)", qty, qty_step_str));
+                 // --- Конец изменений ---
                  } else {
                      rounded_down.normalize().to_string()
                  }
