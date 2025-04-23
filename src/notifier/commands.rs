@@ -2,16 +2,13 @@
 
 use crate::exchange::Exchange;
 use crate::models::UnhedgeRequest;
-// Добавляем UserState и MessageId
 use super::{Command, StateStorage, UserState};
 use teloxide::prelude::*;
-// Добавляем InlineKeyboardButton, InlineKeyboardMarkup, MessageId
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
 use teloxide::utils::command::BotCommands;
+use tracing::{warn, error, info};
 
-use tracing::{warn, error, info}; // Используем tracing для логов
-
-// Вспомогательная функция для "чистки" чата (дублируется из messages.rs, можно вынести)
+// Вспомогательная функция для "чистки" чата
 async fn cleanup_chat(bot: &Bot, chat_id: ChatId, user_msg_id: MessageId, bot_msg_id: Option<i32>) {
     if let Some(id_int) = bot_msg_id {
         if let Err(e) = bot.delete_message(chat_id, MessageId(id_int)).await {
@@ -23,19 +20,20 @@ async fn cleanup_chat(bot: &Bot, chat_id: ChatId, user_msg_id: MessageId, bot_ms
     }
 }
 
-// Основной обработчик команд
+// --- ИЗМЕНЕНО: Добавляем quote_currency в аргументы ---
 pub async fn handle_command<E>(
     bot: Bot,
     msg: Message,
     cmd: Command,
-    mut exchange: E, // Делаем mut, т.к. check_connection требует &mut
+    mut exchange: E,
     state_storage: StateStorage,
+    quote_currency: String, // <-- Добавлено
 ) -> anyhow::Result<()>
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
     let chat_id = msg.chat.id;
-    let message_id = msg.id; // ID сообщения с командой
+    let message_id = msg.id;
 
     // --- Сброс состояния и удаление предыдущего сообщения бота при новой команде ---
     let mut previous_bot_message_id: Option<i32> = None;
@@ -43,7 +41,6 @@ where
         let mut state_guard = state_storage
             .write()
             .expect("Failed to acquire write lock on state storage");
-        // Получаем ID предыдущего сообщения бота, если оно было сохранено в состоянии
         if let Some(old_state) = state_guard.get(&chat_id) {
             previous_bot_message_id = match old_state {
                 UserState::AwaitingAssetSelection { last_bot_message_id } => *last_bot_message_id,
@@ -53,21 +50,18 @@ where
                 UserState::None => None,
             };
         }
-        // Сбрасываем состояние, если оно не None
         if !matches!(state_guard.get(&chat_id), Some(UserState::None) | None) {
              info!("Resetting user state for {} due to new command: {:?}", chat_id, cmd);
              state_guard.insert(chat_id, UserState::None);
         }
     }
 
-    // Удаляем сообщение пользователя с командой и предыдущее сообщение бота (если было)
     cleanup_chat(&bot, chat_id, message_id, previous_bot_message_id).await;
     // --- Конец сброса состояния и очистки ---
 
 
     match cmd {
         Command::Help => {
-            // Сообщение пользователя уже удалено
             let kb = InlineKeyboardMarkup::new(vec![
                 vec![
                     InlineKeyboardButton::callback("✅ Статус", "status"),
@@ -75,8 +69,8 @@ where
                 ],
                 vec![
                     InlineKeyboardButton::callback("🪙 Баланс монеты", "balance"),
-                    InlineKeyboardButton::callback("⚙️ Хедж", "hedge"), // Запускает выбор актива
-                    InlineKeyboardButton::callback("🛠 Расхедж", "unhedge"), // Запускает выбор актива
+                    InlineKeyboardButton::callback("⚙️ Хедж", "hedge"),
+                    InlineKeyboardButton::callback("🛠 Расхедж", "unhedge"),
                     InlineKeyboardButton::callback("📈 Funding", "funding"),
                 ],
             ]);
@@ -86,8 +80,7 @@ where
         }
 
         Command::Status => {
-            // Сообщение пользователя уже удалено
-            match exchange.check_connection().await { // Вызываем на mut exchange
+            match exchange.check_connection().await {
                 Ok(_) => {
                     bot.send_message(chat_id, "✅ Бот запущен и успешно подключен к бирже.").await?;
                 }
@@ -97,7 +90,6 @@ where
             }
         }
         Command::Wallet => {
-            // Сообщение пользователя уже удалено
              info!("Fetching wallet balance for chat_id: {}", chat_id);
             match exchange.get_all_balances().await {
                 Ok(balances) => {
@@ -127,7 +119,6 @@ where
             }
         }
         Command::Balance(arg) => {
-            // Сообщение пользователя уже удалено
             let sym = arg.trim().to_uppercase();
             if sym.is_empty() {
                 bot.send_message(chat_id, "Использование: /balance <SYMBOL>").await?;
@@ -149,30 +140,29 @@ where
         }
 
         Command::Hedge(arg) => {
-            // Сообщение пользователя уже удалено
             let symbol = arg.trim().to_uppercase();
             if symbol.is_empty() {
                 bot.send_message(chat_id, "Использование: /hedge <SYMBOL>\nИли используйте кнопку 'Хедж' из /help.").await?;
             } else {
-                // Начинаем диалог запроса суммы
                 info!("Starting hedge dialog via command for chat_id: {}, symbol: {}", chat_id, symbol);
                 let kb = InlineKeyboardMarkup::new(vec![vec![
                     InlineKeyboardButton::callback("❌ Отмена", "cancel_hedge"),
                 ]]);
+                // --- ИЗМЕНЕНО: Используем quote_currency ---
                 let bot_msg = bot.send_message(
                     chat_id,
-                    format!("Введите сумму USDT для хеджирования {}:", symbol),
+                    format!("Введите сумму {} для хеджирования {}:", quote_currency, symbol), // <-- Изменено
                 )
                 .reply_markup(kb)
                 .await?;
-                // Устанавливаем состояние
+                // --- Конец изменений ---
                 {
                     let mut state = state_storage
                         .write()
                         .expect("Failed to acquire write lock on state storage");
                     state.insert(chat_id, UserState::AwaitingSum {
                         symbol: symbol.clone(),
-                        last_bot_message_id: Some(bot_msg.id.0), // Сохраняем ID сообщения бота
+                        last_bot_message_id: Some(bot_msg.id.0),
                     });
                     info!("User state for {} set to AwaitingSum for symbol {}", chat_id, symbol);
                 }
@@ -180,7 +170,6 @@ where
         }
 
         Command::Unhedge(arg) => {
-            // Сообщение пользователя уже удалено
             let parts: Vec<_> = arg.split_whitespace().collect();
              if parts.len() != 2 {
                 bot.send_message(chat_id, "Использование: /unhedge <QUANTITY> <SYMBOL>").await?;
@@ -190,15 +179,14 @@ where
             let sym = parts[1].to_uppercase();
             match quantity_res {
                 Ok(quantity) if quantity > 0.0 => {
-                    // Выполняем расхеджирование напрямую, без диалога
                     info!("Processing /unhedge command for chat_id: {}, quantity: {}, symbol: {}", chat_id, quantity, sym);
                     // TODO: Вынести параметры slippage, commission, max_wait в конфиг
                     let hedger = crate::hedger::Hedger::new(exchange.clone(), 0.005, 0.001, 30);
                     let waiting_msg = bot.send_message(chat_id, format!("⏳ Запускаю расхеджирование {} {}...", quantity, sym)).await?;
                     match hedger.run_unhedge(UnhedgeRequest {
-                        sum: quantity, // В UnhedgeRequest 'sum' используется для quantity
+                        sum: quantity,
                         symbol: sym.clone(),
-                    }).await { // Пока без колбэка
+                    }).await {
                         Ok((sold, bought)) => {
                             info!("Unhedge successful for chat_id: {}. Sold spot: {}, Bought fut: {}", chat_id, sold, bought);
                             bot.edit_message_text(
@@ -227,7 +215,6 @@ where
         }
 
          Command::Funding(arg) => {
-            // Сообщение пользователя уже удалено
             let parts: Vec<_> = arg.split_whitespace().collect();
             if parts.is_empty() {
                 bot.send_message(chat_id, "Использование: /funding <SYMBOL> [days]").await?;

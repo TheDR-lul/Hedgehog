@@ -13,10 +13,10 @@ mod telegram;
 use anyhow::Result;
 use tokio::sync::OnceCell;
 use teloxide::Bot;
-use tracing::info; // Добавим info для логирования
+use tracing::info;
 
 use crate::config::Config;
-use crate::exchange::{Bybit, Exchange}; // Убедимся, что Exchange импортирован
+use crate::exchange::{Bybit, Exchange};
 
 static DB: OnceCell<storage::Db> = OnceCell::const_new();
 
@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
     // 1) Конфиг и логгер
     let cfg = Config::load()?;
     logger::init(&cfg);
-    info!("Logger initialized. Default volatility = {}", cfg.default_volatility); // Логируем параметры
+    info!("Logger initialized. Default volatility = {}", cfg.default_volatility);
 
     // 2) Подключение к SQLite
     let db = storage::Db::connect(&cfg.sqlite_path).await?;
@@ -48,26 +48,26 @@ async fn main() -> Result<()> {
                 "https://api.bybit.com"
             }
         });
-    info!("Using Bybit base URL: {}", base_url); // Используем info! вместо println!
+    info!("Using Bybit base URL: {}", base_url);
 
     // 5) Создаём клиента биржи
-    // --- ИЗМЕНЕНО: Добавляем cfg.quote_currency ---
-    let mut exchange = Bybit::new( // <-- Добавляем mut
+    let mut exchange = Bybit::new(
         &cfg.bybit_api_key,
         &cfg.bybit_api_secret,
         base_url,
-        &cfg.quote_currency, // <-- Передаем quote_currency
-    ).await?; // <-- Добавляем .await, т.к. new теперь async
+        &cfg.quote_currency, // Передаем quote_currency
+    ).await?;
     info!("Bybit client created for quote currency: {}", cfg.quote_currency);
 
-    // 6) Пингуем Bybit (check_connection теперь требует &mut self)
+    // 6) Пингуем Bybit
     info!("Pinging Bybit...");
-    exchange.check_connection().await?; // Вызываем на mut exchange
-    // Сообщение об успехе теперь внутри check_connection
+    exchange.check_connection().await?;
 
     // 7) Стартуем Telegram‑диспетчер
     info!("Starting Telegram dispatcher...");
-    telegram::run(bot, exchange).await; // Передаем mut exchange
+    // --- ИЗМЕНЕНО: Передаем cfg.quote_currency ---
+    telegram::run(bot, exchange, cfg.quote_currency.clone()).await; // Клонируем, чтобы передать владение
+    // --- Конец изменений ---
 
     Ok(())
 }
