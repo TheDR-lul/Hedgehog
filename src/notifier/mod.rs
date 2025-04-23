@@ -16,8 +16,9 @@ use teloxide::utils::command::BotCommands;
 #[derive(Debug, Clone)]
 pub enum UserState {
     AwaitingAssetSelection { last_bot_message_id: Option<i32> },
-    AwaitingSum { symbol: String, last_bot_message_id: Option<i32> },
-    AwaitingVolatility { symbol: String, sum: f64, last_bot_message_id: Option<i32> },
+    AwaitingSum { symbol: String, last_bot_message_id: Option<i32> }, // Для хеджирования
+    AwaitingVolatility { symbol: String, sum: f64, last_bot_message_id: Option<i32> }, // Для хеджирования
+    AwaitingUnhedgeQuantity { symbol: String, last_bot_message_id: Option<i32> }, // <-- НОВОЕ СОСТОЯНИЕ
     None,
 }
 
@@ -37,9 +38,9 @@ pub enum Command {
     Wallet,
     #[command(description = "баланс монеты: /balance <symbol>")]
     Balance(String),
-    #[command(description = "захеджировать: /hedge <sum> <symbol> <volatility %>")]
+    #[command(description = "начать диалог хеджирования: /hedge <symbol>")]
     Hedge(String),
-    #[command(description = "расхеджировать: /unhedge <sum> <symbol>")]
+    #[command(description = "расхеджировать напрямую: /unhedge <quantity> <symbol>")]
     Unhedge(String),
     #[command(description = "средняя ставка финансирования: /funding <symbol> [days]")]
     Funding(String),
