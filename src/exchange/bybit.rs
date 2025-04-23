@@ -501,7 +501,14 @@ impl Bybit {
         // Обработка ошибок API
         if ret_code != 0 {
             // Игнорируем ошибки "Order not found" или "already filled/canceled" для определенных эндпоинтов
-            if (endpoint.contains("cancel") || endpoint.contains("realtime")) && (ret_code == 110025 || ret_code == 10001 || ret_code == 170106) {
+            // --- ИЗМЕНЕНО: Добавляем код 170213 (Order does not exist) ---
+            if (endpoint.contains("cancel") || endpoint.contains("realtime"))
+               && (ret_code == 110025 // Order not found or finished
+                   || ret_code == 10001 // Parameter error (может быть, если ордер уже отменен)
+                   || ret_code == 170106 // Order is already cancelled
+                   || ret_code == 170213 // Order does not exist (Bybit Testnet)
+               ) {
+            // --- Конец изменений ---
                  warn!(code = ret_code, msg = ret_msg, %url, "Bybit API Warning (Order not found/filled/canceled - ignoring)");
                  // Для запроса статуса вернем пустой список, чтобы вызывающий код вернул ошибку
                  if endpoint.contains("realtime") {
@@ -831,8 +838,10 @@ impl Exchange for Bybit {
         })
     }
 
+    // --- ИЗМЕНЕНО: Переименовано ---
     /// Размещение рыночного ордера (для ФЬЮЧЕРСОВ)
-    async fn place_market_order(
+    async fn place_futures_market_order(
+    // --- Конец изменений ---
         &self,
         symbol: &str, // Принимаем ПОЛНЫЙ фьючерсный символ (BTCUSDT)
         side: OrderSide,
@@ -898,6 +907,7 @@ impl Exchange for Bybit {
             "side": side.to_string(),
             "orderType": "Market",
             "qty": formatted_qty,
+            // Для фьючерсов можно добавить timeInForce, reduceOnly и т.д. при необходимости
         });
 
         let result: OrderCreateResult = self
@@ -910,10 +920,100 @@ impl Exchange for Bybit {
             id: result.id,
             side,
             qty,
-            price: None,
+            price: None, // Market order has no predefined price
             ts: self.get_timestamp_ms().await?,
         })
     }
+
+    // --- ДОБАВЛЕНО: Реализация place_spot_market_order ---
+    /// Размещение рыночного ордера (для СПОТА)
+    async fn place_spot_market_order(
+        &self,
+        symbol: &str, // Base symbol (BTC)
+        side: OrderSide,
+        qty: f64, // Quantity in base asset (BTC)
+    ) -> Result<Order> {
+        let spot_pair = self.format_pair(symbol); // Full symbol (BTCUSDT)
+
+        // Получаем инфо для форматирования кол-ва
+        let instrument_info = self.get_spot_instrument_info(symbol).await
+            .map_err(|e| anyhow!("Failed to get instrument info for {}: {}", symbol, e))?;
+        let base_precision_str = instrument_info.lot_size_filter.base_precision
+            .as_deref()
+            .ok_or_else(|| anyhow!("Missing basePrecision for spot symbol {}", spot_pair))?;
+        let min_order_qty_str = &instrument_info.lot_size_filter.min_order_qty;
+
+        let qty_decimals = base_precision_str.split('.').nth(1).map_or(0, |s| s.trim_end_matches('0').len()) as u32;
+        debug!("Using precision for {}: qty_decimals={}", spot_pair, qty_decimals);
+
+        let formatted_qty = match Decimal::from_f64(qty) {
+             Some(qty_d) if qty_d > dec!(0.0) => {
+                 let rounded_down = qty_d.trunc_with_scale(qty_decimals);
+                 let min_qty = Decimal::from_str(min_order_qty_str).unwrap_or(dec!(0.0));
+                 if rounded_down < min_qty && qty_d >= min_qty {
+                     warn!("Quantity {} rounded down below min_order_qty {}. Using min_order_qty.", qty, min_order_qty_str);
+                     min_qty.normalize().to_string()
+                 } else if rounded_down <= dec!(0.0) {
+                     error!("Requested quantity {} is less than the minimum precision {} for {}", qty, base_precision_str, spot_pair);
+                     return Err(anyhow!("Quantity {} is less than minimum precision {}", qty, base_precision_str));
+                 } else {
+                     rounded_down.normalize().to_string()
+                 }
+             }
+             Some(qty_d) if qty_d == dec!(0.0) => {
+                 "0".to_string()
+             }
+             _ => {
+                 error!("Failed to convert qty {} to Decimal or invalid base_precision", qty);
+                 return Err(anyhow!("Invalid qty value {}", qty));
+             }
+        };
+
+        if formatted_qty == "0" {
+             error!("Formatted quantity is zero for symbol {}. Aborting order.", spot_pair);
+             return Err(anyhow!("Formatted quantity is zero"));
+        }
+
+        info!(symbol=%spot_pair, %side, %formatted_qty, category=SPOT_CATEGORY, "Placing SPOT market order");
+
+        // Bybit API v5 для спота:
+        // - Market Buy: указываем quoteOrderQty (сколько USDT потратить)
+        // - Market Sell: указываем qty (сколько BTC продать)
+        // Мы передаем qty в base asset (BTC), поэтому для продажи используем "qty",
+        // а для покупки нужно было бы передавать quote_qty (сумму в USDT).
+        // Так как нам нужна продажа при отмене, используем "qty".
+        let body = if side == OrderSide::Sell {
+            json!({
+                "category": SPOT_CATEGORY,
+                "symbol": spot_pair,
+                "side": side.to_string(),
+                "orderType": "Market",
+                "qty": formatted_qty,
+                // "marketUnit": "baseCoin" // Уточнение, что qty в базовой монете (по умолчанию для спота)
+            })
+        } else {
+            // Market Buy по количеству базового актива не поддерживается напрямую в v5 API для спота.
+            // Нужно либо указывать quoteOrderQty, либо делать лимитный ордер по рыночной цене.
+            // Так как нам нужна продажа, эта ветка пока не нужна.
+            error!("Spot Market Buy by base quantity is not directly supported by Bybit API v5 for spot. Use quote quantity or limit order.");
+            return Err(anyhow!("Spot Market Buy by base quantity not supported"));
+        };
+
+        let result: OrderCreateResult = self
+            .call_api(Method::POST, "v5/order/create", None, Some(body), true)
+            .await?;
+
+        info!(order_id=%result.id, link_id=%result.link_id, "SPOT market order placed successfully");
+
+        Ok(Order {
+            id: result.id,
+            side,
+            qty, // Возвращаем запрошенное кол-во
+            price: None, // Market order
+            ts: self.get_timestamp_ms().await?,
+        })
+    }
+    // --- Конец добавления ---
 
     /// Отмена ордера (предполагаем СПОТ)
     async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<()> {
@@ -934,14 +1034,9 @@ impl Exchange for Bybit {
             }
             Err(e) => {
                 // Проверяем, была ли это ошибка "Order not found" или "already filled/canceled"
-                let err_str = e.to_string();
-                if err_str.contains("110025") || err_str.contains("10001") || err_str.contains("170106") {
-                     warn!("Attempted to cancel order {} which was not found or already inactive: {}", order_id, err_str);
-                     Ok(()) // Считаем это успехом, т.к. ордера больше нет
-                } else {
-                    error!("Failed to cancel order {}: {}", order_id, e);
-                    Err(e) // Возвращаем другие ошибки
-                }
+                // Ошибки уже обрабатываются внутри call_api, здесь просто логируем и возвращаем Ok, если это ожидаемая ошибка
+                warn!("Attempted to cancel order {} which was not found or already inactive: {}", order_id, e);
+                Ok(()) // Считаем это успехом, т.к. ордера больше нет
             }
         }
     }

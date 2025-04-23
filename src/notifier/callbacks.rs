@@ -1,13 +1,9 @@
 // src/notifier/callbacks.rs
 
 use crate::config::Config;
-// --- ИЗМЕНЕНО: Убираем лишние use, исправляем импорт TOLERANCE ---
 use crate::exchange::{Exchange, OrderSide};
-use super::{UserState, StateStorage, RunningHedges}; // Убрали RunningHedgeInfo
-// Импортируем константу из hedger
+use super::{UserState, StateStorage, RunningHedges};
 use crate::hedger::ORDER_FILL_TOLERANCE;
-// Убрали TokioMutex и Arc
-// --- Конец изменений ---
 use teloxide::prelude::*;
 use teloxide::types::{CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
 use tracing::{info, warn, error};
@@ -15,7 +11,7 @@ use tracing::{info, warn, error};
 pub async fn handle_callback<E>(
     bot: Bot,
     q: CallbackQuery,
-    mut exchange: E,
+    exchange: E,
     state_storage: StateStorage,
     cfg: Config,
     running_hedges: RunningHedges,
@@ -26,7 +22,7 @@ where
     if let Some(data) = q.data {
         let message = q.message.as_ref().expect("Callback query without message");
         let chat_id = message.chat().id;
-        let message_id = message.id(); // message_id() возвращает MessageId
+        let message_id = message.id();
 
         let callback_id = q.id.clone();
         let _ = bot.answer_callback_query(callback_id.clone()).await;
@@ -35,9 +31,11 @@ where
         let action = parts.get(0).unwrap_or(&"");
         let payload = parts.get(1).map(|s| s.to_string());
 
-        match *action { // Сравнение &str с &str должно работать
+        match *action {
+            // ... (status, wallet, balance, funding, hedge/unhedge selection, cancel dialog) ...
             "status" => {
-                match exchange.check_connection().await {
+                let mut exchange_clone_for_check = exchange.clone();
+                match exchange_clone_for_check.check_connection().await {
                     Ok(_) => {
                         let _ = bot.edit_message_text(chat_id, message_id, "✅ Бот запущен и успешно подключен к бирже.").await;
                     }
@@ -58,7 +56,6 @@ where
                         sorted_balances.sort_by_key(|(coin, _)| coin.clone());
 
                         for (coin, bal) in sorted_balances {
-                            // Используем ORDER_FILL_TOLERANCE для сравнения
                             if bal.free > ORDER_FILL_TOLERANCE || bal.locked > ORDER_FILL_TOLERANCE {
                                 text.push_str(&format!(
                                     "• {}: ️free {:.4}, locked {:.4}\n",
@@ -100,7 +97,6 @@ where
                         sorted_balances.sort_by_key(|(coin, _)| coin.clone());
 
                         for (coin, bal) in sorted_balances {
-                            // Используем ORDER_FILL_TOLERANCE для сравнения
                             if bal.free > ORDER_FILL_TOLERANCE || bal.locked > ORDER_FILL_TOLERANCE || coin == cfg.quote_currency {
                                 let callback_data = format!("{}_{}", action, coin);
                                 btn_list.push(vec![InlineKeyboardButton::callback(
@@ -153,7 +149,6 @@ where
                 }
             }
 
-            // --- Отмена текущего диалога (ДО старта хеджирования) ---
             "cancel" if payload.as_deref() == Some("hedge") => {
                 info!("User {} cancelled dialog.", chat_id);
                 let reset_state_successful = {
@@ -170,9 +165,7 @@ where
             }
 
             // --- Отмена ЗАПУЩЕННОГО хеджирования ---
-            // --- ИЗМЕНЕНО: Убираем redundant action == "cancel" ---
             "cancel" if payload.is_some() && data.starts_with("cancel_hedge_active_") => {
-            // --- Конец изменений ---
                 let symbol = match payload {
                     Some(p) => p.strip_prefix("hedge_active_").unwrap_or("").to_string(),
                     None => "".to_string(),
@@ -188,13 +181,14 @@ where
 
                 let mut hedge_info_opt = None;
                 let mut current_order_id_to_cancel: Option<String> = None;
-                let mut filled_qty_to_sell: f64 = 0.0;
+                let mut reported_filled_qty: f64 = 0.0; // Переименовали для ясности
 
                 {
                     let mut hedges_guard = running_hedges.lock().await;
                     if let Some(info) = hedges_guard.remove(&(chat_id, symbol.clone())) {
                         current_order_id_to_cancel = info.current_order_id.lock().await.clone();
-                        filled_qty_to_sell = *info.total_filled_qty.lock().await;
+                        // Читаем количество, о котором сообщил hedger
+                        reported_filled_qty = *info.total_filled_qty.lock().await;
                         hedge_info_opt = Some(info);
                     }
                 }
@@ -217,7 +211,9 @@ where
                         let mut _cancel_success = false;
                         let mut sell_success = false;
                         let mut sell_attempted = false;
+                        let mut qty_to_actually_sell = 0.0; // Сколько реально будем продавать
 
+                        // Шаг 1: Отмена ордера
                         if let Some(order_id) = current_order_id_to_cancel {
                             info!("Attempting to cancel exchange order {} for symbol {}", order_id, cleanup_symbol);
                             match exchange_clone.cancel_order(&cleanup_symbol, &order_id).await {
@@ -234,34 +230,58 @@ where
                             _cancel_success = true;
                         }
 
-                        if filled_qty_to_sell > ORDER_FILL_TOLERANCE {
+                        // Шаг 2: Продажа купленного
+                        if reported_filled_qty > ORDER_FILL_TOLERANCE {
                             sell_attempted = true;
-                            info!("Attempting to sell filled quantity {} of {} by market", filled_qty_to_sell, cleanup_symbol);
-                            // ПРИМЕЧАНИЕ: place_market_order сейчас для фьючей. Нужен метод для спота.
-                            match exchange_clone.place_market_order(&cleanup_symbol, OrderSide::Sell, filled_qty_to_sell).await {
-                                Ok(order) => {
-                                    info!("Market sell order placed successfully for filled quantity: id={}", order.id);
-                                    sell_success = true;
+                            info!("Reported filled quantity is {}. Checking available balance...", reported_filled_qty);
+
+                            // --- ИЗМЕНЕНО: Получаем актуальный доступный баланс ---
+                            match exchange_clone.get_balance(&cleanup_symbol).await {
+                                Ok(balance) => {
+                                    let available_balance = balance.free;
+                                    info!("Available balance for {} is {}", cleanup_symbol, available_balance);
+
+                                    // Продаем минимум из доступного и того, что было зафиксировано как исполненное
+                                    qty_to_actually_sell = reported_filled_qty.min(available_balance);
+
+                                    if qty_to_actually_sell > ORDER_FILL_TOLERANCE {
+                                        info!("Attempting to sell actual available quantity {} of {} by market", qty_to_actually_sell, cleanup_symbol);
+                                        match exchange_clone.place_spot_market_order(&cleanup_symbol, OrderSide::Sell, qty_to_actually_sell).await {
+                                            Ok(order) => {
+                                                info!("Spot Market sell order placed successfully for actual quantity: id={}", order.id);
+                                                sell_success = true;
+                                            }
+                                            Err(e) => {
+                                                error!("Failed to place spot market sell order for actual quantity {}: {}", cleanup_symbol, e);
+                                            }
+                                        }
+                                    } else {
+                                        warn!("Actual available balance ({}) is too small to sell, skipping market sell.", available_balance);
+                                        qty_to_actually_sell = 0.0; // Сбрасываем, чтобы в сообщении было 0
+                                    }
                                 }
                                 Err(e) => {
-                                    error!("Failed to place market sell order for filled quantity {}: {}", cleanup_symbol, e);
-                                    // --- ЗАМЕТКА: Обработка ошибок очистки ---
+                                    error!("Failed to get balance for {} before selling: {}. Skipping market sell.", cleanup_symbol, e);
+                                    sell_attempted = false; // Считаем, что попытки не было, раз баланс не получили
                                 }
                             }
+                            // --- Конец изменений ---
+
                         } else {
-                            info!("No significant quantity filled ({}), skipping market sell.", filled_qty_to_sell);
+                            info!("No significant reported quantity filled ({}), skipping balance check and market sell.", reported_filled_qty);
                         }
 
+                        // Шаг 3: Финальное сообщение
                         let final_text = if sell_attempted {
                             format!(
-                                "❌ Хеджирование {} отменено.\nПопытка продать {:.6} {} {}",
+                                "❌ Хеджирование {} отменено.\nПопытка продать {:.6} {} по рынку {}", // Показываем, сколько пытались продать
                                 cleanup_symbol,
-                                filled_qty_to_sell,
+                                qty_to_actually_sell, // Используем реальное кол-во
                                 cleanup_symbol,
-                                if sell_success { "успешно." } else { "не удалась (или функция не реализована)." }
+                                if sell_success { "успешна." } else { "не удалась." }
                             )
                         } else {
-                            format!("❌ Хеджирование {} отменено. Продажа не требовалась.", cleanup_symbol)
+                            format!("❌ Хеджирование {} отменено. Продажа не требовалась или не удалась из-за ошибки получения баланса.", cleanup_symbol)
                         };
 
                         if let Err(e) = bot_clone.edit_message_text(cleanup_chat_id, cleanup_message_id, final_text).await {

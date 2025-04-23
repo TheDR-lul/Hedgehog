@@ -51,19 +51,32 @@ pub trait Exchange {
     /// Разместить лимитный ордер
     async fn place_limit_order(
         &self,
-        symbol: &str,
+        symbol: &str, // Base symbol (e.g., BTC)
         side: OrderSide,
         qty: f64,
         price: f64,
     ) -> Result<Order>;
 
-    /// Разместить рыночный ордер
-    async fn place_market_order(
+    // --- ИЗМЕНЕНО: Переименовано в place_futures_market_order ---
+    /// Разместить рыночный ордер на ФЬЮЧЕРСАХ
+    async fn place_futures_market_order(
         &self,
-        symbol: &str,
+        symbol: &str, // Full symbol (e.g., BTCUSDT)
         side: OrderSide,
         qty: f64,
     ) -> Result<Order>;
+    // --- Конец изменений ---
+
+    // --- ДОБАВЛЕНО: Метод для спотового рыночного ордера ---
+    /// Разместить рыночный ордер на СПОТЕ
+    async fn place_spot_market_order(
+        &self,
+        symbol: &str, // Base symbol (e.g., BTC)
+        side: OrderSide,
+        qty: f64, // Quantity in base asset (e.g., BTC)
+        // Можно добавить опциональный параметр quote_qty: Option<f64> для ордеров типа "купить на X USDT"
+    ) -> Result<Order>;
+    // --- Конец добавления ---
 
     /// Отменить ордер
     async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<()>;
