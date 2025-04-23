@@ -74,8 +74,8 @@ struct InstrumentsInfoResult {
 #[derive(Deserialize, Debug)]
 struct InstrumentInfo {
     #[serde(rename = "symbol")] symbol: String,
-    #[serde(rename = "maintMarginRate")] mmr: String,
-}
+    #[serde(rename = "maintMarginRate")] mmr: Option<String>, // Может быть пустым
+    }
 
 /// Ответ по funding‑rate
 #[derive(Deserialize, Debug)]
@@ -122,6 +122,24 @@ struct TickersResult {
     // Добавляем '_' к неиспользуемому полю
     _category: String,
     list: Vec<TickerInfo>,
+}
+
+#[derive(Deserialize, Debug)]
+struct RiskLimitResult {
+    // Добавляем '_' к неиспользуемому полю
+    _category: String,
+    list: Vec<RiskLimitEntry>,
+}
+
+#[derive(Deserialize, Debug)]
+struct RiskLimitEntry {
+    id: u64,
+    symbol: String, // Поле используется serde при десериализации
+    #[serde(rename = "riskLimitValue")] _risk_limit_value: String,
+    #[serde(rename = "maintenanceMargin")] mmr: String,
+    #[serde(rename = "initialMargin")] _initial_margin: String,
+    #[serde(rename = "isLowestRisk")] is_lowest_risk: u8,
+    #[serde(rename = "maxLeverage")] _max_leverage: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -685,29 +703,55 @@ impl Exchange for Bybit {
     /// Получение MMR для ЛИНЕЙНОГО контракта
     async fn get_mmr(&self, symbol: &str) -> Result<f64> {
         let linear_pair = self.format_pair(symbol);
-        debug!(symbol=%linear_pair, category=LINEAR_CATEGORY, "Fetching MMR");
+        debug!(symbol=%linear_pair, category=LINEAR_CATEGORY, "Fetching MMR via risk limit");
 
         let params = [("category", LINEAR_CATEGORY), ("symbol", &linear_pair)];
-        let info_result: InstrumentsInfoResult = self.call_api(
+        trace!("Attempting to fetch risk limit for {}", linear_pair);
+        let risk_limit_result: RiskLimitResult = self.call_api(
             Method::GET,
-            "v5/market/instruments-info",
+            "v5/market/risk-limit",
             Some(&params),
             None,
-            false,
+            false, // No auth needed
         ).await?;
+        trace!(?risk_limit_result, "Received risk limit data");
 
-        let instrument = info_result.list.into_iter()
-            .find(|i| i.symbol == linear_pair)
+        let risk_level = risk_limit_result.list.into_iter()
+            .find(|level| level.id == 1 || level.is_lowest_risk == 1)
             .ok_or_else(|| {
-                warn!("No instrument info found for {}", linear_pair);
-                anyhow!("No instrument info found for {}", linear_pair)
+                warn!("No risk limit level 1 found for {}", linear_pair);
+                anyhow!("No risk limit level 1 found for {}", linear_pair)
             })?;
+        trace!(?risk_level, "Found risk level 1 data");
 
-        instrument.mmr.parse::<f64>()
-            .map_err(|e| {
-                 error!("Failed to parse MMR for {}: {} (value: '{}')", linear_pair, e, instrument.mmr);
-                 anyhow!("Failed to parse MMR for {}: {}", linear_pair, e)
+        // --- ИЗМЕНЕНО: Добавляем обработку пустого MMR с fallback для тестнета ---
+        if risk_level.mmr.is_empty() {
+            // Проверяем, работаем ли мы с тестнетом (по URL)
+            if self.base_url.contains("testnet") {
+                // !!! ВНИМАНИЕ: Используем жестко заданное значение ТОЛЬКО для тестнета !!!
+                // Это значение может быть неверным! Используйте на свой страх и риск.
+                // Стандартное значение для BTC часто 0.005 (0.5%)
+                let fallback_mmr = 0.005;
+                warn!(
+                    "MMR (maintenanceMargin) is empty in TESTNET response for {}. Using fallback value: {}",
+                    linear_pair, fallback_mmr
+                );
+                Ok(fallback_mmr)
+            } else {
+                // В продакшене или если URL не тестнет - возвращаем ошибку
+                error!(
+                    "MMR (maintenanceMargin) is empty in API response for {}. Cannot proceed.",
+                    linear_pair
+                );
+                Err(anyhow!("MMR (maintenanceMargin) is empty for {}", linear_pair))
+            }
+        } else {
+            // Если поле не пустое, парсим его
+            risk_level.mmr.parse::<f64>().map_err(|e| {
+                error!("Failed to parse MMR for {}: {} (value: '{}')", linear_pair, e, risk_level.mmr);
+                anyhow!("Failed to parse MMR for {}: {}", linear_pair, e)
             })
+        }
     }
 
     /// Получение средней ставки финансирования для ЛИНЕЙНОГО контракта

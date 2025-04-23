@@ -25,10 +25,8 @@ pub enum UserState {
 /// Тип для хранения состояний пользователей
 pub type StateStorage = Arc<RwLock<HashMap<ChatId, UserState>>>;
 
-/// Все доступные команды бота
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Доступные команды:")]
-/// Используется для генерации описания команд и их обработки
 pub enum Command {
     #[command(description = "показать это сообщение", aliases = ["help", "?"])]
     Help,
