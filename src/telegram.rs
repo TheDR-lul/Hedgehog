@@ -1,4 +1,4 @@
-use crate::notifier::{self, Command, StateStorage};
+use crate::notifier::{Command, StateStorage, handle_command, handle_callback, handle_message};
 use teloxide::{
     prelude::*,
     dptree,
@@ -6,13 +6,15 @@ use teloxide::{
 };
 use crate::exchange::Exchange;
 use std::sync::Arc;
+use std::sync::RwLock;
+use std::collections::HashMap;
 
 pub async fn run<E>(bot: Bot, exchange: E)
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
     let exchange = Arc::new(exchange);
-    let state_storage: StateStorage = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+    let state_storage: StateStorage = Arc::new(RwLock::new(HashMap::new()));
 
     // 1) Текстовые команды
     let commands_branch = Update::filter_message()
@@ -24,7 +26,7 @@ where
                 let exchange = exchange.clone();
                 let state_storage = state_storage.clone();
                 async move {
-                    if let Err(err) = notifier::handle_command(bot, msg, cmd, (*exchange).clone(), state_storage).await {
+                    if let Err(err) = handle_command(bot, msg, cmd, (*exchange).clone(), state_storage).await {
                         tracing::error!("command handler error: {:?}", err);
                     }
                     respond(())
@@ -41,7 +43,7 @@ where
                 let exchange = exchange.clone();
                 let state_storage = state_storage.clone();
                 async move {
-                    if let Err(err) = notifier::handle_callback(bot, q, (*exchange).clone(), state_storage).await {
+                    if let Err(err) = handle_callback(bot, q, (*exchange).clone(), state_storage).await {
                         tracing::error!("callback handler error: {:?}", err);
                     }
                     respond(())
@@ -58,7 +60,7 @@ where
                 let exchange = exchange.clone();
                 let state_storage = state_storage.clone();
                 async move {
-                    if let Err(err) = notifier::handle_message(bot, msg, state_storage, (*exchange).clone()).await {
+                    if let Err(err) = handle_message(bot, msg, state_storage, (*exchange).clone()).await {
                         tracing::error!("message handler error: {:?}", err);
                     }
                     respond(())

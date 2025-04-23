@@ -22,6 +22,7 @@ pub struct Config {
     // Стратегия
     pub default_volatility: f64,
     pub offset_points:      u32,
+    pub quote_currency:     String,
 }
 
 impl Config {

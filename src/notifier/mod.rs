@@ -3,13 +3,14 @@ pub mod callbacks;
 pub mod messages;
 
 // Экспорт всех необходимых типов и функций
-pub use commands::handle_command;
-pub use callbacks::handle_callback;
-pub use messages::handle_message;
+pub use self::commands::handle_command;
+pub use self::callbacks::handle_callback;
+pub use self::messages::handle_message;
 
 use std::sync::{Arc, RwLock};
 use teloxide::types::ChatId;
 use std::collections::HashMap;
+use teloxide::utils::command::BotCommands;
 
 /// Определение состояний пользователя
 #[derive(Debug, Clone)]
@@ -23,9 +24,10 @@ pub enum UserState {
 /// Тип для хранения состояний пользователей
 pub type StateStorage = Arc<RwLock<HashMap<ChatId, UserState>>>;
 
-/// Все команды бота
-#[derive(teloxide::utils::command::BotCommands, Clone)]
+/// Все доступные команды бота
+#[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Доступные команды:")]
+/// Используется для генерации описания команд и их обработки
 pub enum Command {
     #[command(description = "показать это сообщение", aliases = ["help", "?"])]
     Help,

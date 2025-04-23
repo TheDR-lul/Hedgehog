@@ -21,7 +21,7 @@ static DB: OnceCell<storage::Db> = OnceCell::const_new();
 async fn main() -> Result<()> {
     // 1) Конфиг и логгер
     let cfg = Config::load()?;
-    logger::init(&cfg)?;
+    logger::init(&cfg);
 
     // 2) Подключение к SQLite
     let db = storage::Db::connect(&cfg.sqlite_path).await?;
