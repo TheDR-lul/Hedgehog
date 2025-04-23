@@ -32,12 +32,16 @@ pub struct HedgeParams {
     pub symbol: String,
 }
 
+// --- ИЗМЕНЕНО: Добавляем поля для статуса исполнения ---
 #[derive(Debug, Clone)]
 pub struct HedgeProgressUpdate {
     pub current_spot_price: f64,
     pub new_limit_price: f64,
     pub is_replacement: bool,
+    pub filled_qty: f64,   // Сколько исполнено в текущем ордере
+    pub target_qty: f64,   // Целевое количество текущего ордера
 }
+// --- Конец изменений ---
 
 pub type HedgeProgressCallback = Box<dyn FnMut(HedgeProgressUpdate) -> BoxFuture<'static, Result<()>> + Send + Sync>;
 
@@ -130,11 +134,9 @@ where
             symbol,
         } = params;
 
-        // --- ИЗМЕНЕНО: Локальные переменные для отслеживания ---
-        let mut cumulative_filled_qty = 0.0; // Общее исполненное количество по всем ордерам
-        let mut current_order_target_qty = initial_spot_qty; // Цель для текущего ордера
-        let mut qty_filled_in_current_order = 0.0; // Сколько исполнено в ТЕКУЩЕМ ордере (с момента его постановки/перестановки)
-        // --- Конец изменений ---
+        let mut cumulative_filled_qty = 0.0;
+        let mut current_order_target_qty = initial_spot_qty;
+        let mut qty_filled_in_current_order = 0.0;
 
         info!(
             "Running hedge for {} with initial_spot_qty={}, initial_fut_qty={}, initial_limit_price={}",
@@ -147,8 +149,6 @@ where
                 *storage.lock().await = id;
             }
         };
-
-        // --- ИЗМЕНЕНО: Убираем update_total_filled_qty, будем обновлять напрямую ---
 
         info!("Placing initial limit buy at {} for qty {}", limit_price, current_order_target_qty);
         tokio::task::yield_now().await;
@@ -164,7 +164,6 @@ where
             };
         info!("Placed initial spot limit order: id={}", spot_order.id);
         update_current_order_id(Some(spot_order.id.clone())).await;
-        // Инициализируем общее хранилище
         *total_filled_qty_storage.lock().await = 0.0;
 
         let mut start = Instant::now();
@@ -183,64 +182,47 @@ where
                 Err(e) => {
                     if e.to_string().contains("Order not found") && now.duration_since(start) > Duration::from_secs(5) {
                          warn!("Order {} not found, assuming it filled for target qty {}. Continuing...", spot_order.id, current_order_target_qty);
-                         // --- ИЗМЕНЕНО: Обновляем локальное и общее кол-во ---
-                         cumulative_filled_qty += current_order_target_qty; // Добавляем целевое кол-во к общему
-                         *total_filled_qty_storage.lock().await = cumulative_filled_qty; // Обновляем общее хранилище
-                         // --- Конец изменений ---
+                         cumulative_filled_qty += current_order_target_qty;
+                         *total_filled_qty_storage.lock().await = cumulative_filled_qty;
                          update_current_order_id(None).await;
-                         // --- ИЗМЕНЕНО: Проверяем достижение цели здесь ---
                          if cumulative_filled_qty >= initial_spot_qty - ORDER_FILL_TOLERANCE {
                              info!("Total filled spot quantity {} meets target {}. Exiting loop.", cumulative_filled_qty, initial_spot_qty);
-                             break; // Выходим из цикла, если цель достигнута
+                             break;
                          } else {
-                             // Если цель не достигнута, инициируем замену
                              warn!("Order filled assumption, but total target {} not reached. Triggering replacement logic.", initial_spot_qty);
-                             start = now - self.max_wait - Duration::from_secs(1); // Состариваем таймер
-                             qty_filled_in_current_order = 0.0; // Сбрасываем для нового ордера
-                             continue; // Переходим к замене
+                             start = now - self.max_wait - Duration::from_secs(1);
+                             qty_filled_in_current_order = 0.0;
+                             continue;
                          }
-                         // --- Конец изменений ---
                     } else {
                         warn!("Failed to get order status for {}: {}. Aborting hedge.", spot_order.id, e);
                         *total_filled_qty_storage.lock().await = cumulative_filled_qty;
                         update_current_order_id(None).await;
-                        // --- ИЗМЕНЕНО: Возвращаем ошибку с понятным текстом ---
                         return Err(anyhow!("Hedge failed during status check: {}", e));
-                        // --- Конец изменений ---
                     }
                 }
             };
 
-            // --- ИЗМЕНЕНО: Обновляем локальное и общее кол-во СРАЗУ после получения статуса ---
-            let previously_filled_in_current = qty_filled_in_current_order; // Запоминаем предыдущее значение для этого ордера
-            qty_filled_in_current_order = status.filled_qty; // Обновляем исполненное в текущем ордере
-            let filled_since_last_check = qty_filled_in_current_order - previously_filled_in_current; // Сколько исполнилось с прошлой проверки
+            let previously_filled_in_current = qty_filled_in_current_order;
+            qty_filled_in_current_order = status.filled_qty;
+            let filled_since_last_check = qty_filled_in_current_order - previously_filled_in_current;
 
-            if filled_since_last_check > 0.0 { // Обновляем общее, только если что-то исполнилось
-                cumulative_filled_qty += filled_since_last_check; // Добавляем разницу к общему
-                *total_filled_qty_storage.lock().await = cumulative_filled_qty; // Обновляем общее хранилище
+            if filled_since_last_check > 0.0 {
+                cumulative_filled_qty += filled_since_last_check;
+                *total_filled_qty_storage.lock().await = cumulative_filled_qty;
             }
-            // --- Конец изменений ---
 
-            // --- Проверяем исполнение ТЕКУЩЕГО ордера ---
             if status.remaining_qty <= ORDER_FILL_TOLERANCE {
                 info!("Current spot order {} filled (total cumulative: {}).", spot_order.id, cumulative_filled_qty);
                 update_current_order_id(None).await;
-                // --- ИЗМЕНЕНО: Просто проверяем, достигнут ли общий лимит ---
                 if cumulative_filled_qty >= initial_spot_qty - ORDER_FILL_TOLERANCE {
                     info!("Total filled spot quantity {} meets target {}. Exiting loop.", cumulative_filled_qty, initial_spot_qty);
-                    break; // Выходим из цикла, если цель достигнута
+                    break;
                 } else {
-                    // Если текущий ордер исполнился, но общий объем не достигнут,
-                    // это значит, что initial_spot_qty был больше, чем qty этого ордера
-                    // (что возможно только если это был заменяющий ордер).
-                    // Инициируем следующую замену.
                     warn!("Replacement order filled, but total target {} not reached. Triggering next replacement.", initial_spot_qty);
-                    start = now - self.max_wait - Duration::from_secs(1); // Состариваем таймер
-                    qty_filled_in_current_order = 0.0; // Сбрасываем для нового ордера
-                    // continue не нужен, т.к. проверка max_wait сработает на след. итерации
+                    start = now - self.max_wait - Duration::from_secs(1);
+                    qty_filled_in_current_order = 0.0;
                 }
-                // --- Конец изменений ---
             }
 
             let elapsed_since_start = now.duration_since(start);
@@ -249,10 +231,7 @@ where
             let mut is_replacement = false;
             let mut price_for_update = current_spot_price;
 
-            // --- Логика перестановки ордера ---
-            // --- ИЗМЕНЕНО: Проверяем И если ордер еще не исполнен ---
             if elapsed_since_start > self.max_wait && status.remaining_qty > ORDER_FILL_TOLERANCE {
-            // --- Конец изменений ---
                 is_replacement = true;
                 warn!(
                     "Spot order {} partially filled ({}/{}) or not filled within {:?}. Replacing...",
@@ -262,27 +241,22 @@ where
                 let remaining_total_qty = initial_spot_qty - cumulative_filled_qty;
 
                 tokio::task::yield_now().await;
-                // --- ИЗМЕНЕНО: Обрабатываем ошибку отмены более мягко ---
                 if let Err(e) = self.exchange.cancel_order(&symbol, &spot_order.id).await {
-                    // Игнорируем ошибки "Order not found" или "already filled/canceled"
-                    if !e.to_string().contains("110025") // Order not found or finished
-                       && !e.to_string().contains("10001") // Parameter error (может быть, если ордер уже отменен)
-                       && !e.to_string().contains("170106") // Order is already cancelled
-                       && !e.to_string().contains("170213") // Order does not exist (Bybit Testnet)
+                    if !e.to_string().contains("110025")
+                       && !e.to_string().contains("10001")
+                       && !e.to_string().contains("170106")
+                       && !e.to_string().contains("170213")
                     {
                         error!("Unexpected error cancelling order {}: {}", spot_order.id, e);
                         *total_filled_qty_storage.lock().await = cumulative_filled_qty;
                         update_current_order_id(None).await;
-                        // --- ИЗМЕНЕНО: Возвращаем ошибку с понятным текстом ---
                         return Err(anyhow!("Hedge failed during order replacement (cancel step): {}", e));
-                        // --- Конец изменений ---
                     } else {
                         warn!("Order {} cancellation failed (likely already inactive): {}", spot_order.id, e);
                     }
                 } else {
                     info!("Successfully cancelled order {}", spot_order.id);
                 }
-                // --- Конец изменений ---
                 update_current_order_id(None).await;
 
                 if remaining_total_qty <= ORDER_FILL_TOLERANCE {
@@ -296,9 +270,7 @@ where
                     Err(e) => {
                         warn!("Failed to get spot price during replacement: {}. Aborting hedge.", e);
                         *total_filled_qty_storage.lock().await = cumulative_filled_qty;
-                        // --- ИЗМЕНЕНО: Возвращаем ошибку с понятным текстом ---
                         return Err(anyhow!("Hedge failed during replacement (get price step): {}", e));
-                        // --- Конец изменений ---
                     }
                 };
                  if current_spot_price <= 0.0 {
@@ -317,9 +289,7 @@ where
                     Err(e) => {
                          warn!("Failed to place replacement order: {}. Aborting hedge.", e);
                          *total_filled_qty_storage.lock().await = cumulative_filled_qty;
-                         // --- ИЗМЕНЕНО: Возвращаем ошибку с понятным текстом ---
                          return Err(anyhow!("Hedge failed during replacement (place order step): {}", e));
-                         // --- Конец изменений ---
                     }
                 };
                 info!("Placed replacement spot limit order: id={}", spot_order.id);
@@ -335,16 +305,20 @@ where
                          Ok(p) if p > 0.0 => price_for_update = p,
                          Ok(_) => { /* Используем старую цену */ }
                          Err(e) => {
-                             warn!("Failed to get spot price for update: {}", e); // Не прерываем хедж из-за этого
+                             warn!("Failed to get spot price for update: {}", e);
                          }
                      }
                  }
 
+                // --- ИЗМЕНЕНО: Заполняем новые поля в HedgeProgressUpdate ---
                 let update = HedgeProgressUpdate {
                     current_spot_price: price_for_update,
                     new_limit_price: limit_price,
                     is_replacement,
+                    filled_qty: qty_filled_in_current_order, // <-- Добавлено
+                    target_qty: current_order_target_qty,   // <-- Добавлено
                 };
+                // --- Конец изменений ---
 
                 tokio::task::yield_now().await;
                 if let Err(e) = progress_callback(update).await {
@@ -356,19 +330,16 @@ where
             }
         } // Конец цикла loop
 
-        // --- Размещение фьючерсного ордера ---
         let futures_symbol = format!("{}{}", symbol, self.quote_currency);
         info!(
             "Placing market sell order on futures ({}) for initial quantity {}",
             futures_symbol, initial_fut_qty
         );
         tokio::task::yield_now().await;
-        // --- ИЗМЕНЕНО: Используем place_futures_market_order ---
         let fut_order = match self
             .exchange
             .place_futures_market_order(&futures_symbol, OrderSide::Sell, initial_fut_qty)
             .await {
-        // --- Конец изменений ---
                 Ok(o) => o,
                 Err(e) => {
                     warn!("Failed to place futures order: {}. Spot was already bought!", e);
@@ -383,11 +354,11 @@ where
         Ok((cumulative_filled_qty, initial_fut_qty))
     }
 
-    // --- ИЗМЕНЕНО: Обновляем run_unhedge аналогично ---
     pub async fn run_unhedge(
         &self,
         req: UnhedgeRequest,
         // TODO: Добавить поддержку отмены для unhedge по аналогии с run_hedge
+        // TODO: Добавить колбэк прогресса для unhedge
     ) -> Result<(f64, f64)> {
         let UnhedgeRequest { quantity: initial_spot_qty, symbol } = req;
         let initial_fut_qty = initial_spot_qty;
@@ -412,7 +383,7 @@ where
             return Err(anyhow!("Invalid spot price: {}", current_spot_price));
         }
 
-        let mut limit_price = current_spot_price * (1.0 + self.slippage); // Sell -> +slippage
+        let mut limit_price = current_spot_price * (1.0 + self.slippage);
         info!("Initial spot price: {}, placing limit sell at {} for qty {}", current_spot_price, limit_price, current_order_target_qty);
         let mut spot_order = self
             .exchange
@@ -431,7 +402,6 @@ where
                     if e.to_string().contains("Order not found") && now.duration_since(start) > Duration::from_secs(5) {
                          warn!("Order {} not found, assuming it filled for target qty {}. Continuing...", spot_order.id, current_order_target_qty);
                          cumulative_filled_qty += current_order_target_qty;
-                         // TODO: Update shared state if unhedge cancellation is implemented
                          if cumulative_filled_qty >= initial_spot_qty - ORDER_FILL_TOLERANCE {
                              info!("Total filled spot quantity {} meets target {}. Exiting loop.", cumulative_filled_qty, initial_spot_qty);
                              break;
@@ -443,7 +413,6 @@ where
                          }
                     } else {
                         warn!("Failed to get order status for {}: {}. Aborting unhedge.", spot_order.id, e);
-                        // TODO: Update shared state if unhedge cancellation is implemented
                         return Err(anyhow!("Unhedge failed during status check: {}", e));
                     }
                 }
@@ -455,12 +424,10 @@ where
 
             if filled_since_last_check > 0.0 {
                 cumulative_filled_qty += filled_since_last_check;
-                // TODO: Update shared state if unhedge cancellation is implemented
             }
 
             if status.remaining_qty <= ORDER_FILL_TOLERANCE {
                  info!("Current spot order {} filled (total cumulative: {}).", spot_order.id, cumulative_filled_qty);
-                 // TODO: Update shared state if unhedge cancellation is implemented
                  if cumulative_filled_qty >= initial_spot_qty - ORDER_FILL_TOLERANCE {
                      info!("Total filled spot quantity {} meets target {}. Exiting loop.", cumulative_filled_qty, initial_spot_qty);
                      break;
@@ -486,16 +453,14 @@ where
                        && !e.to_string().contains("170213")
                     {
                         error!("Unexpected error cancelling order {}: {}", spot_order.id, e);
-                        // TODO: Update shared state if unhedge cancellation is implemented
                         return Err(anyhow!("Unhedge failed during order replacement (cancel step): {}", e));
                     } else {
                         warn!("Order {} cancellation failed (likely already inactive): {}", spot_order.id, e);
                     }
-                     sleep(Duration::from_millis(500)).await; // Небольшая пауза после отмены
+                     sleep(Duration::from_millis(500)).await;
                 } else {
                     info!("Successfully cancelled order {}", spot_order.id);
                 }
-                 // TODO: Update shared state if unhedge cancellation is implemented (order ID = None)
 
                  if remaining_total_qty <= ORDER_FILL_TOLERANCE {
                     info!("Total filled quantity {} meets target {}. No need to replace order. Exiting loop.", cumulative_filled_qty, initial_spot_qty);
@@ -507,7 +472,7 @@ where
                     error!("Invalid spot price received while replacing order: {}", current_spot_price);
                     return Err(anyhow!("Invalid spot price while replacing order: {}", current_spot_price));
                 }
-                limit_price = current_spot_price * (1.0 + self.slippage); // Sell -> +slippage
+                limit_price = current_spot_price * (1.0 + self.slippage);
                 current_order_target_qty = remaining_total_qty;
                 qty_filled_in_current_order = 0.0;
 
@@ -517,9 +482,9 @@ where
                     .place_limit_order(&symbol, OrderSide::Sell, current_order_target_qty, limit_price)
                     .await?;
                  info!("Placed replacement spot limit order: id={}", spot_order.id);
-                 // TODO: Update shared state if unhedge cancellation is implemented (new order ID)
                 start = Instant::now();
             }
+            // TODO: Add progress callback call for unhedge here if needed
         } // Конец цикла loop
 
         let futures_symbol = format!("{}{}", symbol, self.quote_currency);
@@ -527,17 +492,13 @@ where
             "Placing market buy order on futures ({}) for initial quantity {}",
             futures_symbol, initial_fut_qty
         );
-        // --- ИЗМЕНЕНО: Используем place_futures_market_order ---
         let fut_order = self
             .exchange
             .place_futures_market_order(&futures_symbol, OrderSide::Buy, initial_fut_qty)
             .await?;
-        // --- Конец изменений ---
         info!("Placed futures market order: id={}", fut_order.id);
 
         info!("Unhedge completed successfully for {}. Total spot filled: {}", symbol, cumulative_filled_qty);
-        // TODO: Update shared state if unhedge cancellation is implemented
         Ok((cumulative_filled_qty, initial_fut_qty))
     }
-    // --- Конец изменений ---
 }
