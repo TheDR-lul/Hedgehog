@@ -1,14 +1,15 @@
-// src/notifier.rs
-
 use anyhow::Result;
 use teloxide::{
     prelude::*,
-    types::{InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery,ChatId},
+    types::{InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, ChatId},
     utils::command::BotCommands,
 };
 use crate::exchange::Exchange;
 use crate::hedger::Hedger;
 use crate::models::{HedgeRequest, UnhedgeRequest};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use std::collections::HashMap;
 
 /// Все команды бота
 #[derive(BotCommands, Clone)]
@@ -30,11 +31,25 @@ pub enum Command {
     Funding(String),
 }
 
+/// Состояния пользователя
+#[derive(Debug, Clone)]
+pub enum UserState {
+    AwaitingAssetSelection, // Ожидание выбора актива
+    AwaitingSum { symbol: String }, // Ожидание ввода суммы
+    AwaitingVolatility { symbol: String, sum: f64 }, // Ожидание ввода волатильности
+    None, // Нет активного диалога
+}
+
+// Тип для хранения состояний пользователей
+pub type StateStorage = Arc<RwLock<HashMap<ChatId, UserState>>>;
+
+/// Обработка текстовых команд
 pub async fn handle_command<E>(
     bot: Bot,
     msg: Message,
     cmd: Command,
     exchange: E,
+    state_storage: StateStorage,
 ) -> Result<()>
 where
     E: Exchange + Clone + Send + Sync + 'static,
@@ -59,8 +74,7 @@ where
                 .await?;
         }
         Command::Status => {
-            bot.send_message(chat_id, "✅ Бот запущен и подключён к бирже")
-                .await?;
+            bot.send_message(chat_id, "✅ Бот запущен и подключён к бирже").await?;
         }
         Command::Wallet => {
             let list = exchange.get_all_balances().await?;
@@ -92,11 +106,9 @@ where
                 }
             }
         }
-        Command::Hedge(args) => {
-            do_hedge(&bot, chat_id, args, &exchange).await?;
-        }
-        Command::Unhedge(args) => {
-            do_unhedge(&bot, chat_id, args, &exchange).await?;
+        Command::Hedge(_) | Command::Unhedge(_) => {
+            bot.send_message(chat_id, "Используйте кнопки для хеджирования или расхеджирования.")
+                .await?;
         }
         Command::Funding(arg) => {
             let parts: Vec<_> = arg.split_whitespace().collect();
@@ -134,41 +146,153 @@ pub async fn handle_callback<E>(
     bot: Bot,
     q: CallbackQuery,
     exchange: E,
+    state_storage: StateStorage,
 ) -> Result<()>
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
     if let Some(data) = q.data {
-        let chat_id = q.message.unwrap().chat().id;
+        let message = q.message.as_ref().unwrap();
+        let chat_id = message.chat().id;
+        let message_id = message.id(); // Исправлен вызов метода
 
+        // Исправление: добавлен .await и убран expect
+        let mut state = state_storage.write().await;
+        
         match data.as_str() {
             "status" => {
-                bot.send_message(chat_id, "✅ Бот запущен и подключён к бирже").await?;
+                bot.edit_message_text(chat_id, message_id, "✅ Бот запущен и подключён к бирже")
+                    .await?;
             }
             "wallet" => {
                 let list = exchange.get_all_balances().await?;
                 let mut text = "💼 Баланс кошелька:\n".to_string();
                 for (coin, bal) in list {
                     if bal.free > 0.0 || bal.locked > 0.0 {
-                        text.push_str(&format!("• {}: free={:.4}, locked={:.4}\n", coin, bal.free, bal.locked));
+                        text.push_str(&format!(
+                            "• {}: free={:.4}, locked={:.4}\n",
+                            coin, bal.free, bal.locked
+                        ));
                     }
                 }
-                bot.send_message(chat_id, text).await?;
+                bot.edit_message_text(chat_id, message_id, text).await?;
             }
             "balance" => {
-                bot.send_message(chat_id, "Введите: /balance <symbol>").await?;
-            }
-            "hedge" => {
-                bot.send_message(chat_id, "Введите: /hedge <sum> <symbol> <volatility %>")
+                bot.edit_message_text(chat_id, message_id, "Введите: /balance <symbol>")
                     .await?;
             }
-            "unhedge" => {
-                bot.send_message(chat_id, "Введите: /unhedge <sum> <symbol>").await?;
+            "hedge" => {
+                let list = exchange.get_all_balances().await?;
+                let mut buttons = vec![];
+                for (coin, bal) in list {
+                    if bal.free > 0.0 || bal.locked > 0.0 {
+                        buttons.push(vec![
+                            InlineKeyboardButton::callback(
+                                format!("🪙 {} (free: {:.4}, locked: {:.4})", coin, bal.free, bal.locked),
+                                format!("hedge_{}", coin),
+                            ),
+                        ]);
+                    }
+                }
+                // Добавляем кнопку отмены
+                buttons.push(vec![
+                    InlineKeyboardButton::callback("❌ Отмена", "cancel_hedge"),
+                ]);
+                let kb = InlineKeyboardMarkup::new(buttons);
+                bot.edit_message_text(chat_id, message_id, "Выберите актив для хеджирования:")
+                    .reply_markup(kb)
+                    .await?;
+                state.insert(chat_id, UserState::AwaitingAssetSelection);
+            }
+            "cancel_hedge" => {
+                state.insert(chat_id, UserState::None);
+                let kb = InlineKeyboardMarkup::new(vec![
+                    vec![
+                        InlineKeyboardButton::callback("✅ Статус", "status"),
+                        InlineKeyboardButton::callback("💼 Баланс", "wallet"),
+                    ],
+                    vec![
+                        InlineKeyboardButton::callback("🪙 Баланс монеты", "balance"),
+                        InlineKeyboardButton::callback("⚙️ Хедж", "hedge"),
+                        InlineKeyboardButton::callback("🛠 Расхедж", "unhedge"),
+                        InlineKeyboardButton::callback("📈 Funding", "funding"),
+                    ],
+                ]);
+                bot.edit_message_text(chat_id, message_id, "Действие отменено.")
+                    .reply_markup(kb)
+                    .await?;
+            }
+            _ if data.starts_with("hedge_") => {
+                let sym = data.trim_start_matches("hedge_");
+                state.insert(chat_id, UserState::AwaitingSum { symbol: sym.to_string() });
+                let kb = InlineKeyboardMarkup::new(vec![
+                    vec![InlineKeyboardButton::callback("❌ Отмена", "cancel_hedge")],
+                ]);
+                bot.edit_message_text(chat_id, message_id, format!("Введите сумму для хеджирования {}:", sym))
+                    .reply_markup(kb)
+                    .await?;
             }
             _ => {}
         }
-
         bot.answer_callback_query(q.id).await?;
+    }
+    Ok(())
+}
+
+/// Обработка текстовых сообщений
+pub async fn handle_message<E>(
+    bot: Bot,
+    msg: Message,
+    state_storage: StateStorage,
+    exchange: E,
+) -> Result<()>
+where
+    E: Exchange + Clone + Send + Sync + 'static,
+{
+    let chat_id = msg.chat.id;
+    let message_id = msg.id;
+    let text = msg.text().unwrap_or("").trim();
+
+    // Убираем `.await` и используем `.expect`
+    let mut state = state_storage.write().await;
+    
+    if let Some(user_state) = state.get_mut(&chat_id) {
+        match user_state.clone() {
+            UserState::AwaitingSum { symbol } => {
+                if let Ok(sum) = text.parse::<f64>() {
+                    *user_state = UserState::AwaitingVolatility { symbol: symbol.clone(), sum };
+                    let kb = InlineKeyboardMarkup::new(vec![
+                        vec![InlineKeyboardButton::callback("❌ Отмена", "cancel_hedge")],
+                    ]);
+                    bot.delete_message(chat_id, message_id).await?; // Удаляем сообщение пользователя
+                    bot.edit_message_text(
+                        chat_id,
+                        message_id, // ID сообщения бота, которое нужно обновить
+                        format!("Введите волатильность для хеджирования {} (%):", symbol),
+                    )
+                    .reply_markup(kb)
+                    .await?;
+                } else {
+                    bot.send_message(chat_id, "Неверный формат суммы. Введите число.")
+                        .await?;
+                }
+            }
+            UserState::AwaitingVolatility { symbol, sum } => {
+                if let Ok(vol) = text.trim_end_matches('%').parse::<f64>() {
+                    let vol = vol / 100.0;
+                    *user_state = UserState::None; // Сбрасываем состояние
+                    bot.delete_message(chat_id, message_id).await?; // Удаляем сообщение пользователя
+                    // Вызов функции хеджирования
+                    do_hedge(&bot, chat_id, format!("{} {} {:.2}", sum, symbol, vol), &exchange).await?;
+                } else {
+                    bot.send_message(chat_id, "Неверный формат волатильности. Введите число (%).")
+                        .await?;
+                }
+            }
+            _ => {}
+        }
+    } else {
+        bot.send_message(chat_id, "Сейчас нет активного диалога. Используйте меню.").await?;
     }
     Ok(())
 }
@@ -191,7 +315,6 @@ where
     let sum: f64 = parts[0].parse().unwrap_or(0.0);
     let sym = parts[1].to_uppercase();
     let vol = parts[2].trim_end_matches('%').parse::<f64>().unwrap_or(0.0) / 100.0;
-
     // slippage 0.5%, commission 0.1%
     let hedger = Hedger::new(exchange.clone(), 0.005, 0.001);
     match hedger.run_hedge(HedgeRequest { sum, symbol: sym.clone(), volatility: vol }).await {
@@ -199,7 +322,9 @@ where
             bot.send_message(
                 chat_id,
                 format!(
-                    "Хеджирование {} USDT {} при V={:.1}%:\n▸ Спот {:+.4}\n▸ Фьючерс {:+.4}",
+                    "Хеджирование {} USDT {} при V={:.1}%:
+▸ Спот {:+.4}
+▸ Фьючерс {:+.4}",
                     sum,
                     sym,
                     vol * 100.0,
@@ -232,7 +357,6 @@ where
     }
     let sum: f64 = parts[0].parse().unwrap_or(0.0);
     let sym = parts[1].to_uppercase();
-
     // slippage 0.5%, commission 0.1%
     let hedger = Hedger::new(exchange.clone(), 0.005, 0.001); // Используем переданный exchange
     match hedger.run_unhedge(UnhedgeRequest { sum, symbol: sym.clone() }).await {
@@ -240,7 +364,9 @@ where
             bot.send_message(
                 chat_id,
                 format!(
-                    "Расхеджирование {} USDT {}:\n▸ Продано спота {:+.4}\n▸ Куплено фьюча {:+.4}",
+                    "Расхеджирование {} USDT {}:
+▸ Продано спота {:+.4}
+▸ Куплено фьюча {:+.4}",
                     sum,
                     sym,
                     sold,

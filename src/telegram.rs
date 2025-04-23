@@ -6,6 +6,8 @@ use teloxide::{
     dptree,
     types::CallbackQuery,
 };
+use tokio::sync::RwLock;
+use std::collections::HashMap;
 use crate::notifier::{self, Command};
 use crate::exchange::Exchange;
 
@@ -16,19 +18,25 @@ where
     // Оборачиваем exchange в Arc, чтобы можно было клонировать его в замыканиях
     let exchange = Arc::new(exchange);
 
+    // Создаем state_storage для хранения состояний пользователей
+    let state_storage: notifier::StateStorage = Arc::new(RwLock::new(HashMap::new()));
+    
     // 1) Текстовые команды
     let commands_branch = Update::filter_message()
         .filter_command::<Command>()
         .endpoint({
             let exchange = exchange.clone();
+            let state_storage = state_storage.clone(); // Клонируем state_storage
             move |bot: Bot, msg: Message, cmd: Command| {
                 let exchange = exchange.clone();
+                let state_storage = state_storage.clone(); // Передаем state_storage
                 async move {
                     if let Err(err) = notifier::handle_command(
                         bot.clone(),
                         msg.clone(),
                         cmd,
                         (*exchange).clone(),
+                        state_storage.clone(), // Передаем state_storage
                     )
                     .await
                     {
@@ -43,13 +51,16 @@ where
     let callback_branch = Update::filter_callback_query()
         .endpoint({
             let exchange = exchange.clone();
+            let state_storage = state_storage.clone(); // Клонируем state_storage
             move |bot: Bot, q: CallbackQuery| {
                 let exchange = exchange.clone();
+                let state_storage = state_storage.clone(); // Передаем state_storage
                 async move {
                     if let Err(err) = notifier::handle_callback(
                         bot.clone(),
                         q.clone(),
                         (*exchange).clone(),
+                        state_storage.clone(), // Передаем state_storage
                     )
                     .await
                     {
