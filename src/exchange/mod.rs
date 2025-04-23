@@ -4,16 +4,12 @@ pub mod types;
 pub mod bybit;
 
 pub use bybit::Bybit;
-// --- ИСПРАВЛЕНО: Импортируем LinearInstrumentInfo из bybit ---
-pub use types::{Balance, OrderSide, Order};
-pub use bybit::{SpotInstrumentInfo, LinearInstrumentInfo}; // <-- Исправлено здесь
-// --- Конец исправления ---
+// Импортируем типы из types и структуры информации об инструментах из bybit
+pub use types::{Balance, OrderSide, Order, OrderStatus};
+pub use bybit::{SpotInstrumentInfo, LinearInstrumentInfo};
 
 use anyhow::Result;
 use async_trait::async_trait;
-
-/// Статус исполнения ордера (если понадобится в других модулях)
-pub use types::OrderStatus;
 
 #[async_trait]
 pub trait Exchange {

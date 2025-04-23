@@ -1,4 +1,5 @@
 /// Запрос на хеджирование
+#[derive(Debug)]
 pub struct HedgeRequest {
     pub sum: f64,
     pub symbol: String,

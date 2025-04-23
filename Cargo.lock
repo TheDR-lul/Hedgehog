@@ -884,6 +884,7 @@ dependencies = [
  "async-trait",
  "config",
  "dotenv",
+ "futures",
  "hex",
  "hmac",
  "reqwest",

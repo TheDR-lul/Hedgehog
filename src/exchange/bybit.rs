@@ -16,7 +16,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, trace, warn}; // Логирование
-use uuid::Uuid;
 // --- Зависимости для форматирования чисел ---
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec; // Нужен для макроса dec!
@@ -43,11 +42,11 @@ struct ApiResponse {
 }
 
 /// Пустой результат для запросов без данных (например, отмена ордера)
-#[derive(Deserialize, Debug, Default)] // Уже есть Default
+#[derive(Deserialize, Debug, Default)]
 struct EmptyResult {}
 
 /// Ответ по балансу
-#[derive(Deserialize, Debug, Default)] // <-- Добавлен Default
+#[derive(Deserialize, Debug, Default)]
 struct BalanceResult {
     #[serde(rename = "list")]
     list: Vec<UnifiedAccountBalance>,
@@ -66,20 +65,18 @@ struct BalanceEntry {
     #[serde(rename = "coin")]
     coin: String,
     #[serde(rename = "walletBalance")]
-    wallet: String, // Используем для проверки наличия актива
+    wallet: String,
     #[serde(rename = "locked")]
     locked: String,
     #[serde(rename = "availableToWithdraw")]
-    available: String, // Используем для расчета free
+    available: String,
 }
 
 // --- Структуры для информации об инструменте (Общие фильтры) ---
 #[derive(Deserialize, Debug, Clone)]
 pub struct LotSizeFilter {
-    // --- ИЗМЕНЕНО: Используем base_precision ---
     #[serde(rename = "basePrecision")]
     pub base_precision: String,
-    // --- Конец изменений ---
     #[serde(rename = "maxOrderQty")]
     pub max_order_qty: String,
     #[serde(rename = "minOrderQty")]
@@ -93,7 +90,7 @@ pub struct PriceFilter {
 }
 
 // --- Структуры для информации об инструменте СПОТ ---
-#[derive(Deserialize, Debug, Clone, Default)] // <-- Добавлен Default
+#[derive(Deserialize, Debug, Clone, Default)]
 struct SpotInstrumentsInfoResult {
     list: Vec<SpotInstrumentInfo>,
 }
@@ -108,7 +105,7 @@ pub struct SpotInstrumentInfo {
 }
 
 // --- Структуры для информации об инструменте ЛИНЕЙНОМ ---
-#[derive(Deserialize, Debug, Clone, Default)] // <-- Добавлен Default
+#[derive(Deserialize, Debug, Clone, Default)]
 struct LinearInstrumentsInfoResult {
     list: Vec<LinearInstrumentInfo>,
 }
@@ -123,7 +120,7 @@ pub struct LinearInstrumentInfo {
 }
 
 // --- Структуры для risk-limit (для MMR) ---
-#[derive(Deserialize, Debug, Default)] // <-- Добавлен Default
+#[derive(Deserialize, Debug, Default)]
 struct RiskLimitResult {
     category: String,
     list: Vec<RiskLimitEntry>,
@@ -146,7 +143,7 @@ struct RiskLimitEntry {
 }
 
 /// Ответ по funding‑rate
-#[derive(Deserialize, Debug, Default)] // <-- Добавлен Default
+#[derive(Deserialize, Debug, Default)]
 struct FundingResult {
     list: Vec<FundingEntry>,
 }
@@ -158,16 +155,16 @@ struct FundingEntry {
 }
 
 /// Ответ при создании ордера
-#[derive(Deserialize, Debug, Default)] // <-- Добавлен Default
+#[derive(Deserialize, Debug, Default)]
 struct OrderCreateResult {
     #[serde(rename = "orderId")]
     id: String,
     #[serde(rename = "orderLinkId")]
-    link_id: String,
+    link_id: String, // Может быть пустой, если не передавали
 }
 
 /// Ответ при запросе статуса ордера
-#[derive(Deserialize, Debug, Default)] // <-- Добавлен Default
+#[derive(Deserialize, Debug, Default)]
 struct OrderQueryResult {
     list: Vec<OrderQueryEntry>,
 }
@@ -197,7 +194,7 @@ struct OrderQueryEntry {
 }
 
 /// Ответ по тикерам
-#[derive(Deserialize, Debug, Default)] // <-- Добавлен Default
+#[derive(Deserialize, Debug, Default)]
 struct TickersResult {
     category: String,
     list: Vec<TickerInfo>,
@@ -211,7 +208,7 @@ struct TickerInfo {
 }
 
 /// Ответ по времени сервера
-#[derive(Deserialize, Debug, Default)] // <-- Добавлен Default
+#[derive(Deserialize, Debug, Default)]
 struct ServerTimeResult {
     #[serde(rename = "timeNano")]
     time_nano: String,
@@ -297,7 +294,6 @@ impl Bybit {
             return Err(anyhow!("Failed to sync server time: status {}", status));
         }
 
-        // Используем временную структуру для парсинга
         #[derive(Deserialize)]
         struct TempTimeResponse {
             #[serde(rename = "retCode")] ret_code: i32,
@@ -396,12 +392,10 @@ impl Bybit {
         auth: bool,
     ) -> Result<T> {
         let url = self.url(endpoint);
-        // Логируем основные параметры вызова
         debug!(%url, method=%method, ?query, ?body, auth, "Bybit API Call ->");
 
         let mut req = self.client.request(method.clone(), &url);
 
-        // Обработка query string (без изменений)
         let qs = if let Some(q) = query {
             let encoded_query = q.iter()
                 .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
@@ -413,15 +407,12 @@ impl Bybit {
             String::new()
         };
 
-        // Обработка тела запроса
         let body_str = if let Some(ref b) = body {
             match serde_json::to_string(b) {
                 Ok(s) => {
-                    // --- ДОБАВЛЕНО: Логируем тело запроса ---
                     debug!(request_body=%s, "Serialized request body");
-                    // --- Конец добавления ---
-                    req = req.json(b); // Добавляем JSON тело в запрос reqwest
-                    s // Возвращаем строку для подписи
+                    req = req.json(b);
+                    s
                 }
                 Err(e) => {
                     error!("Failed to serialize request body: {}", e);
@@ -429,10 +420,9 @@ impl Bybit {
                 }
             }
         } else {
-            String::new() // Если тела нет, возвращаем пустую строку
+            String::new()
         };
 
-        // Добавление заголовков аутентификации (без изменений)
         if auth {
             match self.auth_headers(&qs, &body_str).await {
                 Ok(headers) => {
@@ -446,7 +436,6 @@ impl Bybit {
             }
         }
 
-        // Отправка запроса и обработка ответа (без изменений)
         let resp = match req.send().await {
             Ok(r) => r,
             Err(e) => {
@@ -472,7 +461,6 @@ impl Bybit {
              }
         }
 
-        // Парсинг ответа (без изменений)
         let json_value: Value = match serde_json::from_str(&raw_body) {
              Ok(v) => v,
              Err(e) => {
@@ -523,7 +511,6 @@ impl Exchange for Bybit {
         if let Err(e) = self.sync_time().await {
             error!("Time sync failed during check_connection: {}", e);
         }
-        // Указываем тип T явно, т.к. call_api его требует
         self.call_api::<ServerTimeResult>(Method::GET, "v5/market/time", None, None, false).await?;
         info!("Connection check successful (ping OK).");
         Ok(())
@@ -733,7 +720,7 @@ impl Exchange for Bybit {
             "qty": formatted_qty,
             "price": formatted_price,
             "timeInForce": "GTC",
-            "orderLinkId": format!("spot-limit-{}", Uuid::new_v4()),
+            // "orderLinkId": format!("spot-limit-{}", Uuid::new_v4()), // Убрали orderLinkId
         });
 
         let result: OrderCreateResult = self
@@ -801,8 +788,8 @@ impl Exchange for Bybit {
             "symbol": symbol,
             "side": side.to_string(),
             "orderType": "Market",
-            "qty": formatted_qty, // Используем отформатированное значение
-            "orderLinkId": format!("fut-market-{}", Uuid::new_v4()),
+            "qty": formatted_qty,
+            // "orderLinkId": format!("fut-market-{}", Uuid::new_v4()), // Убрали orderLinkId
         });
 
         let result: OrderCreateResult = self
@@ -831,7 +818,6 @@ impl Exchange for Bybit {
             "orderId": order_id,
         });
 
-        // Ожидаем EmptyResult, call_api обработает случай отсутствия 'result'
         let _: EmptyResult = self
             .call_api(Method::POST, "v5/order/cancel", None, Some(body), true)
             .await?;

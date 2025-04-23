@@ -1,3 +1,5 @@
+// src/notifier/mod.rs
+
 pub mod commands;
 pub mod callbacks;
 pub mod messages;
@@ -18,14 +20,15 @@ pub enum UserState {
     AwaitingAssetSelection { last_bot_message_id: Option<i32> },
     AwaitingSum { symbol: String, last_bot_message_id: Option<i32> }, // Для хеджирования
     AwaitingVolatility { symbol: String, sum: f64, last_bot_message_id: Option<i32> }, // Для хеджирования
-    AwaitingUnhedgeQuantity { symbol: String, last_bot_message_id: Option<i32> }, // <-- НОВОЕ СОСТОЯНИЕ
+    AwaitingUnhedgeQuantity { symbol: String, last_bot_message_id: Option<i32> }, // Для расхеджирования
     None,
 }
 
 /// Тип для хранения состояний пользователей
 pub type StateStorage = Arc<RwLock<HashMap<ChatId, UserState>>>;
 
-#[derive(BotCommands, Clone)]
+// --- ИЗМЕНЕНО: Добавлено #[derive(Debug)] ---
+#[derive(BotCommands, Clone, Debug)]
 #[command(rename_rule = "lowercase", description = "Доступные команды:")]
 pub enum Command {
     #[command(description = "показать это сообщение", aliases = ["help", "?"])]
