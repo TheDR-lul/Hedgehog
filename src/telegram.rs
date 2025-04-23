@@ -5,7 +5,6 @@ use teloxide::{
     prelude::*,
     dptree,
     types::CallbackQuery,
-    utils::command::BotCommands,
 };
 use crate::notifier::{self, Command};
 use crate::exchange::Exchange;
