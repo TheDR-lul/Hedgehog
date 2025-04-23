@@ -1,123 +1,143 @@
+// src/exchange/bybit.rs
+
 use super::{Exchange, OrderStatus};
 use crate::exchange::types::{Balance, Order, OrderSide};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
 use reqwest::{Client, Method};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize; 
 use serde_json::{json, Value};
 use sha2::Sha256;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::RwLock;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 use std::sync::Arc;
+use tracing::{debug, error, info, warn}; // Добавляем нужные уровни логирования
 
 type HmacSha256 = Hmac<Sha256>;
 
+// --- Константы для категорий ---
+const SPOT_CATEGORY: &str = "spot";
+const LINEAR_CATEGORY: &str = "linear";
+
 /// Универсальная обёртка для ответов Bybit API v5
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)] // Добавим Debug для логирования
 struct ApiResponse<T> {
     #[serde(rename = "retCode")] ret_code: i32,
     #[serde(rename = "retMsg")] ret_msg: String,
     result: T,
-    #[serde(rename = "time")] _server_time: i64,
+    // Добавляем time опционально, т.к. не все ответы его содержат
+    #[serde(rename = "time")] _server_time: Option<i64>,
 }
 
+/// Пустой результат для запросов без данных (например, отмена ордера)
+#[derive(Deserialize, Debug)]
+struct EmptyResult {}
+
 /// Ответ по балансу: список Unified‑аккаунтов
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct BalanceResult {
     #[serde(rename = "list")]
-    pub list: Vec<UnifiedAccountBalance>,
+    list: Vec<UnifiedAccountBalance>,
 }
 
 /// Один Unified‑аккаунт с массивом монет
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct UnifiedAccountBalance {
     #[serde(rename = "accountType")]
-    pub account_type: String,
+    account_type: String,
     #[serde(rename = "coin")]
-    pub coins: Vec<BalanceEntry>,
+    coins: Vec<BalanceEntry>,
 }
 
 /// Запись баланса для конкретной монеты
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct BalanceEntry {
     #[serde(rename = "coin")]
-    pub coin: String,
+    coin: String,
     #[serde(rename = "walletBalance")]
-    pub wallet: String,
+    wallet: String, // Используем walletBalance как общий
     #[serde(rename = "locked")]
-    pub locked: String,
+    locked: String,
+    // Добавим availableToWithdraw или availableBalance, если нужно точное значение free
+    #[serde(rename = "availableToWithdraw")] // или availableBalance
+    available: String,
 }
 
-/// Ответ по позициям
-#[derive(Deserialize)]
-struct PositionResult {
-    pub list: Vec<PositionEntry>,
+/// Ответ по информации об инструменте (для MMR)
+#[derive(Deserialize, Debug)]
+struct InstrumentsInfoResult {
+    list: Vec<InstrumentInfo>,
 }
 
-#[derive(Deserialize)]
-struct PositionEntry {
-    #[serde(rename = "maintMargin")] pub maint_margin: String,
-    #[serde(rename = "positionValue")] pub position_value: String,
+#[derive(Deserialize, Debug)]
+struct InstrumentInfo {
+    #[serde(rename = "symbol")] symbol: String,
+    #[serde(rename = "maintMarginRate")] mmr: String,
+    // Можно добавить другие полезные поля: tickSize, lotSizeFilter и т.д.
 }
 
 /// Ответ по funding‑rate
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct FundingResult {
-    pub list: Vec<FundingEntry>,
+    list: Vec<FundingEntry>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct FundingEntry {
-    #[serde(rename = "fundingRate")] pub rate: String,
+    #[serde(rename = "fundingRate")] rate: String,
 }
 
-/// Ответ при создании/запросе ордера
-#[derive(Deserialize)]
-struct OrderApiResult {
-    #[serde(rename = "orderId")] pub id: String,
-    pub price: String,
-    pub qty: String,
-    pub side: String,
-    #[serde(rename = "createTime")] pub ts: i64,
+/// Ответ при создании ордера
+#[derive(Deserialize, Debug)]
+struct OrderCreateResult {
+    #[serde(rename = "orderId")] id: String,
+    #[serde(rename = "orderLinkId")] link_id: String,
 }
 
-/// Тело запроса на размещение ордера
-#[derive(Serialize)]
-struct OrderRequest<'a> {
-    category: &'a str,
-    symbol: &'a str,
-    side: String,
-    #[serde(rename = "orderType")]
-    order_type: &'a str,
-    qty: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    price: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "timeInForce")]
-    time_in_force: Option<&'a str>,
-    #[serde(rename = "orderLinkId")]
-    order_link_id: String,
+/// Ответ при запросе статуса ордера (используем /v5/order/history или /v5/order/realtime)
+#[derive(Deserialize, Debug)]
+struct OrderQueryResult {
+    list: Vec<OrderQueryEntry>,
 }
 
-/// Ответ по тикеру (спот‑цена)
-#[derive(Deserialize)]
-struct TickerResult {
-    pub price: String,
-}
-
-/// Ответ при запросе статуса ордера
-#[derive(Deserialize)]
-struct OrderQueryList {
-    #[serde(rename = "orderList")]
-    pub list: Vec<OrderQueryEntry>,
-}
-
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct OrderQueryEntry {
-    #[serde(rename = "cumExecQty")] pub cum_exec_qty: String,
-    #[serde(rename = "leavesQty")] pub leaves_qty: String,
+    #[serde(rename = "orderId")] id: String,
+    #[serde(rename = "symbol")] symbol: String,
+    #[serde(rename = "side")] side: String,
+    #[serde(rename = "orderStatus")] status: String, // e.g., "New", "Filled", "PartiallyFilled", "Cancelled"
+    #[serde(rename = "cumExecQty")] cum_exec_qty: String,
+    #[serde(rename = "cumExecValue")] cum_exec_value: String, // Суммарная стоимость исполненной части
+    #[serde(rename = "leavesQty")] leaves_qty: String,
+    #[serde(rename = "price")] price: String, // Цена лимитного ордера
+    #[serde(rename = "avgPrice")] avg_price: String, // Средняя цена исполнения
+    #[serde(rename = "createdTime")] created_time: String, // Время создания как строка мс
+    // Добавить другие нужные поля: orderType, timeInForce и т.д.
 }
+
+
+/// Ответ по тикерам (для спот‑цены)
+#[derive(Deserialize, Debug)]
+struct TickersResult {
+    category: String,
+    list: Vec<TickerInfo>,
+}
+
+#[derive(Deserialize, Debug)]
+struct TickerInfo {
+    symbol: String,
+    #[serde(rename = "lastPrice")] price: String,
+}
+
+/// Ответ по времени сервера
+#[derive(Deserialize, Debug)]
+struct ServerTimeResult {
+    #[serde(rename = "timeNano")] time_nano: String, // Используем наносекунды для большей точности
+    #[serde(rename = "timeSecond")] _time_second: String,
+}
+
 
 /// Клиент Bybit
 #[derive(Debug, Clone)]
@@ -127,88 +147,139 @@ pub struct Bybit {
     client: Client,
     base_url: String,
     recv_window: u64,
-    time_offset: Option<i64>, // Для хранения смещения времени
-    balance_cache: Arc<RwLock<std::collections::HashMap<String, (Balance, SystemTime)>>>, // Кэш для баланса
+    quote_currency: String, // <-- Добавили валюту котировки
+    // Используем Mutex для асинхронного доступа
+    time_offset_ms: Arc<Mutex<Option<i64>>>,
+    balance_cache: Arc<Mutex<Option<(Vec<(String, Balance)>, SystemTime)>>>, // Кэш для баланса
 }
 
 impl Bybit {
-    /// Создаёт новый экземпляр клиента
-    pub fn new(key: &str, secret: &str, base_url: &str) -> Result<Self> {
+    /// Создаёт новый экземпляр клиента и синхронизирует время
+    pub async fn new(key: &str, secret: &str, base_url: &str, quote_currency: &str) -> Result<Self> {
         if !base_url.starts_with("http") {
-            return Err(anyhow!("Invalid URL"));
+            return Err(anyhow!("Invalid base URL"));
+        }
+        if quote_currency.is_empty() {
+            return Err(anyhow!("Quote currency cannot be empty"));
         }
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(10)) // Увеличенный таймаут
+            .timeout(Duration::from_secs(10))
             .build()?;
-        Ok(Self {
+
+        // Используем let mut instance, так как sync_time требует &self
+        let instance = Self {
             api_key: key.into(),
             api_secret: secret.into(),
             client,
             base_url: base_url.trim_end_matches('/').into(),
             recv_window: 5_000,
-            time_offset: None,
-            balance_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
-        })
+            quote_currency: quote_currency.to_uppercase(), // Сохраняем в верхнем регистре
+            time_offset_ms: Arc::new(Mutex::new(None)),
+            balance_cache: Arc::new(Mutex::new(None)),
+        };
+
+        // Синхронизируем время при создании
+        if let Err(e) = instance.sync_time().await {
+            warn!("Initial time sync failed: {}. Authentication might fail.", e);
+            // Можно решить, критична ли эта ошибка для старта
+            // return Err(e);
+        } else {
+            info!("Initial time sync successful.");
+        }
+
+        Ok(instance)
+    }
+
+    /// Формирует полный URL эндпоинта
+    fn url(&self, ep: &str) -> String {
+        format!("{}/{}", self.base_url, ep.trim_start_matches('/'))
+    }
+
+    /// Формирует символ пары (например, BTC + USDT -> BTCUSDT)
+    fn format_pair(&self, base_symbol: &str) -> String {
+        format!("{}{}", base_symbol.to_uppercase(), self.quote_currency)
     }
 
     /// Синхронизация времени с сервером
-    async fn sync_time(&mut self) -> Result<()> {
+    async fn sync_time(&self) -> Result<()> {
         let url = self.url("v5/market/time");
-        tracing::info!(%url, "Syncing server time");
-        
-        let res = self.client.get(&url).send().await?;
+        debug!(%url, "Syncing server time");
+
+        let res = self.client.get(&url).send().await
+            .map_err(|e| anyhow!("Failed to send time sync request: {}", e))?;
+
         if !res.status().is_success() {
-            return Err(anyhow!("Failed to sync server time: non-success status"));
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            error!(%status, %body, "Time sync request failed");
+            return Err(anyhow!("Failed to sync server time: status {}", status));
         }
-    
-        let raw_time: ApiResponse<Value> = res.json().await?;
-        let server_time = raw_time._server_time;
-        
-        let local_time = SystemTime::now()
+
+        // Парсим ответ времени
+        let raw_response: ApiResponse<ServerTimeResult> = res.json().await
+            .map_err(|e| anyhow!("Failed to parse time sync response: {}", e))?;
+
+        // Используем timeNano для большей точности, конвертируем в миллисекунды
+        let server_time_ms = raw_response.result.time_nano.parse::<u128>()? / 1_000_000;
+
+        let local_time_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
-        
-        self.time_offset = Some(server_time - local_time);
+            .map_err(|e| anyhow!("System time error: {}", e))?
+            .as_millis();
+
+        let offset = server_time_ms as i64 - local_time_ms as i64;
+        info!("Server time synced. Offset: {} ms", offset);
+
+        // Блокируем Mutex асинхронно
+        let mut time_offset_guard = self.time_offset_ms.lock().await;
+        *time_offset_guard = Some(offset);
+
         Ok(())
     }
-    
 
-    /// Корректировка временной метки
-    fn ts(&self) -> String {
-        let local_time = SystemTime::now()
+    /// Получение скорректированной временной метки в миллисекундах
+    async fn get_timestamp_ms(&self) -> Result<i64> {
+        let local_time_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .map_err(|e| anyhow!("System time error: {}", e))?
             .as_millis() as i64;
 
-        let corrected_time = match self.time_offset {
-            Some(offset) => local_time + offset,
-            None => local_time,
-        };
+        // Блокируем Mutex асинхронно
+        let time_offset_guard = self.time_offset_ms.lock().await;
+        // Используем *time_offset_guard, чтобы получить Option<i64>
+        let offset = (*time_offset_guard).ok_or_else(|| {
+            warn!("Time offset is not available. Authentication might fail.");
+            anyhow!("Time not synchronized with server")
+        })?;
 
-        corrected_time.to_string()
+        Ok(local_time_ms + offset)
     }
 
     /// Генерация подписи
     fn sign(&self, payload: &str) -> String {
-        let mut mac = HmacSha256::new_from_slice(self.api_secret.as_bytes()).unwrap();
+        let mut mac = HmacSha256::new_from_slice(self.api_secret.as_bytes())
+            .expect("HMAC can take key of any size"); // unwrap безопасен
         mac.update(payload.as_bytes());
         hex::encode(mac.finalize().into_bytes())
     }
 
     /// Формирование заголовков аутентификации
-    fn auth(&self, qs: &str, body: &str) -> Vec<(&str, String)> {
-        let t = self.ts();
+    async fn auth_headers(&self, qs: &str, body: &str) -> Result<Vec<(&str, String)>> {
+        let timestamp_ms = self.get_timestamp_ms().await?;
+        let t = timestamp_ms.to_string();
         let rw = self.recv_window.to_string();
-        let payload = format!("{}{}{}{}", t, &self.api_key, rw, if !qs.is_empty() { qs } else { body });
-        let sign = self.sign(&payload);
+        // Формируем строку для подписи: timestamp + apiKey + recvWindow + (queryString || requestBody)
+        let payload_str = format!("{}{}{}{}", t, self.api_key, rw, if !qs.is_empty() { qs } else { body });
+        let sign = self.sign(&payload_str);
 
-        vec![
+        Ok(vec![
             ("X-BAPI-API-KEY", self.api_key.clone()),
             ("X-BAPI-TIMESTAMP", t),
             ("X-BAPI-RECV-WINDOW", rw),
             ("X-BAPI-SIGN", sign),
-        ]
+            // Добавляем Content-Type для POST запросов
+            ("Content-Type", "application/json".to_string()),
+        ])
     }
 
     /// Универсальный вызов Bybit API
@@ -216,241 +287,322 @@ impl Bybit {
         &self,
         method: Method,
         endpoint: &str,
-        query: Option<&[(&str, &str)]>,
+        query: Option<&[(&str, &str)]>, // Используем срезы для query
         body: Option<Value>,
         auth: bool,
     ) -> Result<T> {
         let url = self.url(endpoint);
-        tracing::debug!(%url, method=%method, "Bybit→");
+        debug!(%url, method=%method, ?query, ?body, auth, "Bybit API Call ->");
 
         let mut req = self.client.request(method.clone(), &url);
 
-        // Собираем query-string
+        // Собираем query-string для подписи и запроса
         let qs = if let Some(q) = query {
-            req = req.query(q);
-            q.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join("&")
+            // URL-кодируем параметры для строки запроса
+            let encoded_query = q.iter()
+                .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
+                .collect::<Vec<_>>()
+                .join("&");
+            req = req.query(q); // reqwest сам кодирует query
+            encoded_query // Возвращаем кодированную строку для подписи
         } else {
             String::new()
         };
 
-        // Собираем тело
-        let bs = if let Some(ref b) = body {
-            let s = b.to_string();
-            req = req.json(b);
+        // Собираем тело для подписи и запроса
+        let body_str = if let Some(ref b) = body {
+            let s = serde_json::to_string(b)?; // Сериализуем тело в строку для подписи
+            req = req.json(b); // Передаем Value в reqwest
             s
         } else {
             String::new()
         };
 
-        // Добавляем заголовки аутентификации
+        // Добавляем заголовки аутентификации, если нужно
         if auth {
-            for (h, v) in self.auth(&qs, &bs) {
+            let headers = self.auth_headers(&qs, &body_str).await?;
+            for (h, v) in headers {
                 req = req.header(h, v);
             }
         }
 
-        // Отправляем запрос и логируем ответ
-        let resp = req.send().await?;
-        let raw = resp.text().await?;
-        tracing::info!(%raw, "Raw Bybit response");
-
-        // Десериализуем и проверяем код
-        let api: ApiResponse<T> = serde_json::from_str(&raw)?;
-        if api.ret_code != 0 {
-            Err(anyhow!("Bybit API error {}: {}", api.ret_code, api.ret_msg))
-        } else {
-            Ok(api.result)
+        // Отправляем запрос
+        let resp = req.send().await.map_err(|e| anyhow!("Request failed: {}", e))?;
+        let status = resp.status();
+        let raw_body = resp.text().await.map_err(|e| anyhow!("Failed to read response body: {}", e))?;
+        debug!(%status, body_len=raw_body.len(), "Bybit API Response <-");
+        // Логируем тело ответа только если это не успех или включен trace уровень
+        if !status.is_success()  {
+             info!(response_body=%raw_body, "Full Bybit Response Body");
         }
-    }
 
-    fn url(&self, ep: &str) -> String {
-        format!("{}/{}", self.base_url, ep.trim_start_matches('/'))
+        // Десериализуем и проверяем код ответа Bybit
+        // Используем serde_path_to_error для более детальных ошибок парсинга
+        let mut deserializer = serde_json::Deserializer::from_str(&raw_body);
+        let api_resp: ApiResponse<T> = serde_path_to_error::deserialize(&mut deserializer)
+            .map_err(|e| {
+                error!(error=%e, raw_body, "Failed to deserialize Bybit response");
+                anyhow!("Failed to parse Bybit response: {}", e)
+            })?;
+
+        if api_resp.ret_code != 0 {
+            error!(code=api_resp.ret_code, msg=%api_resp.ret_msg, "Bybit API Error");
+            Err(anyhow!("Bybit API Error ({}): {}", api_resp.ret_code, api_resp.ret_msg))
+        } else {
+            Ok(api_resp.result)
+        }
     }
 }
 
 #[async_trait]
 impl Exchange for Bybit {
-    /// Проверка соединения
+    /// Проверка соединения (просто пинг времени)
     async fn check_connection(&mut self) -> Result<()> {
-        // Исправленный вызов sync_time
+        // Попытка синхронизировать время при проверке соединения
         if let Err(e) = self.sync_time().await {
-            tracing::warn!("Time sync failed: {}", e);
+            warn!("Time sync failed during check_connection: {}", e);
+            // Не возвращаем ошибку, т.к. сам пинг может пройти
         }
-        
-        let url = self.url("v5/market/time");
-        tracing::info!(%url, "ping");
-        
-        let res = self.client.get(&url).send().await?;
-        if res.status().is_success() {
-            Ok(())
-        } else {
-            let status = res.status();
-            let body = res.text().await.unwrap_or_default();
-            tracing::error!(%status, %body, "ping failed");
-            Err(anyhow!("ping {}", status))
-        }
+        // Используем эндпоинт времени как пинг
+        let _: ServerTimeResult = self.call_api(Method::GET, "v5/market/time", None, None, false).await?;
+        info!("Connection check successful (ping OK)");
+        Ok(())
     }
+
     /// Получение баланса для конкретной монеты
     async fn get_balance(&self, coin: &str) -> Result<Balance> {
-        let all = self.get_all_balances().await?;
-        all.into_iter()
+        let all_balances = self.get_all_balances().await?; // Получаем из кэша или API
+        all_balances.into_iter()
             .find(|(c, _)| c.eq_ignore_ascii_case(coin))
             .map(|(_, b)| b)
-            .ok_or_else(|| anyhow!("no balance for {}", coin))
+            .ok_or_else(|| anyhow!("No balance entry found for {}", coin))
     }
 
     /// Получение всех балансов (с кэшированием)
     async fn get_all_balances(&self) -> Result<Vec<(String, Balance)>> {
-        let mut cache = self.balance_cache.write().await;
-        
-        // Исправленная работа с кэшем
-        if !cache.is_empty() {
-            let now = SystemTime::now();
-            cache.retain(|_, (_, timestamp)| {
-                match timestamp.elapsed() {
-                    Ok(duration) => duration.as_millis() < 100,
-                    Err(_) => false,
+        let cache_duration = Duration::from_secs(5); // Увеличиваем время жизни кэша до 5 секунд
+        let now = SystemTime::now();
+
+        // Блокируем кэш асинхронно
+        let mut cache_guard = self.balance_cache.lock().await;
+
+        // Проверяем кэш
+        if let Some((cached_balances, timestamp)) = &*cache_guard {
+            // Проверяем время жизни кэша
+            // Используем match для обработки ошибки duration_since, хотя она маловероятна
+            match now.duration_since(*timestamp) {
+                Ok(age) if age < cache_duration => {
+                    info!("Returning cached balances.");
+                    return Ok(cached_balances.clone());
                 }
-            });
-        }
-        
-        if cache.is_empty() {
-            let res: BalanceResult = self.call_api(
-                Method::GET,
-                "v5/account/wallet-balance",
-                Some(&[("accountType", "UNIFIED")]),
-                None,
-                true,
-            ).await?;
-            
-            let unified = res.list.into_iter()
-                .find(|acc| acc.account_type.eq_ignore_ascii_case("UNIFIED"))
-                .ok_or_else(|| anyhow!("no unified account"))?;
-            
-            let balances = unified.coins.into_iter()
-                .map(|e| {
-                    let total = e.wallet.parse::<f64>()?;
-                    let locked = e.locked.parse::<f64>()?;
-                    Ok((e.coin.clone(), Balance { free: total - locked, locked }))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            
-            let now = SystemTime::now();
-            for (coin, balance) in &balances {
-                cache.insert(coin.clone(), (balance.clone(), now));
+                Ok(_) => { // Кэш устарел
+                    info!("Balance cache expired.");
+                }
+                Err(e) => { // Ошибка системного времени
+                    warn!("System time error checking cache age: {}. Fetching fresh balances.", e);
+                }
             }
-            Ok(balances)
         } else {
-            Ok(cache.iter().map(|(c, (b, _))| (c.clone(), b.clone())).collect())
+            info!("Balance cache is empty.");
         }
+
+        // Кэш устарел или пуст, запрашиваем API
+        info!("Fetching fresh balances from API.");
+        let res: BalanceResult = self.call_api(
+            Method::GET,
+            "v5/account/wallet-balance",
+            // Запрашиваем только основной тип аккаунта (UNIFIED или CONTRACT)
+            Some(&[("accountType", "UNIFIED")]), // или "CONTRACT", если нужен другой
+            None,
+            true,
+        ).await?;
+
+        // Ищем нужный тип аккаунта
+        let account = res.list.into_iter()
+            .find(|acc| acc.account_type == "UNIFIED") // Ищем конкретно UNIFIED
+            .ok_or_else(|| anyhow!("UNIFIED account type not found in balance response"))?;
+
+        // Парсим балансы монет
+        let mut balances = Vec::new();
+        for entry in account.coins {
+            // Используем availableToWithdraw или availableBalance как 'free'
+            let free = entry.available.parse::<f64>()
+                .map_err(|e| anyhow!("Failed to parse free balance for {}: {}", entry.coin, e))?;
+            let locked = entry.locked.parse::<f64>()
+                .map_err(|e| anyhow!("Failed to parse locked balance for {}: {}", entry.coin, e))?;
+            balances.push((entry.coin, Balance { free, locked }));
+        }
+
+        // Обновляем кэш
+        *cache_guard = Some((balances.clone(), now));
+        info!("Balances updated and cached.");
+
+        Ok(balances)
     }
 
-    /// Размещение лимитного ордера
+    /// Размещение лимитного ордера (для СПОТА)
     async fn place_limit_order(
         &self,
-        symbol: &str,
+        symbol: &str, // Ожидаем базовый символ, например "BTC"
         side: OrderSide,
         qty: f64,
         price: f64,
     ) -> Result<Order> {
+        let spot_pair = self.format_pair(symbol); // Формируем "BTCUSDT"
+        info!(symbol=%spot_pair, side=%side, qty, price, category=SPOT_CATEGORY, "Placing SPOT limit order");
+
+        // Bybit ожидает qty и price как строки
         let body = json!({
-            "category": "linear",
-            "symbol": symbol,
+            "category": SPOT_CATEGORY,
+            "symbol": spot_pair,
             "side": side.to_string(),
             "orderType": "Limit",
-            "qty": qty,
-            "price": price,
-            "timeInForce": "GoodTillCancel",
-            "orderLinkId": Uuid::new_v4().to_string(),
+            "qty": qty.to_string(), // qty как строка
+            "price": price.to_string(), // price как строка
+            "timeInForce": "GTC", // Good-Till-Cancelled
+            "orderLinkId": format!("spot-limit-{}", Uuid::new_v4()), // Уникальный ID
         });
 
-        let o: ApiResponse<OrderApiResult> = self
+        let result: OrderCreateResult = self
             .call_api(Method::POST, "v5/order/create", None, Some(body), true)
             .await?;
 
+        info!(order_id=%result.id, link_id=%result.link_id, "SPOT limit order placed successfully");
+
+        // Возвращаем базовую информацию об ордере
+        // Время создания и исполненные параметры будут доступны через get_order_status
         Ok(Order {
-            id: o.result.id,
-            side: o.result.side.parse()?,
-            qty: o.result.qty.parse()?,
-            price: Some(o.result.price.parse()?),
-            ts: o.result.ts,
+            id: result.id,
+            side, // Мы знаем сторону
+            qty,  // Мы знаем запрошенное количество
+            price: Some(price), // Мы знаем запрошенную цену
+            ts: self.get_timestamp_ms().await?, // Примерное время отправки
         })
     }
 
-    /// Размещение рыночного ордера
+    /// Размещение рыночного ордера (для ФЬЮЧЕРСОВ)
     async fn place_market_order(
         &self,
-        symbol: &str,
+        symbol: &str, // Ожидаем ПОЛНЫЙ символ фьючерса, например "BTCUSDT"
         side: OrderSide,
         qty: f64,
     ) -> Result<Order> {
+        info!(symbol=%symbol, side=%side, qty, category=LINEAR_CATEGORY, "Placing FUTURES market order");
+
+        // Bybit ожидает qty как строку
         let body = json!({
-            "category": "linear",
-            "symbol": symbol,
+            "category": LINEAR_CATEGORY,
+            "symbol": symbol, // Используем переданный символ (уже должен быть парой)
             "side": side.to_string(),
             "orderType": "Market",
-            "qty": qty,
-            "orderLinkId": Uuid::new_v4().to_string(),
+            "qty": qty.to_string(), // qty как строка
+            // Для рыночного ордера можно указать timeInForce=IOC или FOK, если нужно
+            // "timeInForce": "IOC",
+            "orderLinkId": format!("fut-market-{}", Uuid::new_v4()), // Уникальный ID
         });
 
-        let o: ApiResponse<OrderApiResult> = self
+        let result: OrderCreateResult = self
             .call_api(Method::POST, "v5/order/create", None, Some(body), true)
             .await?;
 
+        info!(order_id=%result.id, link_id=%result.link_id, "FUTURES market order placed successfully");
+
+        // Возвращаем базовую информацию
         Ok(Order {
-            id: o.result.id,
-            side: o.result.side.parse()?,
-            qty: o.result.qty.parse()?,
-            price: None,
-            ts: o.result.ts,
+            id: result.id,
+            side,
+            qty,
+            price: None, // Цена исполнения неизвестна сразу
+            ts: self.get_timestamp_ms().await?,
         })
     }
 
-    /// Отмена ордера
+    /// Отмена ордера (нужно знать категорию)
     async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<()> {
+        // !!! ВАЖНО: Этот метод не знает, спотовый это ордер или фьючерсный.
+        // Нужно либо передавать категорию, либо иметь отдельные методы отмены.
+        // Пока предположим, что отменяем СПОТОВЫЙ ордер (как в hedger.rs)
+        let spot_pair = self.format_pair(symbol);
+        info!(symbol=%spot_pair, order_id, category=SPOT_CATEGORY, "Cancelling SPOT order");
+
         let body = json!({
-            "category": "linear",
-            "symbol": symbol,
+            "category": SPOT_CATEGORY, // <-- Указываем категорию
+            "symbol": spot_pair,
             "orderId": order_id,
+            // Можно использовать orderLinkId, если он известен
+            // "orderLinkId": "...",
         });
 
-        let _: Value = self
+        // Результат не важен, только факт успеха (retCode=0)
+        let _: EmptyResult = self
             .call_api(Method::POST, "v5/order/cancel", None, Some(body), true)
             .await?;
 
+        info!(order_id, "SPOT Order cancelled successfully");
         Ok(())
     }
 
     /// Получение спотовой цены
     async fn get_spot_price(&self, symbol: &str) -> Result<f64> {
-        let tick: ApiResponse<TickerResult> = self
-            .call_api(
+        let spot_pair = self.format_pair(symbol);
+        debug!(symbol=%spot_pair, category=SPOT_CATEGORY, "Fetching spot price");
+
+        // Используем эндпоинт /v5/market/tickers
+        let params = [("category", SPOT_CATEGORY), ("symbol", &spot_pair)];
+        let tickers_result: TickersResult = self.call_api(
                 Method::GET,
-                "v5/market/ticker/price",
-                Some(&[("symbol", symbol)]),
+                "v5/market/tickers",
+                Some(&params),
                 None,
-                false,
+                false, // Не требует аутентификации
             )
             .await?;
 
-        Ok(tick.result.price.parse()?)
+        // Ищем нужный тикер в списке
+        let ticker = tickers_result.list.into_iter()
+             .find(|t| t.symbol == spot_pair) // Убедимся, что это наш символ
+             .ok_or_else(|| anyhow!("No ticker info found for {}", spot_pair))?;
+
+        ticker.price.parse::<f64>()
+             .map_err(|e| anyhow!("Failed to parse spot price for {}: {}", spot_pair, e))
     }
 
-    /// Получение статуса ордера
+    /// Получение статуса ордера (нужно знать категорию)
     async fn get_order_status(&self, symbol: &str, order_id: &str) -> Result<OrderStatus> {
-        let oq: ApiResponse<OrderQueryList> = self
+        // !!! ВАЖНО: Аналогично cancel_order, нужна категория.
+        // Предполагаем, что проверяем СПОТОВЫЙ ордер.
+        let spot_pair = self.format_pair(symbol);
+        debug!(symbol=%spot_pair, order_id, category=SPOT_CATEGORY, "Fetching SPOT order status");
+
+        // Используем /v5/order/history или /v5/order/realtime
+        // /realtime может быть быстрее для активных ордеров
+        let params = [
+            ("category", SPOT_CATEGORY),
+            ("orderId", order_id),
+            // Можно добавить symbol, но orderId обычно уникален
+            // ("symbol", &spot_pair),
+        ];
+        let query_result: OrderQueryResult = self
             .call_api(
                 Method::GET,
-                "v5/order",
-                Some(&[("symbol", symbol), ("orderId", order_id)]),
+                "v5/order/realtime", // Используем realtime
+                Some(&params),
                 None,
-                true,
+                true, // Требует аутентификации
             )
             .await?;
 
-        let e = oq.result.list.into_iter().next().ok_or_else(|| anyhow!("no order"))?;
-        let filled = e.cum_exec_qty.parse()?;
-        let remaining = e.leaves_qty.parse()?;
+        // Ищем ордер в списке (обычно будет один)
+        let order_entry = query_result.list.into_iter().next()
+            .ok_or_else(|| anyhow!("Order ID {} not found", order_id))?;
+
+        // Парсим исполненное и оставшееся количество
+        let filled = order_entry.cum_exec_qty.parse::<f64>()
+            .map_err(|e| anyhow!("Failed to parse filled qty for order {}: {}", order_id, e))?;
+        let remaining = order_entry.leaves_qty.parse::<f64>()
+            .map_err(|e| anyhow!("Failed to parse remaining qty for order {}: {}", order_id, e))?;
+
+        info!(order_id, status=%order_entry.status, filled, remaining, "Order status received");
 
         Ok(OrderStatus {
             filled_qty: filled,
@@ -458,38 +610,73 @@ impl Exchange for Bybit {
         })
     }
 
-    /// Получение MMR (Maintenance Margin Requirement)
-    async fn get_mmr(&self, sym: &str) -> Result<f64> {
-        let pos: PositionResult = self
-            .call_api(
-                Method::GET,
-                "v5/position/list",
-                Some(&[("symbol", sym), ("category", "linear")]),
-                None,
-                true,
-            )
-            .await?;
+    /// Получение MMR (Maintenance Margin Requirement) для ЛИНЕЙНОГО контракта
+    async fn get_mmr(&self, symbol: &str) -> Result<f64> {
+        let linear_pair = self.format_pair(symbol);
+        debug!(symbol=%linear_pair, category=LINEAR_CATEGORY, "Fetching MMR");
 
-        let p = pos.list.into_iter().next().ok_or_else(|| anyhow!("no pos for {}", sym))?;
-        let mm = p.maint_margin.parse::<f64>()?;
-        let pv = p.position_value.parse::<f64>()?;
+        let params = [("category", LINEAR_CATEGORY), ("symbol", &linear_pair)];
+        let info_result: InstrumentsInfoResult = self.call_api(
+            Method::GET,
+            "v5/market/instruments-info",
+            Some(&params),
+            None,
+            false, // Не требует аутентификации
+        ).await?;
 
-        Ok(mm / pv)
+        let instrument = info_result.list.into_iter()
+            .find(|i| i.symbol == linear_pair) // Убедимся, что это наш инструмент
+            .ok_or_else(|| anyhow!("No instrument info found for {}", linear_pair))?;
+
+        instrument.mmr.parse::<f64>()
+            .map_err(|e| anyhow!("Failed to parse MMR for {}: {}", linear_pair, e))
     }
 
-    /// Получение средней ставки финансирования за последние дни
-    async fn get_funding_rate(&self, sym: &str, days: u16) -> Result<f64> {
-        let fr: FundingResult = self
+    /// Получение средней ставки финансирования для ЛИНЕЙНОГО контракта
+    async fn get_funding_rate(&self, symbol: &str, days: u16) -> Result<f64> {
+        let linear_pair = self.format_pair(symbol);
+        // Bybit API позволяет запросить до 200 записей за раз
+        let limit = days.min(200).to_string();
+        debug!(symbol=%linear_pair, days, limit=%limit, "Fetching funding rate history");
+
+        let params = [
+            ("category", LINEAR_CATEGORY),
+            ("symbol", &linear_pair),
+            ("limit", limit.as_str()),
+        ];
+        let funding_result: FundingResult = self
             .call_api(
                 Method::GET,
                 "v5/market/funding-rate-history",
-                Some(&[("symbol", sym), ("limit", &days.to_string())]),
+                Some(&params),
                 None,
-                true,
+                false, // Не требует аутентификации
             )
             .await?;
 
-        let sum: f64 = fr.list.iter().map(|r| r.rate.parse().unwrap_or(0.0)).sum();
-        Ok(sum / (fr.list.len().max(1) as f64))
+        if funding_result.list.is_empty() {
+            warn!("No funding rate history found for {}", linear_pair);
+            return Ok(0.0); // Или вернуть ошибку?
+        }
+
+        let mut sum = 0.0;
+        let mut count = 0;
+        for entry in &funding_result.list {
+            match entry.rate.parse::<f64>() {
+                Ok(rate) => {
+                    sum += rate;
+                    count += 1;
+                }
+                Err(e) => {
+                    warn!("Failed to parse funding rate '{}': {}", entry.rate, e);
+                }
+            }
+        }
+
+        if count == 0 {
+            Ok(0.0)
+        } else {
+            Ok(sum / count as f64)
+        }
     }
 }
