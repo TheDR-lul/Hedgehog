@@ -3,8 +3,11 @@
 pub mod types;
 pub mod bybit;
 
-pub use bybit::Bybit;                       // ← реэкспорт клиента Bybit
+pub use bybit::Bybit;
+// --- ИСПРАВЛЕНО: Импортируем LinearInstrumentInfo из bybit ---
 pub use types::{Balance, OrderSide, Order};
+pub use bybit::{SpotInstrumentInfo, LinearInstrumentInfo}; // <-- Исправлено здесь
+// --- Конец исправления ---
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -22,6 +25,12 @@ pub trait Exchange {
 
     /// Все балансы
     async fn get_all_balances(&self) -> Result<Vec<(String, Balance)>>;
+
+    /// Получить информацию об инструменте СПОТ (для точности цены/кол-ва)
+    async fn get_spot_instrument_info(&self, symbol: &str) -> Result<SpotInstrumentInfo>;
+
+    /// Получить информацию об инструменте ЛИНЕЙНОМ (для точности кол-ва)
+    async fn get_linear_instrument_info(&self, symbol: &str) -> Result<LinearInstrumentInfo>;
 
     /// Поддерживающая маржа (MMR)
     async fn get_mmr(&self, symbol: &str) -> Result<f64>;

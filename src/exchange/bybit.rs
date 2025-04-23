@@ -1,7 +1,9 @@
 // src/exchange/bybit.rs
 
+// --- Используемые типажи и структуры ---
 use super::{Exchange, OrderStatus};
 use crate::exchange::types::{Balance, Order, OrderSide};
+// --- Стандартные и внешние зависимости ---
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
@@ -9,18 +11,15 @@ use reqwest::{Client, Method};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::Sha256;
+use std::str::FromStr; // Для Decimal::from_str
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
+use tracing::{debug, error, info, trace, warn}; // Логирование
 use uuid::Uuid;
-use std::sync::Arc;
-use tracing::{debug, error, info, warn, trace};
-// --- УДАЛЕНО: Неиспользуемый импорт ---
-// use serde_path_to_error;
-
-// --- Add helper for rounding ---
+// --- Зависимости для форматирования чисел ---
 use rust_decimal::prelude::*;
-// --- УДАЛЕНО: Неиспользуемый импорт ---
-// use rust_decimal_macros::dec;
+use rust_decimal_macros::dec; // Нужен для макроса dec!
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -30,32 +29,197 @@ const LINEAR_CATEGORY: &str = "linear";
 
 // --- Структуры для парсинга ответов API ---
 
-// --- ИСПРАВЛЕНО: Убран дженерик <T> ---
+/// Универсальная обёртка для ответов Bybit API v5 (без дженерика)
 #[derive(Deserialize, Debug)]
 struct ApiResponse {
-    #[serde(rename = "retCode")] ret_code: i32,
-    #[serde(rename = "retMsg")] ret_msg: String,
-    #[serde(rename = "result")] result_raw: Value, // Parse result as raw Value first
-    #[serde(rename = "time")] _server_time: Option<i64>,
+    #[serde(rename = "retCode")]
+    ret_code: i32,
+    #[serde(rename = "retMsg")]
+    ret_msg: String,
+    #[serde(rename = "result")]
+    result_raw: Value, // Парсим result как необработанное Value
+    #[serde(rename = "time")]
+    _server_time: Option<i64>,
 }
-// --- Остальные структуры без изменений ---
-#[derive(Deserialize, Debug)] struct EmptyResult {}
-#[derive(Deserialize, Debug)] struct BalanceResult { #[serde(rename = "list")] list: Vec<UnifiedAccountBalance>, }
-#[derive(Deserialize, Debug)] struct UnifiedAccountBalance { #[serde(rename = "accountType")] account_type: String, #[serde(rename = "coin")] coins: Vec<BalanceEntry>, }
-#[derive(Deserialize, Debug)] struct BalanceEntry { #[serde(rename = "coin")] coin: String, #[serde(rename = "walletBalance")] wallet: String, #[serde(rename = "locked")] locked: String, #[serde(rename = "availableToWithdraw")] available: String, }
-#[derive(Deserialize, Debug)] struct RiskLimitResult { category: String, list: Vec<RiskLimitEntry>, }
-#[derive(Deserialize, Debug)] struct RiskLimitEntry { id: u64, symbol: String, #[serde(rename = "riskLimitValue")] _risk_limit_value: String, #[serde(rename = "maintenanceMargin")] mmr: String, #[serde(rename = "initialMargin")] _initial_margin: String, #[serde(rename = "isLowestRisk")] is_lowest_risk: u8, #[serde(rename = "maxLeverage")] _max_leverage: String, }
-#[derive(Deserialize, Debug)] struct FundingResult { list: Vec<FundingEntry>, }
-#[derive(Deserialize, Debug)] struct FundingEntry { #[serde(rename = "fundingRate")] rate: String, }
-#[derive(Deserialize, Debug)] struct OrderCreateResult { #[serde(rename = "orderId")] id: String, #[serde(rename = "orderLinkId")] link_id: String, }
-#[derive(Deserialize, Debug)] struct OrderQueryResult { list: Vec<OrderQueryEntry>, }
-#[derive(Deserialize, Debug)] struct OrderQueryEntry { #[serde(rename = "orderId")] id: String, #[serde(rename = "symbol")] _symbol: String, #[serde(rename = "side")] _side: String, #[serde(rename = "orderStatus")] status: String, #[serde(rename = "cumExecQty")] cum_exec_qty: String, #[serde(rename = "cumExecValue")] _cum_exec_value: String, #[serde(rename = "leavesQty")] leaves_qty: String, #[serde(rename = "price")] _price: String, #[serde(rename = "avgPrice")] _avg_price: String, #[serde(rename = "createdTime")] _created_time: String, }
-#[derive(Deserialize, Debug)] struct TickersResult { category: String, list: Vec<TickerInfo>, }
-#[derive(Deserialize, Debug)] struct TickerInfo { symbol: String, #[serde(rename = "lastPrice")] price: String, }
-#[derive(Deserialize, Debug)] struct ServerTimeResult { #[serde(rename = "timeNano")] time_nano: String, #[serde(rename = "timeSecond")] _time_second: String, }
 
+/// Пустой результат для запросов без данных (например, отмена ордера)
+#[derive(Deserialize, Debug, Default)] // Уже есть Default
+struct EmptyResult {}
 
-/// Клиент Bybit (без изменений)
+/// Ответ по балансу
+#[derive(Deserialize, Debug, Default)] // <-- Добавлен Default
+struct BalanceResult {
+    #[serde(rename = "list")]
+    list: Vec<UnifiedAccountBalance>,
+}
+
+#[derive(Deserialize, Debug)]
+struct UnifiedAccountBalance {
+    #[serde(rename = "accountType")]
+    account_type: String,
+    #[serde(rename = "coin")]
+    coins: Vec<BalanceEntry>,
+}
+
+#[derive(Deserialize, Debug)]
+struct BalanceEntry {
+    #[serde(rename = "coin")]
+    coin: String,
+    #[serde(rename = "walletBalance")]
+    wallet: String, // Используем для проверки наличия актива
+    #[serde(rename = "locked")]
+    locked: String,
+    #[serde(rename = "availableToWithdraw")]
+    available: String, // Используем для расчета free
+}
+
+// --- Структуры для информации об инструменте (Общие фильтры) ---
+#[derive(Deserialize, Debug, Clone)]
+pub struct LotSizeFilter {
+    // --- ИЗМЕНЕНО: Используем base_precision ---
+    #[serde(rename = "basePrecision")]
+    pub base_precision: String,
+    // --- Конец изменений ---
+    #[serde(rename = "maxOrderQty")]
+    pub max_order_qty: String,
+    #[serde(rename = "minOrderQty")]
+    pub min_order_qty: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct PriceFilter {
+    #[serde(rename = "tickSize")]
+    pub tick_size: String,
+}
+
+// --- Структуры для информации об инструменте СПОТ ---
+#[derive(Deserialize, Debug, Clone, Default)] // <-- Добавлен Default
+struct SpotInstrumentsInfoResult {
+    list: Vec<SpotInstrumentInfo>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct SpotInstrumentInfo {
+    symbol: String,
+    #[serde(rename = "lotSizeFilter")]
+    pub lot_size_filter: LotSizeFilter,
+    #[serde(rename = "priceFilter")]
+    pub price_filter: PriceFilter,
+}
+
+// --- Структуры для информации об инструменте ЛИНЕЙНОМ ---
+#[derive(Deserialize, Debug, Clone, Default)] // <-- Добавлен Default
+struct LinearInstrumentsInfoResult {
+    list: Vec<LinearInstrumentInfo>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct LinearInstrumentInfo {
+    symbol: String,
+    #[serde(rename = "lotSizeFilter")]
+    pub lot_size_filter: LotSizeFilter,
+    #[serde(rename = "priceFilter")]
+    pub price_filter: PriceFilter,
+}
+
+// --- Структуры для risk-limit (для MMR) ---
+#[derive(Deserialize, Debug, Default)] // <-- Добавлен Default
+struct RiskLimitResult {
+    category: String,
+    list: Vec<RiskLimitEntry>,
+}
+
+#[derive(Deserialize, Debug)]
+struct RiskLimitEntry {
+    id: u64,
+    symbol: String,
+    #[serde(rename = "riskLimitValue")]
+    _risk_limit_value: String,
+    #[serde(rename = "maintenanceMargin")]
+    mmr: String,
+    #[serde(rename = "initialMargin")]
+    _initial_margin: String,
+    #[serde(rename = "isLowestRisk")]
+    is_lowest_risk: u8,
+    #[serde(rename = "maxLeverage")]
+    _max_leverage: String,
+}
+
+/// Ответ по funding‑rate
+#[derive(Deserialize, Debug, Default)] // <-- Добавлен Default
+struct FundingResult {
+    list: Vec<FundingEntry>,
+}
+
+#[derive(Deserialize, Debug)]
+struct FundingEntry {
+    #[serde(rename = "fundingRate")]
+    rate: String,
+}
+
+/// Ответ при создании ордера
+#[derive(Deserialize, Debug, Default)] // <-- Добавлен Default
+struct OrderCreateResult {
+    #[serde(rename = "orderId")]
+    id: String,
+    #[serde(rename = "orderLinkId")]
+    link_id: String,
+}
+
+/// Ответ при запросе статуса ордера
+#[derive(Deserialize, Debug, Default)] // <-- Добавлен Default
+struct OrderQueryResult {
+    list: Vec<OrderQueryEntry>,
+}
+
+#[derive(Deserialize, Debug)]
+struct OrderQueryEntry {
+    #[serde(rename = "orderId")]
+    id: String,
+    #[serde(rename = "symbol")]
+    _symbol: String,
+    #[serde(rename = "side")]
+    _side: String,
+    #[serde(rename = "orderStatus")]
+    status: String,
+    #[serde(rename = "cumExecQty")]
+    cum_exec_qty: String,
+    #[serde(rename = "cumExecValue")]
+    _cum_exec_value: String,
+    #[serde(rename = "leavesQty")]
+    leaves_qty: String,
+    #[serde(rename = "price")]
+    _price: String,
+    #[serde(rename = "avgPrice")]
+    _avg_price: String,
+    #[serde(rename = "createdTime")]
+    _created_time: String,
+}
+
+/// Ответ по тикерам
+#[derive(Deserialize, Debug, Default)] // <-- Добавлен Default
+struct TickersResult {
+    category: String,
+    list: Vec<TickerInfo>,
+}
+
+#[derive(Deserialize, Debug)]
+struct TickerInfo {
+    symbol: String,
+    #[serde(rename = "lastPrice")]
+    price: String,
+}
+
+/// Ответ по времени сервера
+#[derive(Deserialize, Debug, Default)] // <-- Добавлен Default
+struct ServerTimeResult {
+    #[serde(rename = "timeNano")]
+    time_nano: String,
+    #[serde(rename = "timeSecond")]
+    _time_second: String,
+}
+
+/// Клиент Bybit
 #[derive(Debug, Clone)]
 pub struct Bybit {
     api_key: String,
@@ -69,7 +233,7 @@ pub struct Bybit {
 }
 
 impl Bybit {
-    // --- new, url, format_pair (без изменений) ---
+    /// Создаёт новый экземпляр клиента и синхронизирует время
     pub async fn new(key: &str, secret: &str, base_url: &str, quote_currency: &str) -> Result<Self> {
         info!(base_url, quote_currency, "Initializing Bybit client...");
         if !base_url.starts_with("http") {
@@ -105,15 +269,17 @@ impl Bybit {
         Ok(instance)
     }
 
+    /// Формирует полный URL эндпоинта
     fn url(&self, ep: &str) -> String {
         format!("{}/{}", self.base_url, ep.trim_start_matches('/'))
     }
 
+    /// Формирует символ пары (например, BTC + USDT -> BTCUSDT)
     fn format_pair(&self, base_symbol: &str) -> String {
         format!("{}{}", base_symbol.to_uppercase(), self.quote_currency)
     }
 
-    // --- sync_time (без изменений, т.к. использует TempTimeResponse) ---
+    /// Синхронизация времени с сервером
     async fn sync_time(&self) -> Result<()> {
         let url = self.url("v5/market/time");
         debug!(%url, "Syncing server time");
@@ -131,6 +297,7 @@ impl Bybit {
             return Err(anyhow!("Failed to sync server time: status {}", status));
         }
 
+        // Используем временную структуру для парсинга
         #[derive(Deserialize)]
         struct TempTimeResponse {
             #[serde(rename = "retCode")] ret_code: i32,
@@ -174,7 +341,7 @@ impl Bybit {
         Ok(())
     }
 
-    // --- get_timestamp_ms, sign, auth_headers (без изменений) ---
+    /// Получение скорректированной временной метки в миллисекундах
     async fn get_timestamp_ms(&self) -> Result<i64> {
         let local_time_ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
              Ok(d) => d.as_millis() as i64,
@@ -193,6 +360,7 @@ impl Bybit {
         Ok(local_time_ms + offset)
     }
 
+    /// Генерация подписи
     fn sign(&self, payload: &str) -> String {
         let mut mac = HmacSha256::new_from_slice(self.api_secret.as_bytes())
             .expect("HMAC can take key of any size");
@@ -200,6 +368,7 @@ impl Bybit {
         hex::encode(mac.finalize().into_bytes())
     }
 
+    /// Формирование заголовков аутентификации
     async fn auth_headers(&self, qs: &str, body: &str) -> Result<Vec<(&str, String)>> {
         let timestamp_ms = self.get_timestamp_ms().await?;
         let t = timestamp_ms.to_string();
@@ -217,17 +386,15 @@ impl Bybit {
         ])
     }
 
-
     /// Универсальный вызов Bybit API
-    // --- ИСПРАВЛЕНО: Убран дженерик <T> из сигнатуры, т.к. он больше не нужен здесь ---
-    async fn call_api<T: for<'de> Deserialize<'de>>(
+    async fn call_api<T: for<'de> Deserialize<'de> + Default>( // Добавляем Default для T
         &self,
         method: Method,
         endpoint: &str,
         query: Option<&[(&str, &str)]>,
         body: Option<Value>,
         auth: bool,
-    ) -> Result<T> { // Возвращаемый тип T остается, т.к. мы парсим result в него
+    ) -> Result<T> {
         let url = self.url(endpoint);
         debug!(%url, method=%method, ?query, ?body, auth, "Bybit API Call ->");
 
@@ -306,7 +473,6 @@ impl Bybit {
              }
         };
 
-        // Проверяем retCode
         let ret_code = json_value.get("retCode").and_then(Value::as_i64).unwrap_or(-1);
         let ret_msg = json_value.get("retMsg").and_then(Value::as_str).unwrap_or("Unknown error");
 
@@ -321,27 +487,24 @@ impl Bybit {
                 match serde_json::from_value(result_val.clone()) {
                     Ok(result_data) => {
                         debug!(%url, "Bybit API call successful (retCode=0)");
-                        Ok(result_data) // Возвращаем распарсенный result типа T
+                        Ok(result_data)
                     }
                     Err(e) => {
-                        error!(error=%e, result_value=?result_val, "Failed to deserialize 'result' field into expected type");
-                        Err(anyhow!("Failed to deserialize 'result' field: {}", e))
+                        // Если парсинг result не удался, но retCode=0, это может быть EmptyResult
+                        if result_val.is_object() && result_val.as_object().map_or(false, |obj| obj.is_empty()) {
+                             warn!("'result' field is an empty object, attempting to return default value for type.");
+                             Ok(T::default()) // Используем Default для T
+                        } else {
+                            error!(error=%e, result_value=?result_val, "Failed to deserialize 'result' field into expected type");
+                            Err(anyhow!("Failed to deserialize 'result' field: {}", e))
+                        }
                     }
                 }
             }
             None => {
-                // Если 'result' отсутствует, но retCode=0, это может быть нормально для некоторых запросов (напр. EmptyResult)
-                // Попробуем распарсить пустой объект как T
-                match serde_json::from_value(json!({})) {
-                     Ok(empty_result) => {
-                         warn!("'result' field missing in successful Bybit response, returning default/empty value.");
-                         Ok(empty_result)
-                     }
-                     Err(e) => {
-                         error!("'result' field missing and failed to create default value: {}", e);
-                         Err(anyhow!("'result' field missing in successful Bybit response"))
-                     }
-                }
+                // Если 'result' отсутствует, но retCode=0, это тоже может быть EmptyResult
+                warn!("'result' field missing in successful Bybit response, returning default value for type.");
+                Ok(T::default()) // Используем Default для T
             }
         }
     }
@@ -349,17 +512,19 @@ impl Bybit {
 
 #[async_trait]
 impl Exchange for Bybit {
-    // --- Все методы трейта Exchange без изменений ---
+    /// Проверка соединения
     async fn check_connection(&mut self) -> Result<()> {
         info!("Checking Bybit connection...");
         if let Err(e) = self.sync_time().await {
             error!("Time sync failed during check_connection: {}", e);
         }
+        // Указываем тип T явно, т.к. call_api его требует
         self.call_api::<ServerTimeResult>(Method::GET, "v5/market/time", None, None, false).await?;
         info!("Connection check successful (ping OK).");
         Ok(())
     }
 
+    /// Получение баланса для конкретной монеты
     async fn get_balance(&self, coin: &str) -> Result<Balance> {
         debug!(%coin, "Getting balance for specific coin");
         let all_balances = self.get_all_balances().await?;
@@ -372,6 +537,7 @@ impl Exchange for Bybit {
             })
     }
 
+    /// Получение всех балансов (с кэшированием)
     async fn get_all_balances(&self) -> Result<Vec<(String, Balance)>> {
         let cache_duration = Duration::from_secs(5);
         let now = SystemTime::now();
@@ -450,6 +616,51 @@ impl Exchange for Bybit {
         Ok(balances)
     }
 
+    /// Получить информацию об инструменте СПОТ (для точности цены/кол-ва)
+    async fn get_spot_instrument_info(&self, symbol: &str) -> Result<SpotInstrumentInfo> {
+        let spot_pair = self.format_pair(symbol);
+        debug!(symbol=%spot_pair, category=SPOT_CATEGORY, "Fetching spot instrument info");
+
+        let params = [("category", SPOT_CATEGORY), ("symbol", &spot_pair)];
+        let info_result: SpotInstrumentsInfoResult = self.call_api(
+            Method::GET,
+            "v5/market/instruments-info",
+            Some(&params),
+            None,
+            false,
+        ).await?;
+
+        info_result.list.into_iter()
+            .find(|i| i.symbol == spot_pair)
+            .ok_or_else(|| {
+                error!("Spot instrument info not found for {}", spot_pair);
+                anyhow!("Spot instrument info not found for {}", spot_pair)
+            })
+    }
+
+    /// Получить информацию об инструменте ЛИНЕЙНОМ (для точности кол-ва)
+    async fn get_linear_instrument_info(&self, symbol: &str) -> Result<LinearInstrumentInfo> {
+        debug!(%symbol, category=LINEAR_CATEGORY, "Fetching linear instrument info");
+
+        let params = [("category", LINEAR_CATEGORY), ("symbol", symbol)];
+        let info_result: LinearInstrumentsInfoResult = self.call_api(
+            Method::GET,
+            "v5/market/instruments-info",
+            Some(&params),
+            None,
+            false,
+        ).await?;
+
+        info_result.list.into_iter()
+            .find(|i| i.symbol == symbol)
+            .ok_or_else(|| {
+                error!("Linear instrument info not found for {}", symbol);
+                anyhow!("Linear instrument info not found for {}", symbol)
+            })
+    }
+
+
+    /// Размещение лимитного ордера (для СПОТА)
     async fn place_limit_order(
         &self,
         symbol: &str,
@@ -459,8 +670,14 @@ impl Exchange for Bybit {
     ) -> Result<Order> {
         let spot_pair = self.format_pair(symbol);
 
-        let price_decimals = 2; // Оставляем 2 для цены USDT
-        let qty_decimals = 3;   // Пробуем 3 знака для количества BTC на споте
+        let instrument_info = self.get_spot_instrument_info(symbol).await
+            .map_err(|e| anyhow!("Failed to get instrument info for {}: {}", symbol, e))?;
+        let tick_size_str = &instrument_info.price_filter.tick_size;
+        let base_precision_str = &instrument_info.lot_size_filter.base_precision;
+        let min_order_qty_str = &instrument_info.lot_size_filter.min_order_qty;
+
+        let price_decimals = tick_size_str.split('.').nth(1).map_or(0, |s| s.trim_end_matches('0').len()) as u32;
+        debug!("Using precision for {}: price_decimals={}", spot_pair, price_decimals);
 
         let formatted_price = match Decimal::from_f64(price) {
             Some(d) => d.round_dp(price_decimals).to_string(),
@@ -469,13 +686,37 @@ impl Exchange for Bybit {
                 return Err(anyhow!("Invalid price value {}", price));
             }
         };
+
+        let qty_decimals = base_precision_str.split('.').nth(1).map_or(0, |s| s.trim_end_matches('0').len()) as u32;
+        debug!("Using precision for {}: qty_decimals={}", spot_pair, qty_decimals);
+
         let formatted_qty = match Decimal::from_f64(qty) {
-             Some(d) => d.round_dp(qty_decimals).to_string(),
-             None => {
-                 error!("Failed to convert qty {} to Decimal", qty);
+             (Some(qty_d)) if qty_d > dec!(0.0) => {
+                 let rounded_down = qty_d.trunc_with_scale(qty_decimals);
+                 let min_qty = Decimal::from_str(min_order_qty_str).unwrap_or(dec!(0.0));
+                 if rounded_down < min_qty && qty_d >= min_qty {
+                     warn!("Quantity {} rounded down below min_order_qty {}. Using min_order_qty.", qty, min_order_qty_str);
+                     min_qty.normalize().to_string()
+                 } else if rounded_down <= dec!(0.0) {
+                     error!("Requested quantity {} is less than the minimum precision {} for {}", qty, base_precision_str, spot_pair);
+                     return Err(anyhow!("Quantity {} is less than minimum precision {}", qty, base_precision_str));
+                 } else {
+                     rounded_down.normalize().to_string()
+                 }
+             }
+             (Some(qty_d)) if qty_d == dec!(0.0) => {
+                 "0".to_string()
+             }
+             _ => {
+                 error!("Failed to convert qty {} to Decimal or invalid qty_step", qty);
                  return Err(anyhow!("Invalid qty value {}", qty));
              }
         };
+
+        if formatted_qty == "0" {
+             error!("Formatted quantity is zero for symbol {}. Aborting order.", spot_pair);
+             return Err(anyhow!("Formatted quantity is zero"));
+        }
 
         info!(symbol=%spot_pair, %side, %formatted_qty, %formatted_price, category=SPOT_CATEGORY, "Placing SPOT limit order");
 
@@ -484,8 +725,8 @@ impl Exchange for Bybit {
             "symbol": spot_pair,
             "side": side.to_string(),
             "orderType": "Limit",
-            "qty": formatted_qty, // Используем отформатированное значение
-            "price": formatted_price, // Используем отформатированное значение
+            "qty": formatted_qty,
+            "price": formatted_price,
             "timeInForce": "GTC",
             "orderLinkId": format!("spot-limit-{}", Uuid::new_v4()),
         });
@@ -499,27 +740,54 @@ impl Exchange for Bybit {
         Ok(Order {
             id: result.id,
             side,
-            qty, // Возвращаем исходное, не округленное значение
-            price: Some(price), // Возвращаем исходное, не округленное значение
+            qty,
+            price: Some(price),
             ts: self.get_timestamp_ms().await?,
         })
     }
+
+    /// Размещение рыночного ордера (для ФЬЮЧЕРСОВ)
     async fn place_market_order(
         &self,
-        symbol: &str,
+        symbol: &str, // Full futures symbol (e.g., BTCUSDT)
         side: OrderSide,
         qty: f64,
     ) -> Result<Order> {
 
-        let qty_decimals = 3;
+        let instrument_info = self.get_linear_instrument_info(symbol).await
+             .map_err(|e| anyhow!("Failed to get instrument info for {}: {}", symbol, e))?;
+        let base_precision_str = &instrument_info.lot_size_filter.base_precision;
+        let min_order_qty_str = &instrument_info.lot_size_filter.min_order_qty;
+
+        let qty_decimals = base_precision_str.split('.').nth(1).map_or(0, |s| s.trim_end_matches('0').len()) as u32;
+        debug!("Using precision for {}: qty_decimals={}", symbol, qty_decimals);
 
         let formatted_qty = match Decimal::from_f64(qty) {
-             Some(d) => d.round_dp(qty_decimals).to_string(),
-             None => {
-                 error!("Failed to convert qty {} to Decimal", qty);
+             (Some(qty_d)) if qty_d > dec!(0.0) => {
+                 let rounded_down = qty_d.trunc_with_scale(qty_decimals);
+                 let min_qty = Decimal::from_str(min_order_qty_str).unwrap_or(dec!(0.0));
+                 if rounded_down < min_qty && qty_d >= min_qty {
+                     warn!("Quantity {} rounded down below min_order_qty {}. Using min_order_qty.", qty, min_order_qty_str);
+                     min_qty.normalize().to_string()
+                 } else if rounded_down <= dec!(0.0) {
+                     error!("Requested quantity {} is less than the minimum precision {} for {}", qty, base_precision_str, symbol);
+                     return Err(anyhow!("Quantity {} is less than minimum precision {}", qty, base_precision_str));
+                 } else {
+                     rounded_down.normalize().to_string()
+                 }
+             }
+             (Some(qty_d)) if qty_d == dec!(0.0) => {
+                 "0".to_string()
+             }
+             _ => {
+                 error!("Failed to convert qty {} to Decimal or invalid qty_step", qty);
                  return Err(anyhow!("Invalid qty value {}", qty));
              }
         };
+        if formatted_qty == "0" {
+             error!("Formatted quantity is zero for symbol {}. Aborting order.", symbol);
+             return Err(anyhow!("Formatted quantity is zero"));
+        }
 
         info!(%symbol, %side, %formatted_qty, category=LINEAR_CATEGORY, "Placing FUTURES market order");
 
@@ -528,7 +796,7 @@ impl Exchange for Bybit {
             "symbol": symbol,
             "side": side.to_string(),
             "orderType": "Market",
-            "qty": formatted_qty,
+            "qty": formatted_qty, // Используем отформатированное значение
             "orderLinkId": format!("fut-market-{}", Uuid::new_v4()),
         });
 
@@ -547,6 +815,7 @@ impl Exchange for Bybit {
         })
     }
 
+    /// Отмена ордера (предполагаем СПОТ)
     async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<()> {
         let spot_pair = self.format_pair(symbol);
         info!(symbol=%spot_pair, order_id, category=SPOT_CATEGORY, "Cancelling SPOT order");
@@ -566,6 +835,7 @@ impl Exchange for Bybit {
         Ok(())
     }
 
+    /// Получение спотовой цены
     async fn get_spot_price(&self, symbol: &str) -> Result<f64> {
         let spot_pair = self.format_pair(symbol);
         debug!(symbol=%spot_pair, category=SPOT_CATEGORY, "Fetching spot price");
@@ -594,6 +864,7 @@ impl Exchange for Bybit {
              })
     }
 
+    /// Получение статуса ордера (предполагаем СПОТ)
     async fn get_order_status(&self, symbol: &str, order_id: &str) -> Result<OrderStatus> {
         let spot_pair = self.format_pair(symbol);
         debug!(symbol=%spot_pair, order_id, category=SPOT_CATEGORY, "Fetching SPOT order status");
@@ -639,6 +910,7 @@ impl Exchange for Bybit {
         })
     }
 
+    /// Получение MMR для ЛИНЕЙНОГО контракта (используя Risk Limit)
     async fn get_mmr(&self, symbol: &str) -> Result<f64> {
         let linear_pair = self.format_pair(symbol);
         debug!(symbol=%linear_pair, category=LINEAR_CATEGORY, "Fetching MMR via risk limit");
@@ -685,6 +957,7 @@ impl Exchange for Bybit {
         }
     }
 
+    /// Получение средней ставки финансирования для ЛИНЕЙНОГО контракта
     async fn get_funding_rate(&self, symbol: &str, days: u16) -> Result<f64> {
         let linear_pair = self.format_pair(symbol);
         let limit = days.min(200).to_string();

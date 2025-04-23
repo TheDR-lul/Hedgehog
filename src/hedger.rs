@@ -1,7 +1,7 @@
 // src/hedger.rs
 
-use anyhow::Result;
-use tracing::log::{error, info, warn}; // Добавляем для логирования
+use anyhow::{anyhow, Result}; // Добавляем anyhow
+use tracing::{error, info, warn}; // Используем tracing напрямую
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
@@ -11,8 +11,8 @@ use crate::models::{HedgeRequest, UnhedgeRequest};
 
 // Константа для сравнения остатка по ордеру
 const ORDER_FILL_TOLERANCE: f64 = 1e-8;
-// Константа для формата фьючерсного символа (можно вынести в конфиг или сделать параметр)
-const FUTURES_SYMBOL_SUFFIX: &str = "USDT";
+// Константа для формата фьючерсного символа
+const FUTURES_SYMBOL_SUFFIX: &str = "USDT"; // Предполагаем USDT perpetuals
 
 /// Полный цикл хеджирования / расхеджирования
 pub struct Hedger<E> {
@@ -39,13 +39,14 @@ where
 
     /// Цикл хеджирования:
     /// 1) корректируем sum на комиссию
-    /// 2) считаем spot/fut
-    /// 3) ставим limit‐BUY на споте, реплейсим если > max_wait
-    /// 4) market‐SELL на фьюче
+    /// 2) считаем spot/fut VALUE (стоимость в USDT)
+    /// 3) получаем цену, считаем spot/fut QUANTITY (количество базового актива)
+    /// 4) ставим limit‐BUY на споте, реплейсим если > max_wait
+    /// 5) market‐SELL на фьюче
     pub async fn run_hedge(
         &self,
         req: HedgeRequest,
-    ) -> Result<(f64, f64)> { // Возвращаем (spot_qty, fut_qty)
+    ) -> Result<(f64, f64)> { // Возвращаем (spot_order_qty, fut_order_qty)
         let HedgeRequest { sum, symbol, volatility } = req;
         info!(
             "Starting hedge for {} with sum={}, volatility={}",
@@ -56,29 +57,49 @@ where
         let adj_sum = sum * (1.0 - self.commission);
         info!("Adjusted sum after commission: {}", adj_sum);
 
-        // 2) вычисляем объёмы
+        // 2) вычисляем VALUE (стоимость в USDT) для спота и фьюча
         let mmr = self.exchange.get_mmr(&symbol).await?;
-        let spot_qty = adj_sum / ((1.0 + volatility) * (1.0 + mmr));
-        let fut_qty  = adj_sum - spot_qty;
+        let spot_value = adj_sum / ((1.0 + volatility) * (1.0 + mmr));
+        let fut_value  = adj_sum - spot_value;
         info!(
-            "Calculated quantities: spot={}, futures={}, MMR={}",
-            spot_qty, fut_qty, mmr
+            "Calculated values: spot_value={}, fut_value={}, MMR={}",
+            spot_value, fut_value, mmr
         );
 
-        if spot_qty <= 0.0 || fut_qty <= 0.0 {
-             error!("Calculated quantities are non-positive: spot={}, fut={}. Aborting hedge.", spot_qty, fut_qty);
-             return Err(anyhow::anyhow!("Calculated quantities are non-positive"));
+        if spot_value <= 0.0 || fut_value <= 0.0 {
+             error!("Calculated values are non-positive: spot={}, fut={}. Aborting hedge.", spot_value, fut_value);
+             return Err(anyhow::anyhow!("Calculated values are non-positive"));
+        }
+
+        // 3) Получаем цену и считаем QUANTITY (количество базового актива)
+        let mut current_spot_price = self.exchange.get_spot_price(&symbol).await?;
+        if current_spot_price <= 0.0 {
+            error!("Invalid spot price received: {}", current_spot_price);
+            return Err(anyhow!("Invalid spot price: {}", current_spot_price));
+        }
+        let spot_order_qty = spot_value / current_spot_price;
+        // Для рыночного ордера на фьюче используем текущую спот цену как оценку
+        let fut_order_qty = fut_value / current_spot_price;
+        info!(
+            "Calculated quantities based on price {}: spot_order_qty={}, fut_order_qty={}",
+            current_spot_price, spot_order_qty, fut_order_qty
+        );
+
+        if spot_order_qty <= 0.0 || fut_order_qty <= 0.0 {
+             error!("Calculated order quantities are non-positive. Aborting hedge.");
+             return Err(anyhow::anyhow!("Calculated order quantities are non-positive"));
         }
 
 
-        // 3) limit BUY на споте с реплейсом
-        let mut price = self.exchange.get_spot_price(&symbol).await?;
-        let mut limit_price = price * (1.0 - self.slippage);
-        info!("Initial spot price: {}, placing limit buy at {}", price, limit_price);
+        // 4) limit BUY на споте с реплейсом
+        let mut limit_price = current_spot_price * (1.0 - self.slippage);
+        info!("Initial spot price: {}, placing limit buy at {} for qty {}", current_spot_price, limit_price, spot_order_qty);
+        // --- ИСПРАВЛЕНО: Передаем spot_order_qty ---
         let mut spot_order = self
             .exchange
-            .place_limit_order(&symbol, OrderSide::Buy, spot_qty, limit_price)
+            .place_limit_order(&symbol, OrderSide::Buy, spot_order_qty, limit_price)
             .await?;
+        // --- Конец исправления ---
         info!("Placed initial spot limit order: id={}", spot_order.id);
         let mut start = Instant::now();
 
@@ -88,7 +109,6 @@ where
                 Ok(s) => s,
                 Err(e) => {
                     warn!("Failed to get order status for {}: {}. Retrying...", spot_order.id, e);
-                    // Можно добавить логику повторных попыток или прерывания, если ошибка постоянная
                     continue;
                 }
             };
@@ -98,87 +118,93 @@ where
                 break;
             }
 
-            // Сравниваем Duration напрямую
             if start.elapsed() > self.max_wait {
                 warn!(
                     "Spot order {} not filled within {:?}. Replacing...",
                     spot_order.id, self.max_wait
                 );
-                // Пытаемся отменить старый ордер, логируем ошибку
                 if let Err(e) = self.exchange.cancel_order(&symbol, &spot_order.id).await {
                     error!(
                         "Failed to cancel order {} before replacing: {}. Continuing, but risk of double order exists!",
                         spot_order.id, e
                     );
-                    // В критической ситуации можно прервать операцию:
-                    // return Err(anyhow::anyhow!("Failed to cancel order {}: {}", spot_order.id, e));
                 } else {
                     info!("Successfully cancelled order {}", spot_order.id);
                 }
 
-                // Получаем новую цену и ставим новый ордер
-                price = self.exchange.get_spot_price(&symbol).await?;
-                limit_price = price * (1.0 - self.slippage);
-                info!("New spot price: {}, placing new limit buy at {}", price, limit_price);
+                current_spot_price = self.exchange.get_spot_price(&symbol).await?;
+                 if current_spot_price <= 0.0 {
+                    error!("Invalid spot price received while replacing order: {}", current_spot_price);
+                    return Err(anyhow!("Invalid spot price while replacing order: {}", current_spot_price));
+                }
+                limit_price = current_spot_price * (1.0 - self.slippage);
+                // Оставляем то же количество spot_order_qty. Пересчет изменит пропорцию хеджа.
+                info!("New spot price: {}, placing new limit buy at {} for qty {}", current_spot_price, limit_price, spot_order_qty);
                 spot_order = self
                     .exchange
-                    .place_limit_order(&symbol, OrderSide::Buy, spot_qty, limit_price)
+                    .place_limit_order(&symbol, OrderSide::Buy, spot_order_qty, limit_price)
                     .await?;
                 info!("Placed replacement spot limit order: id={}", spot_order.id);
-                start = Instant::now(); // Сбрасываем таймер
+                start = Instant::now();
             }
         }
 
-        // 4) рыночный SELL на фьюче
+        // 5) рыночный SELL на фьюче
         let futures_symbol = format!("{}{}", symbol, FUTURES_SYMBOL_SUFFIX);
         info!(
             "Placing market sell order on futures ({}) for quantity {}",
-            futures_symbol, fut_qty // <-- ИСПРАВЛЕНО: используем fut_qty
+            futures_symbol, fut_order_qty // Используем fut_order_qty
         );
         let fut_order = self
             .exchange
-            .place_market_order(&futures_symbol, OrderSide::Sell, fut_qty) // <-- ИСПРАВЛЕНО: используем fut_qty
+            .place_market_order(&futures_symbol, OrderSide::Sell, fut_order_qty)
             .await?;
-        info!("Placed futures market order: id={}", fut_order.id); // Предполагаем, что place_market_order возвращает OrderInfo
+        info!("Placed futures market order: id={}", fut_order.id);
 
         info!("Hedge completed successfully for {}", symbol);
-        // Возвращаем рассчитанные объемы
-        Ok((spot_qty, fut_qty)) // <-- ИСПРАВЛЕНО: возвращаем правильные значения
+        // Возвращаем реальные объемы ордеров
+        Ok((spot_order_qty, fut_order_qty))
     }
 
     /// Цикл расхеджирования:
-    /// 1) корректируем sum (объем) на комиссию
-    /// 2) limit‐SELL на споте с реплейсом
-    /// 3) market‐BUY на фьюче
+    /// 1) sum - это QUANTITY актива (например, BTC)
+    /// 2) корректируем quantity на комиссию (если нужно) -> Решено НЕ корректировать
+    /// 3) получаем цену
+    /// 4) limit‐SELL на споте с реплейсом
+    /// 5) market‐BUY на фьюче
     pub async fn run_unhedge(
         &self,
         req: UnhedgeRequest,
-    ) -> Result<(f64, f64)> { // Возвращаем (spot_qty, fut_qty) - здесь они равны adj_sum
-        let UnhedgeRequest { sum, symbol } = req; // sum здесь - это объем для расхеджирования
+    ) -> Result<(f64, f64)> { // Возвращаем (spot_order_qty, fut_order_qty)
+        let UnhedgeRequest { sum: quantity, symbol } = req; // sum здесь - это QUANTITY актива
          info!(
             "Starting unhedge for {} with quantity={}",
-            symbol, sum
+            symbol, quantity
         );
 
-        // 1) корректируем объем на комиссию (если нужно, зависит от логики)
-        // Возможно, комиссию здесь учитывать не нужно, если 'sum' - это точный объем актива,
-        // который нужно продать на споте и откупить на фьюче.
-        // Оставим пока так, но это место для уточнения бизнес-логики.
-        let adj_sum = sum * (1.0 - self.commission);
-        info!("Adjusted quantity after commission: {}", adj_sum);
+        // 2) Используем quantity напрямую как количество для ордеров
+        let spot_order_qty = quantity;
+        let fut_order_qty = quantity; // Продаем на споте, покупаем на фьюче то же кол-во
+        info!("Using order quantity: {}", spot_order_qty);
 
-        if adj_sum <= 0.0 {
-             error!("Adjusted quantity is non-positive: {}. Aborting unhedge.", adj_sum);
-             return Err(anyhow::anyhow!("Adjusted quantity is non-positive"));
+        if spot_order_qty <= 0.0 {
+             error!("Order quantity is non-positive: {}. Aborting unhedge.", spot_order_qty);
+             return Err(anyhow::anyhow!("Order quantity is non-positive"));
         }
 
-        // 2) limit SELL на споте с реплейсом
-        let mut price = self.exchange.get_spot_price(&symbol).await?;
-        let mut limit_price = price * (1.0 + self.slippage);
-        info!("Initial spot price: {}, placing limit sell at {}", price, limit_price);
+        // 3) Получаем цену для установки лимитного ордера
+        let mut current_spot_price = self.exchange.get_spot_price(&symbol).await?;
+        if current_spot_price <= 0.0 {
+            error!("Invalid spot price received: {}", current_spot_price);
+            return Err(anyhow!("Invalid spot price: {}", current_spot_price));
+        }
+
+        // 4) limit SELL на споте с реплейсом
+        let mut limit_price = current_spot_price * (1.0 + self.slippage);
+        info!("Initial spot price: {}, placing limit sell at {} for qty {}", current_spot_price, limit_price, spot_order_qty);
         let mut spot_order = self
             .exchange
-            .place_limit_order(&symbol, OrderSide::Sell, adj_sum, limit_price)
+            .place_limit_order(&symbol, OrderSide::Sell, spot_order_qty, limit_price)
             .await?;
         info!("Placed initial spot limit order: id={}", spot_order.id);
         let mut start = Instant::now();
@@ -203,7 +229,6 @@ where
                     "Spot order {} not filled within {:?}. Replacing...",
                     spot_order.id, self.max_wait
                 );
-                // Пытаемся отменить старый ордер, логируем ошибку
                 if let Err(e) = self.exchange.cancel_order(&symbol, &spot_order.id).await {
                      error!(
                         "Failed to cancel order {} before replacing: {}. Continuing, but risk of double order exists!",
@@ -213,34 +238,37 @@ where
                     info!("Successfully cancelled order {}", spot_order.id);
                 }
 
-                // Получаем новую цену и ставим новый ордер
-                price = self.exchange.get_spot_price(&symbol).await?;
-                limit_price = price * (1.0 + self.slippage);
-                info!("New spot price: {}, placing new limit sell at {}", price, limit_price);
+                current_spot_price = self.exchange.get_spot_price(&symbol).await?;
+                 if current_spot_price <= 0.0 {
+                    error!("Invalid spot price received while replacing order: {}", current_spot_price);
+                    return Err(anyhow!("Invalid spot price while replacing order: {}", current_spot_price));
+                }
+                limit_price = current_spot_price * (1.0 + self.slippage);
+                // Оставляем то же количество spot_order_qty
+                info!("New spot price: {}, placing new limit sell at {} for qty {}", current_spot_price, limit_price, spot_order_qty);
                 spot_order = self
                     .exchange
-                    .place_limit_order(&symbol, OrderSide::Sell, adj_sum, limit_price)
+                    .place_limit_order(&symbol, OrderSide::Sell, spot_order_qty, limit_price)
                     .await?;
                  info!("Placed replacement spot limit order: id={}", spot_order.id);
                 start = Instant::now();
             }
         }
 
-        // 3) market BUY на фьюче
+        // 5) market BUY на фьюче
         let futures_symbol = format!("{}{}", symbol, FUTURES_SYMBOL_SUFFIX);
         info!(
             "Placing market buy order on futures ({}) for quantity {}",
-            futures_symbol, adj_sum
+            futures_symbol, fut_order_qty // Используем fut_order_qty
         );
         let fut_order = self
             .exchange
-            .place_market_order(&futures_symbol, OrderSide::Buy, adj_sum)
+            .place_market_order(&futures_symbol, OrderSide::Buy, fut_order_qty)
             .await?;
         info!("Placed futures market order: id={}", fut_order.id);
 
         info!("Unhedge completed successfully for {}", symbol);
         // Возвращаем объем, который был обработан на споте и фьюче
-        Ok((adj_sum, adj_sum))
+        Ok((spot_order_qty, fut_order_qty))
     }
 }
-
