@@ -1,10 +1,8 @@
-// src/telegram.rs
-
 use std::sync::Arc;
 use teloxide::{
     prelude::*,
     dptree,
-    types::CallbackQuery,
+    types::{CallbackQuery, Message},
 };
 use tokio::sync::RwLock;
 use std::collections::HashMap;
@@ -71,9 +69,35 @@ where
             }
         });
 
+    // 3) Текстовые сообщения
+    let message_branch = Update::filter_message()
+        .endpoint({
+            let exchange = exchange.clone();
+            let state_storage = state_storage.clone(); // Клонируем state_storage
+            move |bot: Bot, msg: Message| {
+                let exchange = exchange.clone();
+                let state_storage = state_storage.clone(); // Передаем state_storage
+                async move {
+                    if let Err(err) = notifier::handle_message(
+                        bot.clone(),
+                        msg.clone(),
+                        state_storage.clone(), // Передаем state_storage
+                        (*exchange).clone(),
+                    )
+                    .await
+                    {
+                        tracing::error!("message handler error: {:?}", err);
+                    }
+                    respond(())
+                }
+            }
+        });
+
+    // Собираем все ветки в Dispatcher
     Dispatcher::builder(bot, dptree::entry()
         .branch(commands_branch)
-        .branch(callback_branch))
+        .branch(callback_branch)
+        .branch(message_branch)) // Добавляем обработку текстовых сообщений
         .enable_ctrlc_handler()
         .build()
         .dispatch()
