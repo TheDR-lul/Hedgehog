@@ -1,7 +1,7 @@
 // src/exchange/bybit.rs
 
 // --- Используемые типажи и структуры ---
-use super::{Exchange, OrderStatus};
+use super::{Exchange, OrderStatus, FeeRate}; // <-- Добавляем импорт FeeRate
 use crate::exchange::types::{Balance, Order, OrderSide};
 // --- Стандартные и внешние зависимости ---
 use anyhow::{anyhow, Result};
@@ -22,9 +22,9 @@ use rust_decimal_macros::dec; // Нужен для макроса dec!
 
 type HmacSha256 = Hmac<Sha256>;
 
-// --- Константы для категорий ---
-const SPOT_CATEGORY: &str = "spot";
-const LINEAR_CATEGORY: &str = "linear";
+// --- Константы для категорий (сделаем их pub) ---
+pub const SPOT_CATEGORY: &str = "spot";
+pub const LINEAR_CATEGORY: &str = "linear";
 
 // --- Структуры для парсинга ответов API ---
 
@@ -215,6 +215,22 @@ struct ServerTimeResult {
     #[serde(rename = "timeSecond")]
     _time_second: String,
 }
+
+// --- ДОБАВЛЕНО: Структуры для ответа по комиссии ---
+#[derive(Deserialize, Debug, Default)]
+struct FeeRateResult {
+    list: Vec<FeeRateEntry>,
+}
+
+#[derive(Deserialize, Debug)]
+struct FeeRateEntry {
+    symbol: String,
+    #[serde(rename = "takerFeeRate")]
+    taker_fee_rate: String,
+    #[serde(rename = "makerFeeRate")]
+    maker_fee_rate: String,
+}
+// --- Конец добавления ---
 
 /// Клиент Bybit
 #[derive(Debug, Clone)]
@@ -472,10 +488,22 @@ impl Bybit {
         let ret_code = json_value.get("retCode").and_then(Value::as_i64).unwrap_or(-1);
         let ret_msg = json_value.get("retMsg").and_then(Value::as_str).unwrap_or("Unknown error");
 
+        // Обработка ошибок API
         if ret_code != 0 {
-            error!(code = ret_code, msg = ret_msg, %url, "Bybit API Error");
-            return Err(anyhow!("Bybit API Error ({}): {}. Raw: {}", ret_code, ret_msg, raw_body));
+            // Игнорируем ошибки "Order not found" или "already filled/canceled" для определенных эндпоинтов
+            if (endpoint.contains("cancel") || endpoint.contains("realtime")) && (ret_code == 110025 || ret_code == 10001 || ret_code == 170106) {
+                 warn!(code = ret_code, msg = ret_msg, %url, "Bybit API Warning (Order not found/filled/canceled - ignoring)");
+                 // Для запроса статуса вернем пустой список, чтобы вызывающий код вернул ошибку
+                 if endpoint.contains("realtime") {
+                     return Ok(T::default()); // Возвращаем пустой результат (например, пустой OrderQueryResult)
+                 }
+                 // Для отмены просто продолжим, считая, что ордера уже нет
+            } else {
+                error!(code = ret_code, msg = ret_msg, %url, "Bybit API Error");
+                return Err(anyhow!("Bybit API Error ({}): {}. Raw: {}", ret_code, ret_msg, raw_body));
+            }
         }
+
 
         match json_value.get("result") {
             Some(result_val) => {
@@ -485,6 +513,7 @@ impl Bybit {
                         Ok(result_data)
                     }
                     Err(e) => {
+                        // Если результат - пустой объект {}, возвращаем значение по умолчанию
                         if result_val.is_object() && result_val.as_object().map_or(false, |obj| obj.is_empty()) {
                              warn!("'result' field is an empty object, attempting to return default value for type.");
                              Ok(T::default())
@@ -496,6 +525,7 @@ impl Bybit {
                 }
             }
             None => {
+                // Если поле 'result' отсутствует, но retCode = 0, возвращаем значение по умолчанию
                 warn!("'result' field missing in successful Bybit response, returning default value for type.");
                 Ok(T::default())
             }
@@ -632,9 +662,11 @@ impl Exchange for Bybit {
 
     /// Получить информацию об инструменте ЛИНЕЙНОМ (для точности кол-ва)
     async fn get_linear_instrument_info(&self, symbol: &str) -> Result<LinearInstrumentInfo> {
-        debug!(%symbol, category=LINEAR_CATEGORY, "Fetching linear instrument info");
+        // Принимаем базовый символ (например, BTC) и формируем полный (BTCUSDT)
+        let linear_pair = self.format_pair(symbol);
+        debug!(symbol=%linear_pair, category=LINEAR_CATEGORY, "Fetching linear instrument info");
 
-        let params = [("category", LINEAR_CATEGORY), ("symbol", symbol)];
+        let params = [("category", LINEAR_CATEGORY), ("symbol", &linear_pair)];
         let info_result: LinearInstrumentsInfoResult = self.call_api(
             Method::GET,
             "v5/market/instruments-info",
@@ -644,23 +676,69 @@ impl Exchange for Bybit {
         ).await?;
 
         info_result.list.into_iter()
-            .find(|i| i.symbol == symbol)
+            .find(|i| i.symbol == linear_pair)
             .ok_or_else(|| {
-                error!("Linear instrument info not found for {}", symbol);
-                anyhow!("Linear instrument info not found for {}", symbol)
+                error!("Linear instrument info not found for {}", linear_pair);
+                anyhow!("Linear instrument info not found for {}", linear_pair)
             })
     }
+
+    // --- ДОБАВЛЕНО: Реализация get_fee_rate ---
+    async fn get_fee_rate(&self, symbol: &str, category: &str) -> Result<FeeRate> {
+        // Формируем полный символ пары в зависимости от категории
+        let pair = match category {
+            SPOT_CATEGORY => self.format_pair(symbol),
+            LINEAR_CATEGORY => self.format_pair(symbol), // Для линейных фьючерсов тоже используем базовый символ + quote
+            _ => return Err(anyhow!("Unsupported category for fee rate: {}", category)),
+        };
+        debug!(%pair, %category, "Fetching fee rate");
+
+        // --- ИСПРАВЛЕНО: Используем pair.as_str() ---
+        let params = [
+            //("category", category), // Категория не обязательна, если указан символ
+            ("symbol", pair.as_str()), // <-- Исправлено здесь
+        ];
+        // --- Конец исправления ---
+
+        let fee_result: FeeRateResult = self.call_api(
+            Method::GET,
+            "v5/account/fee-rate",
+            Some(&params), // <-- Передаем исправленный params
+            None,
+            true, // Требует аутентификации
+        ).await?;
+
+        let entry = fee_result.list.into_iter()
+            .find(|e| e.symbol == pair) // Ищем по полному символу пары
+            .ok_or_else(|| {
+                warn!("Fee rate entry not found for {} in category {}", pair, category);
+                anyhow!("Fee rate entry not found for {}/{}", category, pair)
+            })?;
+
+        let maker = entry.maker_fee_rate.parse::<f64>().map_err(|e| {
+            error!("Failed to parse maker fee rate for {}: {} (value: '{}')", pair, e, entry.maker_fee_rate);
+            anyhow!("Failed to parse maker fee rate for {}: {}", pair, e)
+        })?;
+        let taker = entry.taker_fee_rate.parse::<f64>().map_err(|e| {
+            error!("Failed to parse taker fee rate for {}: {} (value: '{}')", pair, e, entry.taker_fee_rate);
+            anyhow!("Failed to parse taker fee rate for {}: {}", pair, e)
+        })?;
+
+        info!(%pair, %category, maker, taker, "Fee rate received");
+        Ok(FeeRate { maker, taker })
+    }
+    // --- Конец добавления ---
 
 
     /// Размещение лимитного ордера (для СПОТА)
     async fn place_limit_order(
         &self,
-        symbol: &str,
+        symbol: &str, // Базовый символ (BTC)
         side: OrderSide,
         qty: f64,
         price: f64,
     ) -> Result<Order> {
-        let spot_pair = self.format_pair(symbol);
+        let spot_pair = self.format_pair(symbol); // Формируем полный символ (BTCUSDT)
 
         let instrument_info = self.get_spot_instrument_info(symbol).await
             .map_err(|e| anyhow!("Failed to get instrument info for {}: {}", symbol, e))?;
@@ -682,8 +760,9 @@ impl Exchange for Bybit {
         let qty_decimals = base_precision_str.split('.').nth(1).map_or(0, |s| s.trim_end_matches('0').len()) as u32;
         debug!("Using precision for {}: qty_decimals={}", spot_pair, qty_decimals);
 
+        // --- ИСПРАВЛЕНО: Убираем лишние скобки ---
         let formatted_qty = match Decimal::from_f64(qty) {
-             (Some(qty_d)) if qty_d > dec!(0.0) => {
+             Some(qty_d) if qty_d > dec!(0.0) => { // <-- Убраны скобки
                  let rounded_down = qty_d.trunc_with_scale(qty_decimals);
                  let min_qty = Decimal::from_str(min_order_qty_str).unwrap_or(dec!(0.0));
                  if rounded_down < min_qty && qty_d >= min_qty {
@@ -696,7 +775,7 @@ impl Exchange for Bybit {
                      rounded_down.normalize().to_string()
                  }
              }
-             (Some(qty_d)) if qty_d == dec!(0.0) => {
+             Some(qty_d) if qty_d == dec!(0.0) => { // <-- Убраны скобки
                  "0".to_string()
              }
              _ => {
@@ -704,6 +783,7 @@ impl Exchange for Bybit {
                  return Err(anyhow!("Invalid qty value {}", qty));
              }
         };
+        // --- Конец исправления ---
 
         if formatted_qty == "0" {
              error!("Formatted quantity is zero for symbol {}. Aborting order.", spot_pair);
@@ -714,13 +794,12 @@ impl Exchange for Bybit {
 
         let body = json!({
             "category": SPOT_CATEGORY,
-            "symbol": spot_pair,
+            "symbol": spot_pair, // Используем полный символ
             "side": side.to_string(),
             "orderType": "Limit",
             "qty": formatted_qty,
             "price": formatted_price,
             "timeInForce": "GTC",
-            // "orderLinkId": format!("spot-limit-{}", Uuid::new_v4()), // Убрали orderLinkId
         });
 
         let result: OrderCreateResult = self
@@ -741,21 +820,28 @@ impl Exchange for Bybit {
     /// Размещение рыночного ордера (для ФЬЮЧЕРСОВ)
     async fn place_market_order(
         &self,
-        symbol: &str, // Full futures symbol (e.g., BTCUSDT)
+        symbol: &str, // Принимаем ПОЛНЫЙ фьючерсный символ (BTCUSDT)
         side: OrderSide,
         qty: f64,
     ) -> Result<Order> {
+        // Получаем базовый символ из полного для get_linear_instrument_info
+        let base_symbol = symbol.trim_end_matches(&self.quote_currency);
+        if base_symbol.is_empty() || base_symbol == symbol {
+            error!("Could not extract base symbol from futures symbol: {}", symbol);
+            return Err(anyhow!("Invalid futures symbol format: {}", symbol));
+        }
 
-        let instrument_info = self.get_linear_instrument_info(symbol).await
-             .map_err(|e| anyhow!("Failed to get instrument info for {}: {}", symbol, e))?;
+        let instrument_info = self.get_linear_instrument_info(base_symbol).await // Используем базовый символ
+             .map_err(|e| anyhow!("Failed to get instrument info for {}: {}", base_symbol, e))?;
         let base_precision_str = &instrument_info.lot_size_filter.base_precision;
         let min_order_qty_str = &instrument_info.lot_size_filter.min_order_qty;
 
         let qty_decimals = base_precision_str.split('.').nth(1).map_or(0, |s| s.trim_end_matches('0').len()) as u32;
         debug!("Using precision for {}: qty_decimals={}", symbol, qty_decimals);
 
+        // --- ИСПРАВЛЕНО: Убираем лишние скобки ---
         let formatted_qty = match Decimal::from_f64(qty) {
-             (Some(qty_d)) if qty_d > dec!(0.0) => {
+             Some(qty_d) if qty_d > dec!(0.0) => { // <-- Убраны скобки
                  let rounded_down = qty_d.trunc_with_scale(qty_decimals);
                  let min_qty = Decimal::from_str(min_order_qty_str).unwrap_or(dec!(0.0));
                  if rounded_down < min_qty && qty_d >= min_qty {
@@ -768,7 +854,7 @@ impl Exchange for Bybit {
                      rounded_down.normalize().to_string()
                  }
              }
-             (Some(qty_d)) if qty_d == dec!(0.0) => {
+             Some(qty_d) if qty_d == dec!(0.0) => { // <-- Убраны скобки
                  "0".to_string()
              }
              _ => {
@@ -776,6 +862,7 @@ impl Exchange for Bybit {
                  return Err(anyhow!("Invalid qty value {}", qty));
              }
         };
+        // --- Конец исправления ---
         if formatted_qty == "0" {
              error!("Formatted quantity is zero for symbol {}. Aborting order.", symbol);
              return Err(anyhow!("Formatted quantity is zero"));
@@ -785,11 +872,10 @@ impl Exchange for Bybit {
 
         let body = json!({
             "category": LINEAR_CATEGORY,
-            "symbol": symbol,
+            "symbol": symbol, // Используем полный символ
             "side": side.to_string(),
             "orderType": "Market",
             "qty": formatted_qty,
-            // "orderLinkId": format!("fut-market-{}", Uuid::new_v4()), // Убрали orderLinkId
         });
 
         let result: OrderCreateResult = self
@@ -818,12 +904,24 @@ impl Exchange for Bybit {
             "orderId": order_id,
         });
 
-        let _: EmptyResult = self
-            .call_api(Method::POST, "v5/order/cancel", None, Some(body), true)
-            .await?;
-
-        info!(order_id, "SPOT Order cancelled successfully");
-        Ok(())
+        // Используем call_api, но игнорируем результат, если ret_code = 0 или ошибка "уже исполнен/отменен"
+        match self.call_api::<EmptyResult>(Method::POST, "v5/order/cancel", None, Some(body), true).await {
+            Ok(_) => {
+                info!(order_id, "SPOT Order cancelled successfully (or was already inactive)");
+                Ok(())
+            }
+            Err(e) => {
+                // Проверяем, была ли это ошибка "Order not found" или "already filled/canceled"
+                let err_str = e.to_string();
+                if err_str.contains("110025") || err_str.contains("10001") || err_str.contains("170106") {
+                     warn!("Attempted to cancel order {} which was not found or already inactive: {}", order_id, err_str);
+                     Ok(()) // Считаем это успехом, т.к. ордера больше нет
+                } else {
+                    error!("Failed to cancel order {}: {}", order_id, e);
+                    Err(e) // Возвращаем другие ошибки
+                }
+            }
+        }
     }
 
     /// Получение спотовой цены
@@ -863,11 +961,12 @@ impl Exchange for Bybit {
         let params = [
             ("category", SPOT_CATEGORY),
             ("orderId", order_id),
+            // ("orderLinkId", order_id), // Можно искать и по linkId, если бы мы его использовали
         ];
         let query_result: OrderQueryResult = self
             .call_api(
                 Method::GET,
-                "v5/order/realtime",
+                "v5/order/realtime", // Используем realtime эндпоинт
                 Some(&params),
                 None,
                 true,
@@ -876,8 +975,10 @@ impl Exchange for Bybit {
 
         let order_entry = query_result.list.into_iter().next()
             .ok_or_else(|| {
-                warn!("Order ID {} not found in realtime query", order_id);
-                anyhow!("Order ID {} not found in realtime query", order_id)
+                // Если список пуст, возможно, ордер уже исполнен и ушел из realtime
+                // или его вообще не было. Возвращаем ошибку.
+                warn!("Order ID {} not found in realtime query for {}", order_id, spot_pair);
+                anyhow!("Order ID {} not found in realtime query for {}", order_id, spot_pair)
             })?;
 
         let filled = if order_entry.cum_exec_qty.is_empty() { 0.0 } else {
@@ -918,7 +1019,7 @@ impl Exchange for Bybit {
         trace!(?risk_limit_result, "Received risk limit data");
 
         let risk_level = risk_limit_result.list.into_iter()
-            .find(|level| level.id == 1 || level.is_lowest_risk == 1)
+            .find(|level| level.id == 1 || level.is_lowest_risk == 1) // Ищем первый уровень риска
             .ok_or_else(|| {
                 warn!("No risk limit level 1 found for {}", linear_pair);
                 anyhow!("No risk limit level 1 found for {}", linear_pair)
@@ -927,7 +1028,7 @@ impl Exchange for Bybit {
 
         if risk_level.mmr.is_empty() {
             if self.base_url.contains("testnet") {
-                let fallback_mmr = 0.005;
+                let fallback_mmr = 0.005; // Примерное значение для тестнета
                 warn!(
                     "MMR (maintenanceMargin) is empty in TESTNET response for {}. Using fallback value: {}. THIS IS A WORKAROUND!",
                     linear_pair, fallback_mmr
@@ -951,7 +1052,7 @@ impl Exchange for Bybit {
     /// Получение средней ставки финансирования для ЛИНЕЙНОГО контракта
     async fn get_funding_rate(&self, symbol: &str, days: u16) -> Result<f64> {
         let linear_pair = self.format_pair(symbol);
-        let limit = days.min(200).to_string();
+        let limit = days.min(200).to_string(); // Bybit API limit is 200
         debug!(symbol=%linear_pair, days, limit=%limit, "Fetching funding rate history");
 
         let params = [
@@ -971,7 +1072,7 @@ impl Exchange for Bybit {
 
         if funding_result.list.is_empty() {
             warn!("No funding rate history found for {}", linear_pair);
-            return Ok(0.0);
+            return Ok(0.0); // Возвращаем 0, если нет данных
         }
 
         let mut sum = 0.0;

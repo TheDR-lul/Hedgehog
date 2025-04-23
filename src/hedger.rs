@@ -6,22 +6,26 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use futures::future::BoxFuture;
 
-use crate::exchange::{Exchange, OrderStatus};
+// --- ИЗМЕНЕНО: Добавляем SPOT_CATEGORY и LINEAR_CATEGORY из bybit (или определяем здесь) ---
+use crate::exchange::{Exchange, OrderStatus, FeeRate}; // Добавляем FeeRate
+// Если константы не pub в bybit.rs, определяем их здесь:
+// const SPOT_CATEGORY: &str = "spot";
+// const LINEAR_CATEGORY: &str = "linear";
+// Если они pub, используем импорт:
+use crate::exchange::bybit::{SPOT_CATEGORY, LINEAR_CATEGORY};
+// --- Конец изменений ---
 use crate::exchange::types::OrderSide;
 use crate::models::{HedgeRequest, UnhedgeRequest};
 
 const ORDER_FILL_TOLERANCE: f64 = 1e-8;
-// Убираем FUTURES_SYMBOL_SUFFIX
 
-// --- ИЗМЕНЕНО: Добавлено поле quote_currency ---
 pub struct Hedger<E> {
     exchange:     E,
     slippage:     f64,
-    commission:   f64,
+    // commission:   f64, // <-- УДАЛЕНО
     max_wait:     Duration,
-    quote_currency: String, // <-- Добавлено
+    quote_currency: String,
 }
-// --- Конец изменений ---
 
 #[derive(Debug)]
 pub struct HedgeParams {
@@ -32,14 +36,12 @@ pub struct HedgeParams {
     pub symbol: String,
 }
 
-// --- ИЗМЕНЕНО: Добавлено поле is_replacement ---
 #[derive(Debug, Clone)]
 pub struct HedgeProgressUpdate {
     pub current_spot_price: f64,
-    pub new_limit_price: f64, // Цена, по которой СТАВИТСЯ/СТОИТ ордер
-    pub is_replacement: bool, // Флаг, что это обновление из-за замены ордера
+    pub new_limit_price: f64,
+    pub is_replacement: bool,
 }
-// --- Конец изменений ---
 
 pub type HedgeProgressCallback = Box<dyn FnMut(HedgeProgressUpdate) -> BoxFuture<'static, Result<()>> + Send + Sync>;
 
@@ -48,14 +50,13 @@ impl<E> Hedger<E>
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
-    // --- ИЗМЕНЕНО: Принимаем и сохраняем quote_currency ---
-    pub fn new(exchange: E, slippage: f64, commission: f64, max_wait_secs: u64, quote_currency: String) -> Self {
+    // --- ИЗМЕНЕНО: Убираем commission ---
+    pub fn new(exchange: E, slippage: f64, max_wait_secs: u64, quote_currency: String) -> Self {
         Self {
             exchange,
             slippage,
-            commission,
             max_wait: Duration::from_secs(max_wait_secs),
-            quote_currency, // <-- Сохраняем
+            quote_currency,
         }
     }
     // --- Конец изменений ---
@@ -67,12 +68,27 @@ where
             symbol, sum, volatility
         );
 
-        let adj_sum = sum * (1.0 - self.commission);
-        debug!("Adjusted sum: {}", adj_sum);
+        // --- ИЗМЕНЕНО: Убираем adj_sum ---
+        // --- Конец изменений ---
+
+        // --- Опционально: Получаем и логируем комиссию ---
+        match self.exchange.get_fee_rate(symbol, SPOT_CATEGORY).await {
+            Ok(fee) => info!(symbol, category=SPOT_CATEGORY, maker_fee=fee.maker, taker_fee=fee.taker, "Current spot fee rate"),
+            Err(e) => warn!("Could not get spot fee rate for {}: {}", symbol, e),
+        }
+        // Для фьючерсов используем базовый символ при запросе комиссии
+        match self.exchange.get_fee_rate(symbol, LINEAR_CATEGORY).await {
+             Ok(fee) => info!(symbol, category=LINEAR_CATEGORY, maker_fee=fee.maker, taker_fee=fee.taker, "Current futures fee rate"),
+             Err(e) => warn!("Could not get futures fee rate for {}: {}", symbol, e),
+        }
+        // --- Конец опциональной части ---
+
 
         let mmr = self.exchange.get_mmr(symbol).await?;
-        let spot_value = adj_sum / ((1.0 + volatility) * (1.0 + mmr));
-        let fut_value  = adj_sum - spot_value;
+        // --- ИЗМЕНЕНО: Используем sum напрямую ---
+        let spot_value = sum / ((1.0 + volatility) * (1.0 + mmr));
+        let fut_value  = sum - spot_value;
+        // --- Конец изменений ---
         debug!(
             "Calculated values: spot_value={}, fut_value={}, MMR={}",
             spot_value, fut_value, mmr
@@ -139,13 +155,12 @@ where
             .await?;
         info!("Placed initial spot limit order: id={}", spot_order.id);
 
-        // --- ИЗМЕНЕНО: Логика цикла для обновления цены ---
         let mut start = Instant::now();
-        let mut last_update_sent = Instant::now(); // Время последней отправки обновления
-        let update_interval = Duration::from_secs(5); // Интервал обновления цены (5 секунд)
+        let mut last_update_sent = Instant::now();
+        let update_interval = Duration::from_secs(5);
 
         loop {
-            sleep(Duration::from_secs(1)).await; // Пауза между проверками статуса
+            sleep(Duration::from_secs(1)).await;
             let now = Instant::now();
 
             let status: OrderStatus = match self.exchange.get_order_status(&symbol, &spot_order.id).await {
@@ -164,10 +179,9 @@ where
             let elapsed_since_start = now.duration_since(start);
             let elapsed_since_update = now.duration_since(last_update_sent);
 
-            let mut is_replacement = false; // Флаг для текущей итерации
-            let mut price_for_update = current_spot_price; // Цена для отправки в колбэк
+            let mut is_replacement = false;
+            let mut price_for_update = current_spot_price;
 
-            // Проверяем, не пора ли переставить ордер
             if elapsed_since_start > self.max_wait {
                 is_replacement = true;
                 warn!(
@@ -175,10 +189,12 @@ where
                     spot_order.id, self.max_wait
                 );
                 if let Err(e) = self.exchange.cancel_order(&symbol, &spot_order.id).await {
-                    error!(
-                        "Failed to cancel order {} before replacing: {}. Continuing, but risk of double order exists!",
-                        spot_order.id, e
-                    );
+                    // Ошибка уже логируется внутри cancel_order, если это "not found"
+                    // Логируем только неожиданные ошибки
+                    if !e.to_string().contains("110025") && !e.to_string().contains("10001") && !e.to_string().contains("170106") {
+                        error!("Unexpected error cancelling order {}: {}", spot_order.id, e);
+                    }
+                    // Небольшая пауза на всякий случай
                     sleep(Duration::from_millis(500)).await;
                 } else {
                     info!("Successfully cancelled order {}", spot_order.id);
@@ -190,17 +206,15 @@ where
                     return Err(anyhow!("Invalid spot price while replacing order: {}", current_spot_price));
                 }
                 limit_price = current_spot_price * (1.0 - self.slippage);
-                price_for_update = current_spot_price; // Используем новую цену для обновления
+                price_for_update = current_spot_price;
                 info!("New spot price: {}, placing new limit buy at {} for qty {}", current_spot_price, limit_price, spot_order_qty);
 
                 spot_order = self.exchange.place_limit_order(&symbol, OrderSide::Buy, spot_order_qty, limit_price).await?;
                 info!("Placed replacement spot limit order: id={}", spot_order.id);
-                start = now; // Сбрасываем таймер ожидания
+                start = now;
             }
 
-            // Отправляем обновление, если это замена ИЛИ прошел интервал
             if is_replacement || elapsed_since_update > update_interval {
-                // Если это не замена, но прошел интервал, обновим рыночную цену для отображения
                 if !is_replacement {
                     match self.exchange.get_spot_price(&symbol).await {
                         Ok(p) if p > 0.0 => price_for_update = p,
@@ -210,28 +224,25 @@ where
 
                 let update = HedgeProgressUpdate {
                     current_spot_price: price_for_update,
-                    new_limit_price: limit_price, // Всегда передаем текущую лимитную цену ордера
+                    new_limit_price: limit_price,
                     is_replacement,
                 };
 
                 if let Err(e) = progress_callback(update).await {
                     warn!("Progress callback failed: {}. Continuing hedge...", e);
                 }
-                last_update_sent = now; // Обновляем время последней отправки
+                last_update_sent = now;
             }
         } // Конец цикла
-        // --- Конец изменений ---
 
-        // --- ИЗМЕНЕНО: Формируем символ динамически ---
         let futures_symbol = format!("{}{}", symbol, self.quote_currency);
-        // --- Конец изменений ---
         info!(
             "Placing market sell order on futures ({}) for quantity {}",
             futures_symbol, fut_order_qty
         );
         let fut_order = self
             .exchange
-            .place_market_order(&futures_symbol, OrderSide::Sell, fut_order_qty)
+            .place_market_order(&futures_symbol, OrderSide::Sell, fut_order_qty) // Передаем полный символ
             .await?;
         info!("Placed futures market order: id={}", fut_order.id);
 
@@ -243,11 +254,9 @@ where
     pub async fn run_unhedge(
         &self,
         req: UnhedgeRequest,
-        // Можно добавить: mut progress_callback: Option<HedgeProgressCallback>,
+        // mut progress_callback: Option<HedgeProgressCallback>, // Пока без колбэка
     ) -> Result<(f64, f64)> {
-        // --- ИЗМЕНЕНО: Используем quantity из UnhedgeRequest ---
         let UnhedgeRequest { quantity, symbol } = req;
-        // --- Конец изменений ---
          info!(
             "Starting unhedge for {} with quantity={}",
             symbol, quantity
@@ -297,11 +306,10 @@ where
                     "Spot order {} not filled within {:?}. Replacing...",
                     spot_order.id, self.max_wait
                 );
-                if let Err(e) = self.exchange.cancel_order(&symbol, &spot_order.id).await {
-                     error!(
-                        "Failed to cancel order {} before replacing: {}. Continuing, but risk of double order exists!",
-                        spot_order.id, e
-                    );
+                 if let Err(e) = self.exchange.cancel_order(&symbol, &spot_order.id).await {
+                    if !e.to_string().contains("110025") && !e.to_string().contains("10001") && !e.to_string().contains("170106") {
+                        error!("Unexpected error cancelling order {}: {}", spot_order.id, e);
+                    }
                      sleep(Duration::from_millis(500)).await;
                 } else {
                     info!("Successfully cancelled order {}", spot_order.id);
@@ -333,16 +341,14 @@ where
             }
         }
 
-        // --- ИЗМЕНЕНО: Формируем символ динамически ---
         let futures_symbol = format!("{}{}", symbol, self.quote_currency);
-        // --- Конец изменений ---
         info!(
             "Placing market buy order on futures ({}) for quantity {}",
             futures_symbol, fut_order_qty
         );
         let fut_order = self
             .exchange
-            .place_market_order(&futures_symbol, OrderSide::Buy, fut_order_qty)
+            .place_market_order(&futures_symbol, OrderSide::Buy, fut_order_qty) // Передаем полный символ
             .await?;
         info!("Placed futures market order: id={}", fut_order.id);
 

@@ -11,6 +11,15 @@ pub use bybit::{SpotInstrumentInfo, LinearInstrumentInfo};
 use anyhow::Result;
 use async_trait::async_trait;
 
+// --- ДОБАВЛЕНО: Структура для ставок комиссии ---
+#[derive(Debug, Clone, Copy, Default)] // Добавляем Default
+pub struct FeeRate {
+    pub maker: f64,
+    pub taker: f64,
+}
+// --- Конец добавления ---
+
+
 #[async_trait]
 pub trait Exchange {
     /// Проверить подключение к бирже
@@ -33,6 +42,11 @@ pub trait Exchange {
 
     /// Средняя ставка финансирования за N дней
     async fn get_funding_rate(&self, symbol: &str, days: u16) -> Result<f64>;
+
+    // --- ДОБАВЛЕНО: Метод для получения комиссии ---
+    /// Получить ставки комиссии для символа (maker, taker)
+    async fn get_fee_rate(&self, symbol: &str, category: &str) -> Result<FeeRate>;
+    // --- Конец добавления ---
 
     /// Разместить лимитный ордер
     async fn place_limit_order(

@@ -181,22 +181,20 @@ where
             match quantity_res {
                 Ok(quantity) if quantity > 0.0 => {
                     info!("Processing /unhedge command for chat_id: {}, quantity: {}, symbol: {}", chat_id, quantity, sym);
-                    // --- ИЗМЕНЕНО: Используем параметры из cfg ---
+                    // --- ИЗМЕНЕНО: Убираем commission из вызова new ---
                     let hedger = crate::hedger::Hedger::new(
                         exchange.clone(),
                         cfg.slippage,
-                        cfg.commission,
+                        // cfg.commission, // <-- УДАЛЕНО
                         cfg.max_wait_secs,
-                        cfg.quote_currency // <-- Передаем quote_currency
+                        cfg.quote_currency // <-- quote_currency (уже была)
                     );
                     // --- Конец изменений ---
                     let waiting_msg = bot.send_message(chat_id, format!("⏳ Запускаю расхеджирование {} {}...", quantity, sym)).await?;
-                    // --- ИЗМЕНЕНО: Используем quantity в UnhedgeRequest ---
                     match hedger.run_unhedge(UnhedgeRequest {
-                        quantity, // <-- Используем quantity
+                        quantity,
                         symbol: sym.clone(),
                     }).await {
-                    // --- Конец изменений ---
                         Ok((sold, bought)) => {
                             info!("Unhedge successful for chat_id: {}. Sold spot: {}, Bought fut: {}", chat_id, sold, bought);
                             bot.edit_message_text(

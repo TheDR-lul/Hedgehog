@@ -4,7 +4,6 @@ use std::env;
 use anyhow::Result;
 use config::{Config as Loader, Environment, File};
 
-// --- ИЗМЕНЕНО: Добавлено Clone и новые поля ---
 #[derive(Deserialize, Debug, Clone)]
 pub struct Config {
     // Bybit
@@ -23,11 +22,9 @@ pub struct Config {
     pub default_volatility: f64,
     pub offset_points:      u32, // Пока не используется
     pub quote_currency:     String,
-    pub slippage:           f64, // Добавлено
-    pub commission:         f64, // Добавлено
-    pub max_wait_secs:      u64, // Добавлено
+    pub slippage:           f64,
+    pub max_wait_secs:      u64,
 }
-// --- Конец изменений ---
 
 impl Config {
     pub fn load() -> Result<Self> {
