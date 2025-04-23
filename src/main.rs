@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
         &cfg.bybit_api_key,
         &cfg.bybit_api_secret,
         base_url,
-        &cfg.quote_currency, // Передаем quote_currency
+        &cfg.quote_currency,
     ).await?;
     info!("Bybit client created for quote currency: {}", cfg.quote_currency);
 
@@ -65,8 +65,8 @@ async fn main() -> Result<()> {
 
     // 7) Стартуем Telegram‑диспетчер
     info!("Starting Telegram dispatcher...");
-    // --- ИЗМЕНЕНО: Передаем cfg.quote_currency ---
-    telegram::run(bot, exchange, cfg.quote_currency.clone()).await; // Клонируем, чтобы передать владение
+    // --- ИЗМЕНЕНО: Передаем весь cfg ---
+    telegram::run(bot, exchange, cfg.clone()).await; // Клонируем cfg
     // --- Конец изменений ---
 
     Ok(())

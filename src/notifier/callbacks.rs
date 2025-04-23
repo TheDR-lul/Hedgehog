@@ -1,18 +1,19 @@
 // src/notifier/callbacks.rs
 
+use crate::config::Config; // Добавляем импорт
 use crate::exchange::Exchange;
 use super::{UserState, StateStorage};
 use teloxide::prelude::*;
 use teloxide::types::{CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
 use tracing::{info, warn};
 
-// --- ИЗМЕНЕНО: Добавляем quote_currency в аргументы ---
+// --- ИЗМЕНЕНО: Принимаем cfg: Config ---
 pub async fn handle_callback<E>(
     bot: Bot,
     q: CallbackQuery,
     mut exchange: E,
     state_storage: StateStorage,
-    quote_currency: String, // <-- Добавлено
+    cfg: Config, // <-- Изменено
 ) -> anyhow::Result<()>
 where
     E: Exchange + Clone + Send + Sync + 'static,
@@ -193,8 +194,8 @@ where
                                     symbol: sym.to_string(),
                                     last_bot_message_id: Some(message_id.0),
                                 });
-                                // --- ИЗМЕНЕНО: Используем quote_currency ---
-                                message_text = Some(format!("Введите сумму {} для хеджирования {}:", quote_currency, sym)); // <-- Изменено
+                                // --- ИЗМЕНЕНО: Используем cfg.quote_currency ---
+                                message_text = Some(format!("Введите сумму {} для хеджирования {}:", cfg.quote_currency, sym)); // <-- Используем cfg
                                 // --- Конец изменений ---
                                 info!("User state for {} will be set to AwaitingSum for symbol {}", chat_id, sym);
                             } else if action_type == "unhedge" {

@@ -1,5 +1,6 @@
 // src/notifier/commands.rs
 
+use crate::config::Config; // Добавляем импорт
 use crate::exchange::Exchange;
 use crate::models::UnhedgeRequest;
 use super::{Command, StateStorage, UserState};
@@ -20,14 +21,14 @@ async fn cleanup_chat(bot: &Bot, chat_id: ChatId, user_msg_id: MessageId, bot_ms
     }
 }
 
-// --- ИЗМЕНЕНО: Добавляем quote_currency в аргументы ---
+// --- ИЗМЕНЕНО: Принимаем cfg: Config ---
 pub async fn handle_command<E>(
     bot: Bot,
     msg: Message,
     cmd: Command,
     mut exchange: E,
     state_storage: StateStorage,
-    quote_currency: String, // <-- Добавлено
+    cfg: Config, // <-- Изменено
 ) -> anyhow::Result<()>
 where
     E: Exchange + Clone + Send + Sync + 'static,
@@ -148,10 +149,10 @@ where
                 let kb = InlineKeyboardMarkup::new(vec![vec![
                     InlineKeyboardButton::callback("❌ Отмена", "cancel_hedge"),
                 ]]);
-                // --- ИЗМЕНЕНО: Используем quote_currency ---
+                // --- ИЗМЕНЕНО: Используем cfg.quote_currency ---
                 let bot_msg = bot.send_message(
                     chat_id,
-                    format!("Введите сумму {} для хеджирования {}:", quote_currency, symbol), // <-- Изменено
+                    format!("Введите сумму {} для хеджирования {}:", cfg.quote_currency, symbol), // <-- Используем cfg
                 )
                 .reply_markup(kb)
                 .await?;
@@ -180,13 +181,22 @@ where
             match quantity_res {
                 Ok(quantity) if quantity > 0.0 => {
                     info!("Processing /unhedge command for chat_id: {}, quantity: {}, symbol: {}", chat_id, quantity, sym);
-                    // TODO: Вынести параметры slippage, commission, max_wait в конфиг
-                    let hedger = crate::hedger::Hedger::new(exchange.clone(), 0.005, 0.001, 30);
+                    // --- ИЗМЕНЕНО: Используем параметры из cfg ---
+                    let hedger = crate::hedger::Hedger::new(
+                        exchange.clone(),
+                        cfg.slippage,
+                        cfg.commission,
+                        cfg.max_wait_secs,
+                        cfg.quote_currency // <-- Передаем quote_currency
+                    );
+                    // --- Конец изменений ---
                     let waiting_msg = bot.send_message(chat_id, format!("⏳ Запускаю расхеджирование {} {}...", quantity, sym)).await?;
+                    // --- ИЗМЕНЕНО: Используем quantity в UnhedgeRequest ---
                     match hedger.run_unhedge(UnhedgeRequest {
-                        sum: quantity,
+                        quantity, // <-- Используем quantity
                         symbol: sym.clone(),
                     }).await {
+                    // --- Конец изменений ---
                         Ok((sold, bought)) => {
                             info!("Unhedge successful for chat_id: {}. Sold spot: {}, Bought fut: {}", chat_id, sold, bought);
                             bot.edit_message_text(

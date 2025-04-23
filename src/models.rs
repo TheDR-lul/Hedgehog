@@ -1,5 +1,8 @@
+// src/models.rs
+use serde::Deserialize; // Добавим, если нужно будет сериализовать/десериализовать
+
 /// Запрос на хеджирование
-#[derive(Debug)]
+#[derive(Debug, Deserialize)] // Добавим Deserialize, если понадобится
 pub struct HedgeRequest {
     pub sum: f64,
     pub symbol: String,
@@ -7,12 +10,16 @@ pub struct HedgeRequest {
 }
 
 /// Запрос на расхеджирование
+// --- ИЗМЕНЕНО: sum -> quantity, добавлен Debug и Deserialize ---
+#[derive(Debug, Deserialize)]
 pub struct UnhedgeRequest {
-    pub sum: f64,
+    pub quantity: f64, // <-- Переименовано
     pub symbol: String,
 }
+// --- Конец изменений ---
 
 /// Отчёт по исполненным ордерам (пока не используется)
+#[derive(Debug)] // Добавим Debug
 pub struct ExecutionReport {
     pub order_id: String,
     pub price: f64,
