@@ -1,43 +1,30 @@
-use std::sync::Arc;
+use crate::notifier::{self, Command, StateStorage};
 use teloxide::{
     prelude::*,
     dptree,
     types::{CallbackQuery, Message},
 };
-use tokio::sync::RwLock;
-use std::collections::HashMap;
-use crate::notifier::{self, Command};
 use crate::exchange::Exchange;
+use std::sync::Arc;
 
 pub async fn run<E>(bot: Bot, exchange: E)
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
-    // Оборачиваем exchange в Arc, чтобы можно было клонировать его в замыканиях
     let exchange = Arc::new(exchange);
+    let state_storage: StateStorage = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
 
-    // Создаем state_storage для хранения состояний пользователей
-    let state_storage: notifier::StateStorage = Arc::new(RwLock::new(HashMap::new()));
-    
     // 1) Текстовые команды
     let commands_branch = Update::filter_message()
         .filter_command::<Command>()
         .endpoint({
             let exchange = exchange.clone();
-            let state_storage = state_storage.clone(); // Клонируем state_storage
+            let state_storage = state_storage.clone();
             move |bot: Bot, msg: Message, cmd: Command| {
                 let exchange = exchange.clone();
-                let state_storage = state_storage.clone(); // Передаем state_storage
+                let state_storage = state_storage.clone();
                 async move {
-                    if let Err(err) = notifier::handle_command(
-                        bot.clone(),
-                        msg.clone(),
-                        cmd,
-                        (*exchange).clone(),
-                        state_storage.clone(), // Передаем state_storage
-                    )
-                    .await
-                    {
+                    if let Err(err) = notifier::handle_command(bot, msg, cmd, (*exchange).clone(), state_storage).await {
                         tracing::error!("command handler error: {:?}", err);
                     }
                     respond(())
@@ -49,19 +36,12 @@ where
     let callback_branch = Update::filter_callback_query()
         .endpoint({
             let exchange = exchange.clone();
-            let state_storage = state_storage.clone(); // Клонируем state_storage
+            let state_storage = state_storage.clone();
             move |bot: Bot, q: CallbackQuery| {
                 let exchange = exchange.clone();
-                let state_storage = state_storage.clone(); // Передаем state_storage
+                let state_storage = state_storage.clone();
                 async move {
-                    if let Err(err) = notifier::handle_callback(
-                        bot.clone(),
-                        q.clone(),
-                        (*exchange).clone(),
-                        state_storage.clone(), // Передаем state_storage
-                    )
-                    .await
-                    {
+                    if let Err(err) = notifier::handle_callback(bot, q, (*exchange).clone(), state_storage).await {
                         tracing::error!("callback handler error: {:?}", err);
                     }
                     respond(())
@@ -73,19 +53,12 @@ where
     let message_branch = Update::filter_message()
         .endpoint({
             let exchange = exchange.clone();
-            let state_storage = state_storage.clone(); // Клонируем state_storage
+            let state_storage = state_storage.clone();
             move |bot: Bot, msg: Message| {
                 let exchange = exchange.clone();
-                let state_storage = state_storage.clone(); // Передаем state_storage
+                let state_storage = state_storage.clone();
                 async move {
-                    if let Err(err) = notifier::handle_message(
-                        bot.clone(),
-                        msg.clone(),
-                        state_storage.clone(), // Передаем state_storage
-                        (*exchange).clone(),
-                    )
-                    .await
-                    {
+                    if let Err(err) = notifier::handle_message(bot, msg, state_storage, (*exchange).clone()).await {
                         tracing::error!("message handler error: {:?}", err);
                     }
                     respond(())
@@ -97,7 +70,7 @@ where
     Dispatcher::builder(bot, dptree::entry()
         .branch(commands_branch)
         .branch(callback_branch)
-        .branch(message_branch)) // Добавляем обработку текстовых сообщений
+        .branch(message_branch))
         .enable_ctrlc_handler()
         .build()
         .dispatch()

@@ -5,5 +5,4 @@ pub mod notifier;
 pub mod logger;
 pub mod models;
 pub mod utils;
-pub mod storage;
 pub mod telegram;
