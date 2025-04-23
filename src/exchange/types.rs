@@ -19,6 +19,7 @@ impl fmt::Display for OrderSide {
 
 impl FromStr for OrderSide {
     type Err = anyhow::Error;
+
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "buy"  => Ok(OrderSide::Buy),
@@ -43,4 +44,11 @@ pub struct Order {
 pub struct Balance {
     pub free:   f64,
     pub locked: f64,
+}
+
+/// Статус исполнения ордера (сколько уже исполнено и сколько осталось)
+#[derive(Debug, Clone)]
+pub struct OrderStatus {
+    pub filled_qty:    f64,
+    pub remaining_qty: f64,
 }
