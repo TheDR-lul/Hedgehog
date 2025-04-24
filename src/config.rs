@@ -24,6 +24,7 @@ pub struct Config {
     pub quote_currency:     String,
     pub slippage:           f64,
     pub max_wait_secs:      u64,
+    pub max_allowed_leverage: f64, // Максимально допустимое плечо
 }
 
 impl Config {

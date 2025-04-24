@@ -140,9 +140,7 @@ where
 
                 let hedger = Hedger::new(
                     exchange.clone(),
-                    cfg.slippage,
-                    cfg.max_wait_secs,
-                    cfg.quote_currency.clone()
+                    cfg.clone()
                 );
                 let hedge_request = HedgeRequest { sum, symbol: symbol.clone(), volatility: vol };
                 info!("Starting hedge calculation for chat_id: {}, request: {:?}", chat_id, hedge_request);
@@ -351,9 +349,7 @@ where
 
                 let hedger = crate::hedger::Hedger::new(
                     exchange.clone(),
-                    cfg.slippage,
-                    cfg.max_wait_secs,
-                    cfg.quote_currency.clone()
+                    cfg
                 );
                 let waiting_msg = bot.send_message(chat_id, format!("⏳ Запускаю расхеджирование {} {}...", quantity, symbol)).await?;
                 info!("Starting unhedge for chat_id: {}, symbol: {}, quantity: {}", chat_id, symbol, quantity);

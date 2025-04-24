@@ -6,18 +6,16 @@ pub mod bybit;
 pub use bybit::Bybit;
 // Импортируем типы из types и структуры информации об инструментах из bybit
 pub use types::{Balance, OrderSide, Order, OrderStatus};
-pub use bybit::{SpotInstrumentInfo, LinearInstrumentInfo};
+pub use bybit::{SpotInstrumentInfo, LinearInstrumentInfo}; // Добавили импорт для Info
 
 use anyhow::Result;
 use async_trait::async_trait;
 
-// --- ДОБАВЛЕНО: Структура для ставок комиссии ---
-#[derive(Debug, Clone, Copy, Default)] // Добавляем Default
+#[derive(Debug, Clone, Copy, Default)]
 pub struct FeeRate {
     pub maker: f64,
     pub taker: f64,
 }
-// --- Конец добавления ---
 
 
 #[async_trait]
@@ -43,10 +41,8 @@ pub trait Exchange {
     /// Средняя ставка финансирования за N дней
     async fn get_funding_rate(&self, symbol: &str, days: u16) -> Result<f64>;
 
-    // --- ДОБАВЛЕНО: Метод для получения комиссии ---
     /// Получить ставки комиссии для символа (maker, taker)
     async fn get_fee_rate(&self, symbol: &str, category: &str) -> Result<FeeRate>;
-    // --- Конец добавления ---
 
     /// Разместить лимитный ордер
     async fn place_limit_order(
@@ -57,7 +53,6 @@ pub trait Exchange {
         price: f64,
     ) -> Result<Order>;
 
-    // --- ИЗМЕНЕНО: Переименовано в place_futures_market_order ---
     /// Разместить рыночный ордер на ФЬЮЧЕРСАХ
     async fn place_futures_market_order(
         &self,
@@ -65,18 +60,14 @@ pub trait Exchange {
         side: OrderSide,
         qty: f64,
     ) -> Result<Order>;
-    // --- Конец изменений ---
 
-    // --- ДОБАВЛЕНО: Метод для спотового рыночного ордера ---
     /// Разместить рыночный ордер на СПОТЕ
     async fn place_spot_market_order(
         &self,
         symbol: &str, // Base symbol (e.g., BTC)
         side: OrderSide,
-        qty: f64, // Quantity in base asset (e.g., BTC)
-        // Можно добавить опциональный параметр quote_qty: Option<f64> для ордеров типа "купить на X USDT"
+        qty: f64,
     ) -> Result<Order>;
-    // --- Конец добавления ---
 
     /// Отменить ордер
     async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<()>;
@@ -86,4 +77,12 @@ pub trait Exchange {
 
     /// Получить статус ордера (сколько исполнено и сколько осталось)
     async fn get_order_status(&self, symbol: &str, order_id: &str) -> Result<OrderStatus>;
+
+    // --- ДОБАВЛЕНЫ НОВЫЕ МЕТОДЫ ---
+    /// Получить текущее кредитное плечо для символа
+    async fn get_current_leverage(&self, symbol: &str) -> Result<f64>;
+
+    /// Установить кредитное плечо для символа
+    async fn set_leverage(&self, symbol: &str, leverage: f64) -> Result<()>;
+    // --- КОНЕЦ ДОБАВЛЕНИЯ ---
 }

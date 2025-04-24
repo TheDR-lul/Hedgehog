@@ -196,9 +196,7 @@ where
                     info!("Processing /unhedge command for chat_id: {}, quantity: {}, symbol: {}", chat_id, quantity, sym);
                     let hedger = crate::hedger::Hedger::new(
                         exchange.clone(),
-                        cfg.slippage,
-                        cfg.max_wait_secs,
-                        cfg.quote_currency
+                        cfg,
                     );
                     let waiting_msg = bot.send_message(chat_id, format!("⏳ Запускаю расхеджирование {} {}...", quantity, sym)).await?;
                     // --- ИЗМЕНЕНО: Передаем db (пока закомментировано) ---
