@@ -594,70 +594,46 @@ impl Exchange for Bybit {
     async fn get_all_balances(&self) -> Result<Vec<(String, Balance)>> {
         let cache_duration = Duration::from_secs(5);
         let now = SystemTime::now();
-        debug!("Attempting to get all balances (cache duration: {:?})", cache_duration);
+        debug!("Attempting to get all balances...");
 
         let mut cache_guard = self.balance_cache.lock().await;
 
         if let Some((cached_balances, timestamp)) = &*cache_guard {
-            match now.duration_since(*timestamp) {
-                Ok(age) if age < cache_duration => {
-                    info!("Returning cached balances (age: {:?}).", age);
-                    return Ok(cached_balances.clone());
-                }
-                Ok(age) => {
-                    info!("Balance cache expired (age: {:?}).", age);
-                }
-                Err(e) => {
-                    warn!("System time error checking cache age: {}. Fetching fresh balances.", e);
-                }
-            }
-        } else {
-            info!("Balance cache is empty.");
-        }
+            if let Ok(age) = now.duration_since(*timestamp) {
+                if age < cache_duration { info!("Returning cached balances."); return Ok(cached_balances.clone()); }
+                else { info!("Balance cache expired."); }
+            } else { warn!("System time error checking cache. Fetching fresh."); }
+        } else { info!("Balance cache empty."); }
 
         info!("Fetching fresh balances from API...");
-        let res: BalanceResult = self.call_api(
-            Method::GET,
-            "v5/account/wallet-balance",
-            Some(&[("accountType", "UNIFIED")]), // Для Unified Trading Account
-            None,
-            true,
-        ).await?;
+        let res: BalanceResult = self.call_api(Method::GET, "v5/account/wallet-balance", Some(&[("accountType", "UNIFIED")]), None, true).await?;
 
-        // Ищем баланс именно для UNIFIED аккаунта
-        let account = res.list.into_iter()
-            .find(|acc| acc.account_type == "UNIFIED")
-            .ok_or_else(|| {
-                error!("UNIFIED account type not found in balance response");
-                anyhow!("UNIFIED account type not found in balance response")
-            })?;
+        let account = res.list.into_iter().find(|acc| acc.account_type == "UNIFIED").ok_or_else(|| anyhow!("UNIFIED account type not found"))?;
 
         let mut balances = Vec::new();
         for entry in account.coins {
-            // Используем availableToWithdraw как free, locked как locked
-            let free = if entry.available.is_empty() { 0.0 } else {
-                entry.available.parse::<f64>().map_err(|e| {
-                    error!("Failed to parse available balance for {}: {} (value: '{}')", entry.coin, e, entry.available);
-                    anyhow!("Failed to parse available balance for {}: {}", entry.coin, e)
-                })?
-            };
-            let locked = if entry.locked.is_empty() { 0.0 } else {
-                entry.locked.parse::<f64>().map_err(|e| {
-                    error!("Failed to parse locked balance for {}: {} (value: '{}')", entry.coin, e, entry.locked);
-                    anyhow!("Failed to parse locked balance for {}: {}", entry.coin, e)
-                })?
-            };
-            // Суммарный баланс тоже может быть полезен для отладки
-            let total = if entry.wallet.is_empty() { 0.0 } else {
-                 entry.wallet.parse::<f64>().unwrap_or(0.0)
-            };
+            // Парсим total и locked как раньше
+            let total = entry.wallet.parse::<f64>().unwrap_or(0.0);
+            let locked = entry.locked.parse::<f64>().unwrap_or(0.0);
 
+            // --- ИСПРАВЛЕННАЯ ЛОГИКА ПАРСИНГА FREE ---
+            // Считаем free как разницу total и locked, игнорируя устаревшее поле available
+            let free = (total - locked).max(0.0);
+            // --- КОНЕЦ ИСПРАВЛЕННОЙ ЛОГИКИ ---
 
-            if total > 1e-9 || free > 1e-9 || locked > 1e-9 { // Показываем, если хоть что-то есть
-                 debug!(coin=%entry.coin, total, free, locked, "Parsed balance entry");
+            // --- ОТЛАДОЧНЫЙ ЛОГ (оставляем) ---
+            if entry.coin.eq_ignore_ascii_case("BTC") || entry.coin.eq_ignore_ascii_case(&self.quote_currency) {
+                debug!(
+                    "Raw Balance Entry: Coin={}, Wallet='{}', Locked='{}', Available='{}' -> Parsed: Total={}, Free={}, Locked={}",
+                    entry.coin, entry.wallet, entry.locked, entry.available, // Показываем сырое 'available' для сравнения
+                    total, free, locked // Показываем вычисленное free
+                );
+            }
+            // Добавляем в результат, если есть хоть какой-то баланс
+            if total > 1e-9 || free > 1e-9 || locked > 1e-9 {
                  balances.push((entry.coin, Balance { free, locked }));
             } else {
-                 trace!(coin=%entry.coin, total, "Skipping asset with zero or negligible total balance");
+                 trace!(coin=%entry.coin, total, "Skipping zero balance asset");
             }
         }
 
