@@ -6,18 +6,16 @@ pub mod bybit;
 pub use bybit::Bybit;
 // Импортируем типы из types и структуры информации об инструментах из bybit
 pub use types::{Balance, OrderSide, Order, OrderStatus};
-pub use bybit::{SpotInstrumentInfo, LinearInstrumentInfo};
+pub use bybit::{SpotInstrumentInfo, LinearInstrumentInfo}; // Добавили импорт для Info
 
 use anyhow::Result;
 use async_trait::async_trait;
 
-// --- ДОБАВЛЕНО: Структура для ставок комиссии ---
-#[derive(Debug, Clone, Copy, Default)] // Добавляем Default
+#[derive(Debug, Clone, Copy, Default)]
 pub struct FeeRate {
     pub maker: f64,
     pub taker: f64,
 }
-// --- Конец добавления ---
 
 
 #[async_trait]
@@ -43,24 +41,30 @@ pub trait Exchange {
     /// Средняя ставка финансирования за N дней
     async fn get_funding_rate(&self, symbol: &str, days: u16) -> Result<f64>;
 
-    // --- ДОБАВЛЕНО: Метод для получения комиссии ---
     /// Получить ставки комиссии для символа (maker, taker)
     async fn get_fee_rate(&self, symbol: &str, category: &str) -> Result<FeeRate>;
-    // --- Конец добавления ---
 
     /// Разместить лимитный ордер
     async fn place_limit_order(
         &self,
-        symbol: &str,
+        symbol: &str, // Base symbol (e.g., BTC)
         side: OrderSide,
         qty: f64,
         price: f64,
     ) -> Result<Order>;
 
-    /// Разместить рыночный ордер
-    async fn place_market_order(
+    /// Разместить рыночный ордер на ФЬЮЧЕРСАХ
+    async fn place_futures_market_order(
         &self,
-        symbol: &str,
+        symbol: &str, // Full symbol (e.g., BTCUSDT)
+        side: OrderSide,
+        qty: f64,
+    ) -> Result<Order>;
+
+    /// Разместить рыночный ордер на СПОТЕ
+    async fn place_spot_market_order(
+        &self,
+        symbol: &str, // Base symbol (e.g., BTC)
         side: OrderSide,
         qty: f64,
     ) -> Result<Order>;
@@ -73,4 +77,10 @@ pub trait Exchange {
 
     /// Получить статус ордера (сколько исполнено и сколько осталось)
     async fn get_order_status(&self, symbol: &str, order_id: &str) -> Result<OrderStatus>;
+
+    /// Получить текущее кредитное плечо для символа (фьючерсы linear)
+    async fn get_current_leverage(&self, symbol: &str) -> Result<f64>;
+
+    /// Установить кредитное плечо для символа (фьючерсы linear)
+    async fn set_leverage(&self, symbol: &str, leverage: f64) -> Result<()>;
 }

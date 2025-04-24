@@ -1,12 +1,17 @@
 // src/notifier/messages.rs
-use crate::config::Config; // Добавляем импорт
+use crate::config::Config;
 use crate::exchange::Exchange;
-use super::{UserState, StateStorage};
+// --- ИЗМЕНЕНО: Исправляем импорт storage ---
+use crate::storage::{Db, insert_hedge_operation};
+// --- Конец изменений ---
+use super::{UserState, StateStorage, RunningHedges, RunningHedgeInfo};
+use tokio::sync::Mutex as TokioMutex;
+use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{Message, MessageId, InlineKeyboardButton, InlineKeyboardMarkup, ChatId};
 use tracing::{warn, error, info};
 use crate::models::{HedgeRequest, UnhedgeRequest};
-use crate::hedger::{Hedger, HedgeParams, HedgeProgressUpdate, HedgeProgressCallback};
+use crate::hedger::{Hedger, HedgeProgressUpdate, HedgeProgressCallback};
 use futures::future::FutureExt;
 
 // Вспомогательная функция для "чистки" чата
@@ -21,13 +26,15 @@ async fn cleanup_chat(bot: &Bot, chat_id: ChatId, user_msg_id: MessageId, bot_ms
     }
 }
 
-// --- ИЗМЕНЕНО: Принимаем cfg: Config ---
+// Обработчик текстовых сообщений
 pub async fn handle_message<E>(
     bot: Bot,
     msg: Message,
     state_storage: StateStorage,
     exchange: E,
-    cfg: Config, // <-- Изменено
+    cfg: Config,
+    running_hedges: RunningHedges,
+    db: &Db, // Принимаем ссылку на пул БД
 ) -> anyhow::Result<()>
 where
     E: Exchange + Clone + Send + Sync + 'static,
@@ -65,14 +72,12 @@ where
                     InlineKeyboardButton::callback("❌ Отмена", "cancel_hedge"),
                 ]]);
 
-                // --- ИЗМЕНЕНО: Используем cfg.quote_currency ---
                 let bot_msg = bot.send_message(
                     chat_id,
-                    format!("Введите ожидаемую волатильность для хеджирования {} {} (%):", sum, cfg.quote_currency), // <-- Используем cfg
+                    format!("Введите ожидаемую волатильность для хеджирования {} {} (%):", sum, cfg.quote_currency),
                 )
                 .reply_markup(kb)
                 .await?;
-                // --- Конец изменений ---
 
                 let mut message_to_delete_if_state_changed: Option<MessageId> = None;
                 {
@@ -119,105 +124,248 @@ where
                     let mut state = state_storage
                         .write()
                         .expect("Failed to acquire write lock on state storage");
-                    state.insert(chat_id, UserState::None);
+                    state.insert(chat_id, UserState::None); // Сбрасываем состояние
                 }
 
-                // --- ИЗМЕНЕНО: Убираем commission из вызова new ---
-                let hedger = Hedger::new(
-                    exchange.clone(),
-                    cfg.slippage,     // <-- slippage
-                    // cfg.commission,   // <-- УДАЛЕНО
-                    cfg.max_wait_secs, // <-- max_wait_secs
-                    cfg.quote_currency.clone() // <-- quote_currency
-                );
-                // --- Конец изменений ---
+                // Проверяем, не запущен ли уже хедж для этого пользователя и символа
+                {
+                    let hedges_guard = running_hedges.lock().await;
+                    if hedges_guard.contains_key(&(chat_id, symbol.clone())) {
+                        warn!("Hedge process already running for chat_id: {}, symbol: {}", chat_id, symbol);
+                        bot.send_message(chat_id, format!("⚠️ Хеджирование для {} уже запущено.", symbol)).await?;
+                        return Ok(());
+                    }
+                }
+
+                // --- ИЗМЕНЕНО: Используем новый конструктор Hedger ---
+                let hedger = Hedger::new(exchange.clone(), cfg.clone());
+                // --- КОНЕЦ ИЗМЕНЕНИЯ ---
                 let hedge_request = HedgeRequest { sum, symbol: symbol.clone(), volatility: vol };
                 info!("Starting hedge calculation for chat_id: {}, request: {:?}", chat_id, hedge_request);
 
+                // Вычисляем параметры
                 let hedge_params_result = hedger.calculate_hedge_params(&hedge_request).await;
 
+                let cancel_callback_data = format!("cancel_hedge_active_{}", symbol);
+                let cancel_button = InlineKeyboardButton::callback("❌ Отмена", cancel_callback_data);
+                let initial_kb = InlineKeyboardMarkup::new(vec![vec![cancel_button.clone()]]);
+
+                // Отправляем начальное сообщение "Ожидайте"
                 let waiting_msg = match hedge_params_result {
                     Ok(ref params) => {
-                        // --- ИЗМЕНЕНО: Используем cfg.quote_currency ---
                         bot.send_message(
                             chat_id,
                             format!(
-                                "⏳ Запускаю хеджирование {} {} ({})... \nРыночная цена: {:.2}\nОжидаемая цена покупки: {:.2}", // Изменили текст
+                                "⏳ Запускаю хеджирование {} {} ({})... \nРыночная цена: {:.2}\nОжидаемая цена покупки: {:.2}",
                                 sum, cfg.quote_currency, params.symbol, params.current_spot_price, params.initial_limit_price
                             ),
-                        ).await?
-                        // --- Конец изменений ---
+                        )
+                        .reply_markup(initial_kb.clone())
+                        .await?
                     }
                     Err(ref e) => {
                         error!("Hedge calculation failed for chat_id: {}: {}", chat_id, e);
-                        bot.send_message(chat_id, format!("❌ Ошибка расчета параметров хеджирования: {}", e)).await?
+                        bot.send_message(chat_id, format!("❌ Ошибка расчета параметров хеджирования: {}", e)).await?;
+                        return Ok(());
                     }
                 };
 
+                // Если расчет успешен, запускаем сам хедж в отдельной задаче
                 if let Ok(params) = hedge_params_result {
                     info!("Hedge calculation successful. Running hedge execution for chat_id: {}", chat_id);
 
-                    let bot_clone = bot.clone();
-                    let waiting_msg_id = waiting_msg.id;
-                    let initial_sum = sum;
-                    let initial_symbol = params.symbol.clone();
-                    let symbol_for_callback = initial_symbol.clone();
-                    let qc_for_callback = cfg.quote_currency.clone(); // Клонируем для колбэка
-
-                    let progress_callback: HedgeProgressCallback = Box::new(move |update: HedgeProgressUpdate| {
-                        let bot = bot_clone.clone();
-                        let msg_id = waiting_msg_id;
-                        let chat_id = chat_id;
-                        let sum = initial_sum;
-                        let symbol = symbol_for_callback.clone();
-                        let qc = qc_for_callback.clone();
-
-                        async move {
-                            // --- ИЗМЕНЕНО: Обновляем текст для динамической цены ---
-                            let status_text = if update.is_replacement { "(Ордер переставлен)" } else { "" };
-                            let text = format!(
-                                "⏳ Хеджирование {} {} ({}) в процессе...\nРыночная цена: {:.2}\nОрдер на покупку: {:.2} {}",
-                                sum, qc, symbol, update.current_spot_price, update.new_limit_price, status_text
-                            );
-                            // --- Конец изменений ---
-                            if let Err(e) = bot.edit_message_text(chat_id, msg_id, text).await {
-                                warn!("Failed to edit message during hedge progress update: {}", e);
-                            }
-                            Ok(())
-                        }
-                        .boxed()
-                    });
-
-                    match hedger.run_hedge(params, progress_callback).await
-                    {
-                        Ok((spot_qty, fut_qty)) => {
-                            info!("Hedge execution successful for chat_id: {}. Spot: {}, Fut: {}", chat_id, spot_qty, fut_qty);
-                            // --- ИЗМЕНЕНО: Используем cfg.quote_currency ---
-                            bot.edit_message_text(
-                                chat_id,
-                                waiting_msg.id,
-                                format!(
-                                    "✅ Хеджирование {} {} ({}) при V={:.1}% завершено:\n\n🟢 Спот куплено: {:.6}\n🔴 Фьюч продано: {:.6}",
-                                    sum, cfg.quote_currency, initial_symbol, vol_raw, spot_qty, fut_qty,
-                                ),
-                            )
-                            .await?;
-                            // --- Конец изменений ---
-                        }
+                    // Вставляем запись в БД ДО запуска задачи
+                    let operation_id = match insert_hedge_operation(
+                        db,
+                        chat_id.0,
+                        &params.symbol,
+                        &cfg.quote_currency,
+                        sum,
+                        vol,
+                        params.spot_order_qty, // Передаем округленное брутто
+                        params.fut_order_qty,  // Передаем округленное нетто
+                    ).await {
+                        Ok(id) => { info!("Created hedge operation record in DB with id: {}", id); id }
                         Err(e) => {
-                            error!("Hedge execution failed for chat_id: {}: {}", chat_id, e);
-                             bot.edit_message_text(
-                                chat_id,
-                                waiting_msg.id,
-                                format!("❌ Ошибка выполнения хеджирования: {}", e)
-                             ).await?;
+                            error!("Failed to insert hedge operation into DB: {}", e);
+                            bot.edit_message_text(
+                                chat_id, waiting_msg.id,
+                                format!("❌ Критическая ошибка: не удалось создать запись в БД: {}", e)
+                            ).reply_markup(InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new())).await?;
+                            return Ok(());
                         }
+                    };
+
+                    let current_order_id_storage = Arc::new(TokioMutex::new(None::<String>));
+                    let total_filled_qty_storage = Arc::new(TokioMutex::new(0.0f64));
+
+                    // Клонируем все необходимые переменные для передачи в задачу
+                    let bot_for_task = bot.clone(); // <-- Клон для всей задачи
+                    let waiting_msg_id = waiting_msg.id;
+                    let initial_sum_for_callback = sum; // Для колбэка
+                    let initial_symbol = params.symbol.clone(); // Исходный символ
+                    let symbol_for_remove = initial_symbol.clone(); // Для удаления из `running_hedges`
+                    let symbol_for_messages = initial_symbol.clone(); // Для текстов сообщений
+                    let running_hedges_clone = running_hedges.clone(); // Клон HashMap для задачи
+                    let hedger_clone = hedger.clone(); // Клон hedger для задачи
+                    let vol_raw_clone = vol_raw; // Для финального сообщения
+                    let current_order_id_storage_clone = current_order_id_storage.clone(); // Клон для задачи
+                    let total_filled_qty_storage_clone = total_filled_qty_storage.clone(); // Клон для задачи
+                    let cfg_clone = cfg.clone(); // Клон конфига
+                    let db_clone = db.clone(); // Клон пула БД
+                    let exchange_clone = exchange.clone(); // Клон exchange для запроса баланса в конце
+
+                    // Запускаем асинхронную задачу для хеджирования
+                    let task = tokio::spawn(async move {
+                        // --- Создаем отдельный клон бота и данных для колбэка ---
+                        let bot_for_callback = bot_for_task.clone();
+                        let symbol_for_button_callback = symbol_for_messages.clone();
+                        let qc_for_callback_inner = cfg_clone.quote_currency.clone();
+                        // --- Конец ---
+
+                        // --- Колбэк для обновления прогресса ---
+                        let progress_callback: HedgeProgressCallback = Box::new(move |update: HedgeProgressUpdate| {
+                            // --- Используем клоны для колбэка ---
+                            let bot = bot_for_callback.clone();
+                            let msg_id = waiting_msg_id;
+                            let chat_id = chat_id;
+                            let sum = initial_sum_for_callback; // Используем исходную сумму в статусе
+                            let symbol = symbol_for_button_callback.clone();
+                            let qc = qc_for_callback_inner.clone();
+                            // --- Конец ---
+
+                            async move {
+                                let cancel_callback_data = format!("cancel_hedge_active_{}", symbol);
+                                let cancel_button = InlineKeyboardButton::callback("❌ Отмена", cancel_callback_data);
+                                let kb = InlineKeyboardMarkup::new(vec![vec![cancel_button]]);
+
+                                let status_text = if update.is_replacement { "(Ордер переставлен)" } else { "" };
+
+                                // Показываем прогресс текущего ордера
+                                let filled_percent = if update.target_qty > 0.0 {
+                                    (update.filled_qty / update.target_qty) * 100.0
+                                } else { 0.0 };
+                                let fill_status = format!(
+                                    "\nИсполнено: {:.6}/{:.6} ({:.1}%)",
+                                    update.filled_qty, update.target_qty, filled_percent
+                                );
+
+                                let text = format!(
+                                    "⏳ Хеджирование {} {} ({}) в процессе...\nРыночная цена: {:.2}\nОрдер на покупку: {:.2} {}{}",
+                                    sum, qc, symbol, update.current_spot_price, update.new_limit_price, status_text, fill_status
+                                );
+
+                                if let Err(e) = bot.edit_message_text(chat_id, msg_id, text).reply_markup(kb).await {
+                                    if !e.to_string().contains("message is not modified") {
+                                        warn!("Failed to edit message during hedge progress update: {}", e);
+                                    }
+                                }
+                                Ok(())
+                            }.boxed()
+                        });
+
+                        // --- Вызов run_hedge ---
+                        let result = hedger_clone.run_hedge(
+                            params, // Передаем рассчитанные параметры
+                            progress_callback, // Передаем колбэк, который захватил bot_for_callback
+                            current_order_id_storage_clone,
+                            total_filled_qty_storage_clone,
+                            operation_id,
+                            &db_clone,
+                        ).await; // Ожидаем Result<(f64, f64, f64)>
+
+                        // Проверяем, была ли отмена
+                        let is_cancelled = result.is_err() && result.as_ref().err().map_or(false, |e| e.to_string().contains("cancelled"));
+
+                        // Удаляем информацию о запущенном хедже, если он не был отменен
+                        if !is_cancelled {
+                            running_hedges_clone.lock().await.remove(&(chat_id, symbol_for_remove));
+                            info!("Removed running hedge info for chat_id: {}, symbol: {}", chat_id, symbol_for_messages);
+                        }
+
+                        // --- Обработка результата хеджирования ---
+                        match result {
+                            // --- Принимаем 3 значения: фактический брутто спота, целевой нетто фьюча, стоимость брутто спота ---
+                            Ok((spot_qty_gross, fut_qty_net, final_spot_value_gross)) => {
+                                info!(
+                                    "Hedge execution successful for chat_id: {}. Spot Gross Filled: {}, Fut Net Target: {}, Final Spot Gross Value: {:.2}",
+                                    chat_id, spot_qty_gross, fut_qty_net, final_spot_value_gross
+                                );
+
+                                // --- ДОБАВЛЯЕМ ЗАПРОС АКТУАЛЬНОГО БАЛАНСА СПОТА ---
+                                let actual_net_spot_balance = match exchange_clone.get_balance(&symbol_for_messages).await {
+                                     Ok(balance) => {
+                                         info!("Fetched actual spot balance for {}: {}", symbol_for_messages, balance.free);
+                                         balance.free // Используем фактический свободный баланс
+                                     }
+                                     Err(e) => {
+                                         warn!("Failed to fetch actual spot balance after hedge for {}: {}. Using reported gross filled quantity.", symbol_for_messages, e);
+                                         spot_qty_gross // В случае ошибки показываем брутто-количество, которое исполнилось
+                                     }
+                                };
+                                // --- КОНЕЦ ДОБАВЛЕНИЯ ---
+
+
+                                // --- Используем bot_for_task и обновленный формат с фактическим балансом ---
+                                let _ = bot_for_task.edit_message_text(
+                                    chat_id,
+                                    waiting_msg_id,
+                                    format!(
+                                        // Отображаем ФАКТИЧЕСКИЙ НЕТТО БАЛАНС спота и целевое нетто фьюча
+                                        "✅ Хеджирование ID:{} ~{:.2} {} ({}) при V={:.1}% завершено:\n\n🟢 Спот баланс (нетто): {:.8}\n🔴 Фьюч продано (нетто): {:.8}",
+                                        operation_id,
+                                        final_spot_value_gross, // Оставляем стоимость брутто-покупки для информации
+                                        cfg_clone.quote_currency,
+                                        symbol_for_messages,
+                                        vol_raw_clone,
+                                        actual_net_spot_balance, // <-- Показываем фактический баланс
+                                        fut_qty_net,             // <-- Показываем целевое/фактическое нетто фьюча
+                                    ),
+                                )
+                                .reply_markup(InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new())) // Убираем кнопку
+                                .await;
+                                // --- Конец изменений ---
+                            }
+                            Err(e) => {
+                                // Обработка ошибок (включая отмену)
+                                if is_cancelled {
+                                     info!("Hedge task for chat {}, symbol {} (op_id: {}) was cancelled.", chat_id, symbol_for_messages, operation_id);
+                                     // Сообщение об отмене уже отправлено в handle_callback
+                                } else {
+                                    error!("Hedge execution failed for chat_id: {}, symbol: {}, op_id: {}: {}", chat_id, symbol_for_messages, operation_id, e);
+                                     // --- Используем bot_for_task ---
+                                     let _ = bot_for_task.edit_message_text(
+                                        chat_id,
+                                        waiting_msg_id,
+                                        format!("❌ Ошибка выполнения хеджирования ID:{}: {}", operation_id, e)
+                                     )
+                                     .reply_markup(InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new()))
+                                     .await;
+                                     // --- Конец изменений ---
+                                }
+                            }
+                        } // Конец match result
+                    }); // Конец tokio::spawn
+
+                    // Сохраняем информацию о запущенной задаче
+                    {
+                        let mut hedges_guard = running_hedges.lock().await;
+                        hedges_guard.insert((chat_id, initial_symbol.clone()), RunningHedgeInfo {
+                            handle: task.abort_handle(),
+                            current_order_id: current_order_id_storage,
+                            total_filled_qty: total_filled_qty_storage,
+                            symbol: initial_symbol.clone(),
+                            bot_message_id: waiting_msg.id.0,
+                            operation_id,
+                        });
+                        info!("Stored running hedge info for chat_id: {}, symbol: {}, op_id: {}", chat_id, initial_symbol, operation_id);
                     }
-                }
+
+                } // Конец if let Ok(params)
             } else {
                 bot.send_message(chat_id, "⚠️ Неверный формат волатильности. Введите число (например, 60 или 60%).").await?;
             }
-        }
+        } // Конец UserState::AwaitingVolatility
 
         // --- Обработка ввода количества для РАСХЕДЖИРОВАНИЯ ---
         Some(UserState::AwaitingUnhedgeQuantity { symbol, last_bot_message_id }) => {
@@ -230,52 +378,62 @@ where
                 cleanup_chat(&bot, chat_id, message_id, last_bot_message_id).await;
 
                 {
-                    let mut state = state_storage
-                        .write()
-                        .expect("Failed to acquire write lock on state storage");
-                    state.insert(chat_id, UserState::None);
+                    let mut state = state_storage.write().expect("Lock failed");
+                    state.insert(chat_id, UserState::None); // Сбрасываем состояние
                 }
 
-                // --- ИЗМЕНЕНО: Убираем commission из вызова new ---
-                let hedger = crate::hedger::Hedger::new(
-                    exchange.clone(),
-                    cfg.slippage,
-                    // cfg.commission, // <-- УДАЛЕНО
-                    cfg.max_wait_secs,
-                    cfg.quote_currency.clone()
-                );
-                // --- Конец изменений ---
+                // --- ИЗМЕНЕНО: Используем новый конструктор Hedger ---
+                let hedger = Hedger::new(exchange.clone(), cfg.clone());
+                // --- КОНЕЦ ИЗМЕНЕНИЯ ---
                 let waiting_msg = bot.send_message(chat_id, format!("⏳ Запускаю расхеджирование {} {}...", quantity, symbol)).await?;
                 info!("Starting unhedge for chat_id: {}, symbol: {}, quantity: {}", chat_id, symbol, quantity);
 
-                match hedger
-                    .run_unhedge(UnhedgeRequest {
-                        quantity,
-                        symbol: symbol.clone(),
-                    })
-                    .await
-                {
-                    Ok((sold, bought)) => {
-                        info!("Unhedge successful for chat_id: {}. Sold spot: {}, Bought fut: {}", chat_id, sold, bought);
-                        bot.edit_message_text(
-                            chat_id,
-                            waiting_msg.id,
-                            format!(
-                                "✅ Расхеджирование {} {} завершено:\n\n🟢 Продано спота: {:.6}\n🔴 Куплено фьюча: {:.6}",
-                                quantity, symbol, sold, bought,
-                            ),
-                        )
-                        .await?;
+                let bot_clone = bot.clone(); // Клон для задачи
+                let waiting_msg_id = waiting_msg.id;
+                let symbol_clone = symbol.clone();
+                let quantity_clone = quantity; // Запрошенное количество
+                let hedger_clone = hedger.clone();
+                let _db_clone = db.clone(); // Пока не используется в run_unhedge
+
+                // Запускаем задачу расхеджирования
+                tokio::spawn(async move {
+                    match hedger_clone.run_unhedge(
+                        UnhedgeRequest { quantity: quantity_clone, symbol: symbol_clone.clone() },
+                        // TODO: Передать ID операции хеджа и БД, когда логика будет готова
+                        // 0,
+                        // &db_clone,
+                    ).await {
+                        // `sold` и `bought` теперь содержат ФАКТИЧЕСКИЕ (возможно, скорректированные) количества
+                        Ok((sold, bought)) => {
+                            info!("Unhedge successful for chat_id: {}. Sold spot: {}, Bought fut: {}", chat_id, sold, bought);
+                            // --- ИЗМЕНЕНО: Форматируем сообщение с ФАКТИЧЕСКИМИ количествами ---
+                            let _ = bot_clone.edit_message_text(
+                                chat_id,
+                                waiting_msg_id,
+                                format!(
+                                    // Убираем запрошенное количество из заголовка, показываем реальные в теле
+                                    "✅ Расхеджирование {} завершено:\n\n🟢 Продано спота: {:.8}\n🔴 Куплено фьюча: {:.8}",
+                                    symbol_clone, // Только символ в заголовке
+                                    sold, // Фактически проданное спота
+                                    bought, // Фактически купленное фьюча
+                                ),
+                            )
+                            .reply_markup(InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new())) // Убираем кнопку
+                            .await;
+                            // --- КОНЕЦ ИЗМЕНЕНИЙ ---
+                        }
+                        Err(e) => {
+                            error!("Unhedge failed for chat_id: {}: {}", chat_id, e);
+                             let _ = bot_clone.edit_message_text(
+                                chat_id,
+                                waiting_msg_id,
+                                format!("❌ Ошибка расхеджирования {}: {}", symbol_clone, e)
+                             )
+                             .reply_markup(InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new())) // Убираем кнопку
+                             .await;
+                        }
                     }
-                    Err(e) => {
-                        error!("Unhedge failed for chat_id: {}: {}", chat_id, e);
-                         bot.edit_message_text(
-                            chat_id,
-                            waiting_msg.id,
-                            format!("❌ Ошибка расхеджирования: {}", e)
-                         ).await?;
-                    }
-                }
+                }); // Конец tokio::spawn для unhedge
 
             } else {
                 bot.send_message(chat_id, "⚠️ Неверный формат количества. Введите число (например, 10.5).").await?;
@@ -283,23 +441,22 @@ where
         }
 
         // --- Обработка других состояний ---
-        Some(UserState::AwaitingAssetSelection { last_bot_message_id }) => {
+        Some(UserState::AwaitingAssetSelection { last_bot_message_id: _ }) => {
+            // Пользователь должен нажать кнопку, а не писать текст
             if let Err(e) = bot.delete_message(chat_id, message_id).await {
                 warn!("Failed to delete unexpected user message {}: {}", message_id, e);
             }
-            if let Some(_bot_msg_id_int) = last_bot_message_id {
-                 info!("User {} sent text while AwaitingAssetSelection.", chat_id);
-            }
+            info!("User {} sent text while AwaitingAssetSelection.", chat_id);
         }
 
         // --- Нет активного состояния ---
         None | Some(UserState::None) => {
+            // Игнорируем сообщения, если нет активного диалога
             if let Err(e) = bot.delete_message(chat_id, message_id).await {
                 warn!("Failed to delete unexpected user message {}: {}", message_id, e);
             }
-            bot.send_message(chat_id, "🤖 Сейчас нет активного диалога. Используйте /help для списка команд.").await?;
         }
-    }
+    } // Конец match user_state
 
     Ok(())
 }

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE hedge_operations\n        SET status = ?,\n            futures_order_id = ?,\n            futures_filled_qty = ?,\n            end_timestamp = ?,\n            error_message = ?\n        WHERE id = ? AND status = 'Running' -- Обновляем только если еще 'Running'\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "341a85dcd3c6485b28e2b2ba52ab54124122ff02755c583d4fa9d84c005d82e1"
+}

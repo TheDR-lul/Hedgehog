@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE hedge_operations\n        SET spot_order_id = ?, spot_filled_qty = ?\n        WHERE id = ?\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "6f00b78b13f99c4236ebcafc00b0b8b972f323131af8c8e665637243ca5e41d5"
+}

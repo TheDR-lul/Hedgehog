@@ -11,14 +11,21 @@ mod storage;
 mod telegram;
 
 use anyhow::Result;
+// --- ИЗМЕНЕНО: Используем tokio::sync::OnceCell ---
 use tokio::sync::OnceCell;
+// --- Конец изменений ---
 use teloxide::Bot;
 use tracing::info;
 
 use crate::config::Config;
 use crate::exchange::{Bybit, Exchange};
+// --- ИЗМЕНЕНО: Импортируем Db из storage ---
+use crate::storage::Db;
+// --- Конец изменений ---
 
-static DB: OnceCell<storage::Db> = OnceCell::const_new();
+// --- ИЗМЕНЕНО: Тип DB теперь Db (SqlitePool) ---
+static DB: OnceCell<Db> = OnceCell::const_new();
+// --- Конец изменений ---
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -28,9 +35,11 @@ async fn main() -> Result<()> {
     info!("Logger initialized. Default volatility = {}", cfg.default_volatility);
 
     // 2) Подключение к SQLite
-    let db = storage::Db::connect(&cfg.sqlite_path).await?;
-    DB.set(db).unwrap();
+    // --- ИЗМЕНЕНО: Используем storage::connect ---
+    let db_pool = storage::connect(&cfg.sqlite_path).await?;
+    DB.set(db_pool).expect("DB can only be set once"); // Используем expect для уверенности
     info!("Connected to SQLite database: {}", cfg.sqlite_path);
+    // --- Конец изменений ---
 
     // 3) Telegram Bot
     let bot = Bot::new(&cfg.telegram_token);
@@ -65,8 +74,8 @@ async fn main() -> Result<()> {
 
     // 7) Стартуем Telegram‑диспетчер
     info!("Starting Telegram dispatcher...");
-    // --- ИЗМЕНЕНО: Передаем весь cfg ---
-    telegram::run(bot, exchange, cfg.clone()).await; // Клонируем cfg
+    // --- ИЗМЕНЕНО: Передаем DB.get().unwrap() ---
+    telegram::run(bot, exchange, cfg.clone(), DB.get().unwrap().clone()).await; // Клонируем пул соединений
     // --- Конец изменений ---
 
     Ok(())
