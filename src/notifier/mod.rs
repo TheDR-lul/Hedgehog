@@ -13,10 +13,8 @@ use std::sync::{Arc, RwLock};
 use teloxide::types::ChatId;
 use std::collections::HashMap;
 use teloxide::utils::command::BotCommands;
-// --- ДОБАВЛЕНО: Для отмены ---
 use tokio::task::AbortHandle;
-use tokio::sync::Mutex as TokioMutex; // Используем Tokio Mutex для async
-// --- Конец добавления ---
+use tokio::sync::Mutex as TokioMutex;
 
 /// Определение состояний пользователя (для диалога)
 #[derive(Debug, Clone)]
@@ -31,20 +29,21 @@ pub enum UserState {
 /// Тип для хранения состояний пользователей (для диалога)
 pub type StateStorage = Arc<RwLock<HashMap<ChatId, UserState>>>;
 
-// --- ДОБАВЛЕНО: Информация о запущенном хеджировании ---
-#[derive(Debug)] // Не Clone, т.к. AbortHandle не Clone
+// --- ИЗМЕНЕНО: Добавляем operation_id ---
+#[derive(Debug)]
 pub struct RunningHedgeInfo {
     pub handle: AbortHandle,
-    pub current_order_id: Arc<TokioMutex<Option<String>>>, // ID текущего спот ордера
-    pub total_filled_qty: Arc<TokioMutex<f64>>, // Сколько уже куплено на споте
-    pub symbol: String, // Символ актива
-    pub bot_message_id: i32, // ID сообщения с кнопкой отмены
+    pub current_order_id: Arc<TokioMutex<Option<String>>>,
+    pub total_filled_qty: Arc<TokioMutex<f64>>,
+    pub symbol: String,
+    pub bot_message_id: i32,
+    pub operation_id: i64, // <-- Добавлено ID операции из БД
 }
+// --- Конец изменений ---
 
 /// Тип для хранения информации о запущенных процессах хеджирования
 /// Ключ: (ChatId, Symbol)
 pub type RunningHedges = Arc<TokioMutex<HashMap<(ChatId, String), RunningHedgeInfo>>>;
-// --- Конец добавления ---
 
 
 #[derive(BotCommands, Clone, Debug)]
@@ -65,12 +64,3 @@ pub enum Command {
     #[command(description = "средняя ставка финансирования: /funding <symbol> [days]")]
     Funding(String),
 }
-
-// --- ЗАМЕТКА: Использование Базы Данных ---
-// Глобальная переменная DB (OnceCell<storage::Db>) инициализируется в main.rs,
-// но на данный момент не используется в модулях notifier или hedger.
-// В будущем ее можно использовать для:
-// 1. Сохранения истории операций хеджирования/расхеджирования.
-// 2. Персистентного хранения состояния пользователя (вместо StateStorage в памяти).
-// 3. Хранения информации об активных ордерах для восстановления после перезапуска.
-// --- Конец заметки ---

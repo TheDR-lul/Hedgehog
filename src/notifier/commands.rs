@@ -1,8 +1,11 @@
 // src/notifier/commands.rs
 
-use crate::config::Config; // Добавляем импорт
+use crate::config::Config;
 use crate::exchange::Exchange;
 use crate::models::UnhedgeRequest;
+// --- ДОБАВЛЕНО: Импортируем Db ---
+use crate::storage::Db;
+// --- Конец добавления ---
 use super::{Command, StateStorage, UserState};
 use teloxide::prelude::*;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
@@ -21,22 +24,23 @@ async fn cleanup_chat(bot: &Bot, chat_id: ChatId, user_msg_id: MessageId, bot_ms
     }
 }
 
-// --- ИЗМЕНЕНО: Принимаем cfg: Config ---
+// --- ИЗМЕНЕНО: Принимаем db: &Db ---
 pub async fn handle_command<E>(
     bot: Bot,
     msg: Message,
     cmd: Command,
     mut exchange: E,
     state_storage: StateStorage,
-    cfg: Config, // <-- Изменено
+    cfg: Config,
+    db: &Db, // <-- Добавлено
 ) -> anyhow::Result<()>
+// --- Конец изменений ---
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
     let chat_id = msg.chat.id;
     let message_id = msg.id;
 
-    // --- Сброс состояния и удаление предыдущего сообщения бота при новой команде ---
     let mut previous_bot_message_id: Option<i32> = None;
     {
         let mut state_guard = state_storage
@@ -58,7 +62,6 @@ where
     }
 
     cleanup_chat(&bot, chat_id, message_id, previous_bot_message_id).await;
-    // --- Конец сброса состояния и очистки ---
 
 
     match cmd {
@@ -100,7 +103,10 @@ where
                     sorted_balances.sort_by_key(|(coin, _)| coin.clone());
 
                     for (coin, bal) in sorted_balances {
-                        if bal.free > 1e-8 || bal.locked > 1e-8 {
+                        // --- ИЗМЕНЕНО: Используем ORDER_FILL_TOLERANCE ---
+                        use crate::hedger::ORDER_FILL_TOLERANCE; // Импортируем локально
+                        if bal.free > ORDER_FILL_TOLERANCE || bal.locked > ORDER_FILL_TOLERANCE {
+                        // --- Конец изменений ---
                             text.push_str(&format!(
                                 "• {}: ️free {:.4}, locked {:.4}\n",
                                 coin, bal.free, bal.locked
@@ -149,14 +155,12 @@ where
                 let kb = InlineKeyboardMarkup::new(vec![vec![
                     InlineKeyboardButton::callback("❌ Отмена", "cancel_hedge"),
                 ]]);
-                // --- ИЗМЕНЕНО: Используем cfg.quote_currency ---
                 let bot_msg = bot.send_message(
                     chat_id,
-                    format!("Введите сумму {} для хеджирования {}:", cfg.quote_currency, symbol), // <-- Используем cfg
+                    format!("Введите сумму {} для хеджирования {}:", cfg.quote_currency, symbol),
                 )
                 .reply_markup(kb)
                 .await?;
-                // --- Конец изменений ---
                 {
                     let mut state = state_storage
                         .write()
@@ -171,9 +175,18 @@ where
         }
 
         Command::Unhedge(arg) => {
+            // TODO: Переделать логику /unhedge для работы с БД
+            // 1. Парсить аргумент: может быть ID операции или символ
+            // 2. Если символ: искать последнюю завершенную нерасхеджированную операцию для этого символа (get_completed_unhedged_ops_for_symbol)
+            // 3. Если ID: искать операцию по ID (get_hedge_operation_by_id)
+            // 4. Проверять статус операции ('Completed', unhedged_op_id IS NULL)
+            // 5. Получать quantity из spot_filled_qty найденной операции
+            // 6. Вызывать run_unhedge, передавая ID исходной операции
+            // 7. При успехе run_unhedge, вызывать mark_hedge_as_unhedged
+
             let parts: Vec<_> = arg.split_whitespace().collect();
              if parts.len() != 2 {
-                bot.send_message(chat_id, "Использование: /unhedge <QUANTITY> <SYMBOL>").await?;
+                bot.send_message(chat_id, "Использование: /unhedge <QUANTITY> <SYMBOL>\n(Временно, пока не интегрирована БД)").await?;
                  return Ok(());
             }
             let quantity_res = parts[0].parse::<f64>();
@@ -181,20 +194,24 @@ where
             match quantity_res {
                 Ok(quantity) if quantity > 0.0 => {
                     info!("Processing /unhedge command for chat_id: {}, quantity: {}, symbol: {}", chat_id, quantity, sym);
-                    // --- ИЗМЕНЕНО: Убираем commission из вызова new ---
                     let hedger = crate::hedger::Hedger::new(
                         exchange.clone(),
                         cfg.slippage,
-                        // cfg.commission, // <-- УДАЛЕНО
                         cfg.max_wait_secs,
-                        cfg.quote_currency // <-- quote_currency (уже была)
+                        cfg.quote_currency
                     );
-                    // --- Конец изменений ---
                     let waiting_msg = bot.send_message(chat_id, format!("⏳ Запускаю расхеджирование {} {}...", quantity, sym)).await?;
-                    match hedger.run_unhedge(UnhedgeRequest {
-                        quantity,
-                        symbol: sym.clone(),
-                    }).await {
+                    // --- ИЗМЕНЕНО: Передаем db (пока закомментировано) ---
+                    // let db_clone = db.clone();
+                    match hedger.run_unhedge(
+                        UnhedgeRequest {
+                            quantity,
+                            symbol: sym.clone(),
+                        },
+                        // 0, // Placeholder for original_hedge_id
+                        // &db_clone,
+                    ).await {
+                    // --- Конец изменений ---
                         Ok((sold, bought)) => {
                             info!("Unhedge successful for chat_id: {}. Sold spot: {}, Bought fut: {}", chat_id, sold, bought);
                             bot.edit_message_text(

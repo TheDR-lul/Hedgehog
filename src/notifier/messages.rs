@@ -1,6 +1,9 @@
 // src/notifier/messages.rs
 use crate::config::Config;
 use crate::exchange::Exchange;
+// --- ИЗМЕНЕНО: Исправляем импорт storage ---
+use crate::storage::{Db, insert_hedge_operation};
+// --- Конец изменений ---
 use super::{UserState, StateStorage, RunningHedges, RunningHedgeInfo};
 use tokio::sync::Mutex as TokioMutex;
 use std::sync::Arc;
@@ -8,7 +11,7 @@ use teloxide::prelude::*;
 use teloxide::types::{Message, MessageId, InlineKeyboardButton, InlineKeyboardMarkup, ChatId};
 use tracing::{warn, error, info};
 use crate::models::{HedgeRequest, UnhedgeRequest};
-use crate::hedger::{Hedger, HedgeProgressUpdate, HedgeProgressCallback}; // Убрали HedgeParams
+use crate::hedger::{Hedger, HedgeProgressUpdate, HedgeProgressCallback};
 use futures::future::FutureExt;
 
 // Вспомогательная функция для "чистки" чата
@@ -23,6 +26,7 @@ async fn cleanup_chat(bot: &Bot, chat_id: ChatId, user_msg_id: MessageId, bot_ms
     }
 }
 
+// --- ИЗМЕНЕНО: Принимаем db: &Db ---
 pub async fn handle_message<E>(
     bot: Bot,
     msg: Message,
@@ -30,7 +34,9 @@ pub async fn handle_message<E>(
     exchange: E,
     cfg: Config,
     running_hedges: RunningHedges,
+    db: &Db, // <-- Добавлено
 ) -> anyhow::Result<()>
+// --- Конец изменений ---
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
@@ -168,6 +174,34 @@ where
                 if let Ok(params) = hedge_params_result {
                     info!("Hedge calculation successful. Running hedge execution for chat_id: {}", chat_id);
 
+                    let operation_id = match insert_hedge_operation(
+                        db,
+                        chat_id.0,
+                        &params.symbol,
+                        &cfg.quote_currency,
+                        sum,
+                        vol,
+                        params.spot_order_qty,
+                        params.fut_order_qty,
+                    ).await {
+                        Ok(id) => {
+                            info!("Created hedge operation record in DB with id: {}", id);
+                            id
+                        }
+                        Err(e) => {
+                            error!("Failed to insert hedge operation into DB: {}", e);
+                            bot.edit_message_text(
+                                chat_id,
+                                waiting_msg.id,
+                                format!("❌ Критическая ошибка: не удалось создать запись в БД: {}", e)
+                            )
+                            .reply_markup(InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new()))
+                            .await?;
+                            return Ok(());
+                        }
+                    };
+
+
                     let current_order_id_storage = Arc::new(TokioMutex::new(None::<String>));
                     let total_filled_qty_storage = Arc::new(TokioMutex::new(0.0f64));
 
@@ -185,6 +219,7 @@ where
                     let cfg_clone = cfg.clone();
                     let symbol_for_button = initial_symbol.clone();
                     let qc_for_callback = cfg_clone.quote_currency.clone();
+                    let db_clone = db.clone();
 
 
                     let task = tokio::spawn(async move {
@@ -203,7 +238,6 @@ where
 
                                 let status_text = if update.is_replacement { "(Ордер переставлен)" } else { "" };
 
-                                // --- ИЗМЕНЕНО: Добавляем информацию об исполнении ---
                                 let filled_percent = if update.target_qty > 0.0 {
                                     (update.filled_qty / update.target_qty) * 100.0
                                 } else {
@@ -213,14 +247,11 @@ where
                                     "\nИсполнено: {:.6}/{:.6} ({:.1}%)",
                                     update.filled_qty, update.target_qty, filled_percent
                                 );
-                                // --- Конец изменений ---
 
-                                // --- ИЗМЕНЕНО: Добавляем fill_status к тексту ---
                                 let text = format!(
                                     "⏳ Хеджирование {} {} ({}) в процессе...\nРыночная цена: {:.2}\nОрдер на покупку: {:.2} {}{}",
-                                    sum, qc, symbol, update.current_spot_price, update.new_limit_price, status_text, fill_status // <-- Добавлено
+                                    sum, qc, symbol, update.current_spot_price, update.new_limit_price, status_text, fill_status
                                 );
-                                // --- Конец изменений ---
 
                                 if let Err(e) = bot.edit_message_text(chat_id, msg_id, text).reply_markup(kb).await {
                                     if !e.to_string().contains("message is not modified") {
@@ -232,14 +263,18 @@ where
                             .boxed()
                         });
 
+                        // --- ИЗМЕНЕНО: Вызов run_hedge с правильным количеством аргументов ---
                         let result = hedger_clone.run_hedge(
                             params,
                             progress_callback,
                             current_order_id_storage_clone,
                             total_filled_qty_storage_clone,
+                            operation_id,
+                            &db_clone,
                         ).await;
+                        // --- Конец изменений ---
 
-                        let is_cancelled = result.is_err() && result.as_ref().err().unwrap().to_string().contains("cancelled");
+                        let is_cancelled = result.is_err() && result.as_ref().err().map_or(false, |e| e.to_string().contains("cancelled")); // Улучшенная проверка
 
                         if !is_cancelled {
                             running_hedges_clone.lock().await.remove(&(chat_id, symbol_for_remove));
@@ -253,8 +288,8 @@ where
                                     chat_id,
                                     waiting_msg_id,
                                     format!(
-                                        "✅ Хеджирование {} {} ({}) при V={:.1}% завершено:\n\n🟢 Спот куплено: {:.6}\n🔴 Фьюч продано: {:.6}",
-                                        initial_sum, cfg_clone.quote_currency, symbol_for_messages, vol_raw_clone, spot_qty, fut_qty,
+                                        "✅ Хеджирование ID:{} {} {} ({}) при V={:.1}% завершено:\n\n🟢 Спот куплено: {:.6}\n🔴 Фьюч продано: {:.6}",
+                                        operation_id, initial_sum, cfg_clone.quote_currency, symbol_for_messages, vol_raw_clone, spot_qty, fut_qty,
                                     ),
                                 )
                                 .reply_markup(InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new()))
@@ -262,13 +297,13 @@ where
                             }
                             Err(e) => {
                                 if is_cancelled {
-                                     info!("Hedge task for chat {}, symbol {} was cancelled.", chat_id, symbol_for_messages);
+                                     info!("Hedge task for chat {}, symbol {} (op_id: {}) was cancelled.", chat_id, symbol_for_messages, operation_id);
                                 } else {
-                                    error!("Hedge execution failed for chat_id: {}, symbol: {}: {}", chat_id, symbol_for_messages, e);
+                                    error!("Hedge execution failed for chat_id: {}, symbol: {}, op_id: {}: {}", chat_id, symbol_for_messages, operation_id, e);
                                      let _ = bot.edit_message_text(
                                         chat_id,
                                         waiting_msg_id,
-                                        format!("❌ Ошибка выполнения хеджирования {}: {}", symbol_for_messages, e)
+                                        format!("❌ Ошибка выполнения хеджирования ID:{}: {}", operation_id, e)
                                      )
                                      .reply_markup(InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new()))
                                      .await;
@@ -285,8 +320,9 @@ where
                             total_filled_qty: total_filled_qty_storage,
                             symbol: initial_symbol.clone(),
                             bot_message_id: waiting_msg.id.0,
+                            operation_id,
                         });
-                        info!("Stored running hedge info for chat_id: {}, symbol: {}", chat_id, initial_symbol);
+                        info!("Stored running hedge info for chat_id: {}, symbol: {}, op_id: {}", chat_id, initial_symbol, operation_id);
                     }
 
                 }
@@ -297,6 +333,7 @@ where
 
         // --- Обработка ввода количества для РАСХЕДЖИРОВАНИЯ ---
         Some(UserState::AwaitingUnhedgeQuantity { symbol, last_bot_message_id }) => {
+            // TODO: Переделать логику unhedge для работы с БД (выбор операции для расхеджирования)
             if let Ok(quantity) = text.parse::<f64>() {
                 if quantity <= 0.0 {
                     bot.send_message(chat_id, "⚠️ Количество должно быть положительным.").await?;
@@ -326,14 +363,21 @@ where
                 let symbol_clone = symbol.clone();
                 let quantity_clone = quantity;
                 let hedger_clone = hedger.clone();
+                let _db_clone = db.clone(); // Пока не используется
 
                 tokio::spawn(async move {
+                    // --- ИЗМЕНЕНО: Вызов run_unhedge (пока без БД) ---
                     match hedger_clone
-                        .run_unhedge(UnhedgeRequest {
-                            quantity: quantity_clone,
-                            symbol: symbol_clone.clone(),
-                        })
+                        .run_unhedge(
+                            UnhedgeRequest {
+                                quantity: quantity_clone,
+                                symbol: symbol_clone.clone(),
+                            },
+                            // 0, // Placeholder for original_hedge_id
+                            // &db_clone,
+                        )
                         .await
+                    // --- Конец изменений ---
                     {
                         Ok((sold, bought)) => {
                             info!("Unhedge successful for chat_id: {}. Sold spot: {}, Bought fut: {}", chat_id, sold, bought);
