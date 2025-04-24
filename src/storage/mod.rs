@@ -10,8 +10,6 @@ pub use db::{
     insert_hedge_operation,
     update_hedge_spot_order,
     update_hedge_final_status,
-    get_running_hedge_operations,
-    get_hedge_operation_by_id,
     get_completed_unhedged_ops_for_symbol,
     mark_hedge_as_unhedged,
 };
