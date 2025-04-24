@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE hedge_operations\n        SET unhedged_op_id = ? -- Устанавливаем timestamp как маркер\n        WHERE id = ? AND status = 'Completed' AND unhedged_op_id IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "fc943cb79d86c83f758deea37e746ca08f22e48939f3500dee4c122fd166cea9"
+}

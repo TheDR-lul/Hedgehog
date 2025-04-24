@@ -7,17 +7,14 @@ use tokio::time::sleep;
 use futures::future::BoxFuture;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
-// --- ДОБАВЛЕНО: Импорт Config и Decimal ---
 use crate::config::Config;
 use rust_decimal::prelude::*;
 use std::str::FromStr;
-// --- КОНЕЦ ДОБАВЛЕНИЯ ---
-
 use crate::exchange::{Exchange, OrderStatus};
 use crate::exchange::bybit::{SPOT_CATEGORY, LINEAR_CATEGORY};
 use crate::exchange::types::OrderSide;
 use crate::models::{HedgeRequest, UnhedgeRequest};
-use crate::storage::{Db, update_hedge_spot_order, update_hedge_final_status};
+use crate::storage::{Db, update_hedge_spot_order, update_hedge_final_status,mark_hedge_as_unhedged,HedgeOperation};
 
 pub const ORDER_FILL_TOLERANCE: f64 = 1e-8; // Допуск для сравнения float
 
@@ -555,261 +552,262 @@ where
 
 
     /// Запуск расхеджирования (с проверкой баланса и автоматической корректировкой количества)
-    pub async fn run_unhedge(
-        &self,
-        req: UnhedgeRequest,
-        // TODO: Принимать и использовать ID операции хеджирования для связи и обновления БД
-        // original_hedge_id: i64,
-        // db: &Db,
-    ) -> Result<(f64, f64)> {
-         let UnhedgeRequest { quantity: requested_quantity, symbol } = req; // Используем requested_quantity
-         // Корректируем initial_spot_qty и initial_fut_qty после проверки баланса
-         let mut initial_spot_qty = requested_quantity;
-         let mut initial_fut_qty = requested_quantity;
+/// Запуск расхеджирования (с проверкой баланса и использованием кол-ва из ОРИГИНАЛЬНОЙ операции)
+pub async fn run_unhedge(
+    &self,
+    // --- ИЗМЕНЕНЫ ПАРАМЕТРЫ ---
+    original_op: HedgeOperation, // Принимаем всю запись исходной операции
+    db: &Db,
+    // --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    // TODO: Добавить поддержку отмены для unhedge по аналогии с run_hedge
+    // TODO: Добавить колбэк прогресса для unhedge
+    // TODO: Создавать запись в unhedge_operations и обновлять ее
+) -> Result<(f64, f64)> { // Возвращает (проданный_спот, купленный_фьюч)
+     // --- Получаем данные из исходной операции ---
+     let symbol = original_op.base_symbol.clone();
+     let original_hedge_op_id = original_op.id;
+     // Количество фьючерса берем из ИСХОДНОЙ операции хеджа
+     let futures_buy_qty = original_op.target_futures_qty; // Это целевое нетто кол-во
+     // --- КОНЕЦ ---
 
-         info!(
-            "Starting unhedge for {} with requested_quantity={}",
-            symbol, requested_quantity
-        );
+     info!(
+        "Starting unhedge for original hedge op_id={} ({}), target futures qty={}",
+        original_hedge_op_id, symbol, futures_buy_qty
+    );
 
-        let mut cumulative_filled_qty = 0.0;
-        // current_order_target_qty будет установлен после проверки баланса
-        let mut current_order_target_qty: f64;
-        let mut qty_filled_in_current_order = 0.0;
-         let mut current_spot_order_id: Option<String> = None; // Для unhedge тоже нужен ID
+    let mut cumulative_filled_qty = 0.0;
+    let mut current_order_target_qty: f64; // Будет установлено после проверки баланса
+    let mut qty_filled_in_current_order = 0.0;
+    let mut current_spot_order_id: Option<String> = None; // Для unhedge тоже нужен ID
 
-        if requested_quantity <= 0.0 {
-             error!("Requested quantity must be positive: {}. Aborting unhedge.", requested_quantity);
-             return Err(anyhow::anyhow!("Requested quantity must be positive"));
-        }
-
-        // --- ИЗМЕНЕННАЯ ПРОВЕРКА БАЛАНСА ---
-        match self.exchange.get_balance(&symbol).await {
-            Ok(balance) => {
-                 info!("Checked available balance {} for {}", balance.free, symbol);
-                 if balance.free < requested_quantity - ORDER_FILL_TOLERANCE {
-                     // Если доступно МЕНЬШЕ, чем запрошено (с учетом допуска)
-                     if balance.free > ORDER_FILL_TOLERANCE {
-                         // Но доступно больше нуля - используем доступное количество
-                         warn!(
-                             "Available balance {} is less than requested {}. Unhedging available amount.",
-                             balance.free, requested_quantity
-                         );
-                         initial_spot_qty = balance.free; // Корректируем количество для операции
-                         initial_fut_qty = balance.free;  // И фьючерс тоже на это количество
-                     } else {
-                         // Если доступно почти ноль - ошибка
-                         error!("Insufficient available balance {} for {} to unhedge requested {}", balance.free, symbol, requested_quantity);
-                         return Err(anyhow!("Insufficient balance: available {:.8}, needed {:.8}", balance.free, requested_quantity));
-                     }
-                 } else {
-                      // Доступно достаточно или равно запрошенному - используем запрошенное
-                      info!("Available balance {} is sufficient for requested {}", balance.free, requested_quantity);
-                      // initial_spot_qty и initial_fut_qty остаются равными requested_quantity
-                 }
-            },
-            Err(e) => {
-                 // Если не удалось получить баланс, лучше не продолжать продажу
-                 error!("Failed to get balance for {} before unhedge: {}. Aborting.", symbol, e);
-                 return Err(anyhow!("Failed to get balance before unhedge: {}", e));
-            }
-        }
-        // --- КОНЕЦ ИЗМЕНЕННОЙ ПРОВЕРКИ БАЛАНСА ---
-
-        // Устанавливаем цель для первого ордера и для цикла
-        current_order_target_qty = initial_spot_qty; // Это уже скорректированное количество
-        info!("Proceeding unhedge with actual quantity: {}", initial_spot_qty);
-
-
-        // --- Логика цикла для unhedge (полная версия) ---
-        let mut current_spot_price = self.exchange.get_spot_price(&symbol).await?;
-        if current_spot_price <= 0.0 {
-            error!("Invalid spot price received: {}", current_spot_price);
-            return Err(anyhow!("Invalid spot price: {}", current_spot_price));
-        }
-
-        let mut limit_price = current_spot_price * (1.0 + self.slippage); // Цена ВЫШЕ рынка
-        info!("Initial spot price: {}, placing limit sell at {} for qty {}", current_spot_price, limit_price, current_order_target_qty);
-        let spot_order = self
-            .exchange
-            .place_limit_order(&symbol, OrderSide::Sell, current_order_target_qty, limit_price)
-            .await?;
-        info!("Placed initial spot limit order: id={}", spot_order.id);
-        current_spot_order_id = Some(spot_order.id.clone()); // Сохраняем ID
-        let mut start = Instant::now();
-
-        let unhedge_loop_result: Result<()> = async {
-            loop {
-                sleep(Duration::from_secs(1)).await;
-                let now = Instant::now();
-
-                 let order_id_to_check = match &current_spot_order_id {
-                    Some(id) => id.clone(),
-                    None => {
-                        if cumulative_filled_qty < initial_spot_qty - ORDER_FILL_TOLERANCE && now.duration_since(start) > Duration::from_secs(2) {
-                            warn!("No active unhedge order ID, but target not reached. Aborting unhedge.");
-                            return Err(anyhow!("No active spot order, but target not reached after fill/cancellation during unhedge."));
-                        } else if cumulative_filled_qty >= initial_spot_qty - ORDER_FILL_TOLERANCE {
-                             info!("No active unhedge order and target reached. Exiting loop.");
-                             break Ok(());
-                        }
-                        continue; // Ждем
-                    }
-                };
-
-
-                let status: OrderStatus = match self.exchange.get_order_status(&symbol, &order_id_to_check).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        if e.to_string().contains("Order not found") && now.duration_since(start) > Duration::from_secs(5) {
-                            warn!("Unhedge order {} not found after delay, assuming it filled for its target qty {}. Continuing...", order_id_to_check, current_order_target_qty);
-                            cumulative_filled_qty += current_order_target_qty;
-                             current_spot_order_id = None; // Обнуляем ID
-                            if cumulative_filled_qty >= initial_spot_qty - ORDER_FILL_TOLERANCE {
-                                info!("Total filled spot quantity {} meets target {} after unhedge order not found assumption. Exiting loop.", cumulative_filled_qty, initial_spot_qty);
-                                break Ok(());
-                            } else {
-                                warn!("Unhedge order filled assumption, but overall target {} not reached. Triggering replacement logic.", initial_spot_qty);
-                                start = now - self.max_wait - Duration::from_secs(1);
-                                qty_filled_in_current_order = 0.0;
-                                continue;
-                            }
-                        } else {
-                            warn!("Failed to get unhedge order status for {}: {}. Aborting unhedge.", order_id_to_check, e);
-                            return Err(anyhow!("Unhedge failed during status check: {}", e));
-                        }
-                    }
-                };
-
-                let previously_filled_in_current = qty_filled_in_current_order;
-                qty_filled_in_current_order = status.filled_qty;
-                let filled_since_last_check = qty_filled_in_current_order - previously_filled_in_current;
-
-                if filled_since_last_check.abs() > ORDER_FILL_TOLERANCE {
-                    cumulative_filled_qty += filled_since_last_check;
-                    cumulative_filled_qty = cumulative_filled_qty.max(0.0).min(initial_spot_qty * 1.01);
-                    // TODO: Update unhedge_operations in DB
-                }
-
-                if status.remaining_qty <= ORDER_FILL_TOLERANCE {
-                     info!("Unhedge spot order {} considered filled by exchange (remaining_qty: {}, current order filled: {}, total cumulative: {}). Exiting loop.",
-                           order_id_to_check, status.remaining_qty, status.filled_qty, cumulative_filled_qty);
-                    // Корректируем до цели (initial_spot_qty уже скорректирован, если нужно)
-                    if (cumulative_filled_qty - initial_spot_qty).abs() > ORDER_FILL_TOLERANCE {
-                         warn!("Unhedge: Correcting final filled qty to target {}.", initial_spot_qty);
-                         cumulative_filled_qty = initial_spot_qty;
-                    }
-                     current_spot_order_id = None; // Обнуляем ID
-                     break Ok(()); // Выходим из цикла
-                }
-
-                if start.elapsed() > self.max_wait && status.remaining_qty > ORDER_FILL_TOLERANCE {
-                     warn!("Unhedge spot order {} partially filled ({}/{}) or not filled within {:?}. Replacing...", order_id_to_check, qty_filled_in_current_order, current_order_target_qty, self.max_wait);
-
-                    let remaining_total_qty = initial_spot_qty - cumulative_filled_qty; // Общая цель уже скорректирована
-
-                    if let Err(e) = self.exchange.cancel_order(&symbol, &order_id_to_check).await {
-                         warn!("Unhedge order {} cancellation failed (likely already inactive): {}", order_id_to_check, e);
-                         sleep(Duration::from_millis(500)).await;
-                    } else {
-                        info!("Successfully sent cancel request for unhedge order {}", order_id_to_check);
-                         sleep(Duration::from_millis(500)).await;
-                    }
-                    current_spot_order_id = None; // Обнуляем ID
-                    qty_filled_in_current_order = 0.0;
-
-                     match self.exchange.get_order_status(&symbol, &order_id_to_check).await {
-                         Ok(final_status) if final_status.remaining_qty <= ORDER_FILL_TOLERANCE => {
-                              info!("Unhedge order {} filled completely after cancel request. Adjusting cumulative qty.", order_id_to_check);
-                              let filled_after_cancel = final_status.filled_qty - previously_filled_in_current;
-                              if filled_after_cancel > 0.0 { cumulative_filled_qty += filled_after_cancel; }
-                              // Корректируем до цели
-                              if (cumulative_filled_qty - initial_spot_qty).abs() > ORDER_FILL_TOLERANCE && cumulative_filled_qty < initial_spot_qty {
-                                  cumulative_filled_qty = initial_spot_qty;
-                              }
-                             if cumulative_filled_qty >= initial_spot_qty - ORDER_FILL_TOLERANCE {
-                                 info!("Total filled quantity {} meets target {} after fill during cancel. Exiting loop.", cumulative_filled_qty, initial_spot_qty);
-                                 break Ok(());
-                             }
-                         }
-                         Ok(_) => {}
-                         Err(e) => { warn!("Failed to get unhedge order status after cancel request: {}", e); }
-                     }
-
-
-                    if remaining_total_qty <= ORDER_FILL_TOLERANCE {
-                         info!("Total filled quantity {} meets target {} during replacement. Exiting loop.", cumulative_filled_qty, initial_spot_qty);
-                         break Ok(());
-                    }
-
-                    current_spot_price = match self.exchange.get_spot_price(&symbol).await {
-                         Ok(p) if p > 0.0 => p,
-                         Ok(p) => {
-                             error!("Received non-positive spot price during unhedge replacement: {}", p);
-                             return Err(anyhow!("Received non-positive spot price during unhedge replacement: {}", p));
-                         }
-                         Err(e) => {
-                            warn!("Failed to get spot price during unhedge replacement: {}. Aborting unhedge.", e);
-                            return Err(anyhow!("Unhedge failed during replacement (get price step): {}", e));
-                         }
-                    };
-
-                    limit_price = current_spot_price * (1.0 + self.slippage); // Цена ВЫШЕ рынка
-                    current_order_target_qty = remaining_total_qty; // Цель нового ордера - оставшийся объем
-
-                    info!("New spot price: {}, placing new limit sell at {} for remaining qty {}", current_spot_price, limit_price, current_order_target_qty);
-                    let new_spot_order = self
-                        .exchange
-                        .place_limit_order(&symbol, OrderSide::Sell, current_order_target_qty, limit_price)
-                        .await?;
-                    info!("Placed replacement spot limit order: id={}", new_spot_order.id);
-                    current_spot_order_id = Some(new_spot_order.id.clone()); // Сохраняем новый ID
-                    // TODO: Update unhedge_operations in DB (new order ID)
-                    start = Instant::now(); // Сбрасываем таймер для нового ордера
-                }
-                // TODO: Add progress callback call for unhedge here if needed
-            } // Конец цикла loop
-        }.await; // Конец async блока
-
-        if let Err(loop_err) = unhedge_loop_result {
-             error!("Unhedge loop failed: {}", loop_err);
-             // TODO: Update unhedge_operations status to Failed
-             return Err(loop_err);
-        }
-
-         // Убедимся, что cumulative_filled_qty точно равен initial_spot_qty (скорректированному)
-         let final_spot_qty = if (cumulative_filled_qty - initial_spot_qty).abs() < ORDER_FILL_TOLERANCE {
-             initial_spot_qty
-         } else {
-             warn!("Unhedge: Final filled qty {} differs from target {}. Using actual filled.", cumulative_filled_qty, initial_spot_qty);
-             cumulative_filled_qty
-         };
-
-
-        // Если цикл завершился успешно, покупаем фьючерс
-        let futures_symbol = format!("{}{}", symbol, self.quote_currency);
-        info!(
-            "Placing market buy order on futures ({}) for final quantity {}", // Используем скорректированное initial_fut_qty
-            futures_symbol, initial_fut_qty
-        );
-        let fut_order_result = self
-            .exchange
-            .place_futures_market_order(&futures_symbol, OrderSide::Buy, initial_fut_qty) // Используем скорректированный initial_fut_qty
-            .await;
-
-        match fut_order_result {
-             Ok(fut_order) => {
-                 info!("Placed futures market order: id={}", fut_order.id);
-                 info!("Unhedge completed successfully for {}. Total spot filled: {}", symbol, final_spot_qty);
-                 // TODO: Добавить обновление БД для unhedge
-                 Ok((final_spot_qty, initial_fut_qty)) // Возвращаем скорректированные кол-ва
+    // --- ПРОВЕРКА БАЛАНСА ПЕРЕД ПРОДАЖЕЙ ---
+    let spot_sell_qty = match self.exchange.get_balance(&symbol).await {
+        Ok(balance) => {
+             info!("Checked available balance {} for {}", balance.free, symbol);
+             if balance.free > ORDER_FILL_TOLERANCE {
+                 // Используем доступный баланс для продажи спота
+                 balance.free
+             } else {
+                 // Если доступно почти ноль - ошибка
+                 error!("Insufficient available balance {} for {} to unhedge", balance.free, symbol);
+                 return Err(anyhow!("Insufficient available balance: {:.8}", balance.free));
              }
-             Err(e) => {
-                 warn!("Failed to place futures order during unhedge: {}. Spot was already sold!", e);
-                 // TODO: Добавить обновление БД для unhedge (статус Failed)
-                 Err(anyhow!("Failed to place futures order after spot sell: {}", e))
-             }
+        },
+        Err(e) => {
+             // Если не удалось получить баланс, лучше не продолжать продажу
+             error!("Failed to get balance for {} before unhedge: {}. Aborting.", symbol, e);
+             return Err(anyhow!("Failed to get balance before unhedge: {}", e));
         }
+    };
+    // --- КОНЕЦ ПРОВЕРКИ БАЛАНСА ---
+
+    // Устанавливаем цель для первого ордера и для цикла
+    current_order_target_qty = spot_sell_qty; // Это РЕАЛЬНОЕ доступное количество
+    info!("Proceeding unhedge with actual spot sell quantity: {}", spot_sell_qty);
+
+    // --- Логика цикла для unhedge (продажа спота) ---
+    let mut current_spot_price = self.exchange.get_spot_price(&symbol).await?;
+    if current_spot_price <= 0.0 {
+        error!("Invalid spot price received: {}", current_spot_price);
+        return Err(anyhow!("Invalid spot price: {}", current_spot_price));
     }
 
-} // Конец impl Hedger
+    let mut limit_price = current_spot_price * (1.0 + self.slippage); // Цена ВЫШЕ рынка
+    info!("Initial spot price: {}, placing limit sell at {} for qty {}", current_spot_price, limit_price, current_order_target_qty);
+    let spot_order = self
+        .exchange
+        .place_limit_order(&symbol, OrderSide::Sell, current_order_target_qty, limit_price)
+        .await?;
+    info!("Placed initial spot limit order: id={}", spot_order.id);
+    current_spot_order_id = Some(spot_order.id.clone()); // Сохраняем ID
+    let mut start = Instant::now();
+
+    let unhedge_loop_result: Result<()> = async {
+        loop {
+            sleep(Duration::from_secs(1)).await;
+            let now = Instant::now();
+
+             let order_id_to_check = match &current_spot_order_id {
+                Some(id) => id.clone(),
+                None => {
+                    // Используем spot_sell_qty как цель для проверки завершения
+                    if cumulative_filled_qty < spot_sell_qty - ORDER_FILL_TOLERANCE && now.duration_since(start) > Duration::from_secs(2) {
+                        warn!("No active unhedge order ID, but target not reached. Aborting unhedge.");
+                        return Err(anyhow!("No active spot order, but target not reached after fill/cancellation during unhedge."));
+                    } else if cumulative_filled_qty >= spot_sell_qty - ORDER_FILL_TOLERANCE {
+                         info!("No active unhedge order and target reached. Exiting loop.");
+                         break Ok(());
+                    }
+                    continue; // Ждем
+                }
+            };
+
+
+            let status: OrderStatus = match self.exchange.get_order_status(&symbol, &order_id_to_check).await {
+                Ok(s) => s,
+                Err(e) => {
+                    if e.to_string().contains("Order not found") && now.duration_since(start) > Duration::from_secs(5) {
+                        warn!("Unhedge order {} not found after delay, assuming it filled for its target qty {}. Continuing...", order_id_to_check, current_order_target_qty);
+                        cumulative_filled_qty += current_order_target_qty;
+                         current_spot_order_id = None; // Обнуляем ID
+                        if cumulative_filled_qty >= spot_sell_qty - ORDER_FILL_TOLERANCE {
+                            info!("Total filled spot quantity {} meets target {} after unhedge order not found assumption. Exiting loop.", cumulative_filled_qty, spot_sell_qty);
+                            break Ok(());
+                        } else {
+                            warn!("Unhedge order filled assumption, but overall target {} not reached. Triggering replacement logic.", spot_sell_qty);
+                            start = now - self.max_wait - Duration::from_secs(1);
+                            qty_filled_in_current_order = 0.0;
+                            continue;
+                        }
+                    } else {
+                        warn!("Failed to get unhedge order status for {}: {}. Aborting unhedge.", order_id_to_check, e);
+                        return Err(anyhow!("Unhedge failed during status check: {}", e));
+                    }
+                }
+            };
+
+            let previously_filled_in_current = qty_filled_in_current_order;
+            qty_filled_in_current_order = status.filled_qty;
+            let filled_since_last_check = qty_filled_in_current_order - previously_filled_in_current;
+
+            if filled_since_last_check.abs() > ORDER_FILL_TOLERANCE {
+                cumulative_filled_qty += filled_since_last_check;
+                cumulative_filled_qty = cumulative_filled_qty.max(0.0).min(spot_sell_qty * 1.01); // Ограничиваем целью
+                // TODO: Update unhedge_operations in DB if we create that table
+            }
+
+            if status.remaining_qty <= ORDER_FILL_TOLERANCE {
+                 info!("Unhedge spot order {} considered filled by exchange (remaining_qty: {}, current order filled: {}, total cumulative: {}). Exiting loop.",
+                       order_id_to_check, status.remaining_qty, status.filled_qty, cumulative_filled_qty);
+                // Корректируем до цели (spot_sell_qty)
+                if (cumulative_filled_qty - spot_sell_qty).abs() > ORDER_FILL_TOLERANCE {
+                     warn!("Unhedge: Correcting final filled qty to target {}.", spot_sell_qty);
+                     cumulative_filled_qty = spot_sell_qty;
+                }
+                 current_spot_order_id = None; // Обнуляем ID
+                 break Ok(()); // Выходим из цикла
+            }
+
+            // --- Логика перестановки ордера ---
+            if start.elapsed() > self.max_wait && status.remaining_qty > ORDER_FILL_TOLERANCE {
+                 warn!("Unhedge spot order {} partially filled ({}/{}) or not filled within {:?}. Replacing...", order_id_to_check, qty_filled_in_current_order, current_order_target_qty, self.max_wait);
+
+                let remaining_total_qty = spot_sell_qty - cumulative_filled_qty; // Цель - продать доступный спот
+
+                // Отменяем старый ордер
+                if let Err(e) = self.exchange.cancel_order(&symbol, &order_id_to_check).await {
+                     warn!("Unhedge order {} cancellation failed (likely already inactive): {}", order_id_to_check, e);
+                     sleep(Duration::from_millis(500)).await;
+                } else {
+                    info!("Successfully sent cancel request for unhedge order {}", order_id_to_check);
+                     sleep(Duration::from_millis(500)).await;
+                }
+                current_spot_order_id = None; // Обнуляем ID
+                qty_filled_in_current_order = 0.0; // Сбрасываем счетчик для нового ордера
+
+                // Перепроверяем статус после отмены
+                 match self.exchange.get_order_status(&symbol, &order_id_to_check).await {
+                     Ok(final_status) if final_status.remaining_qty <= ORDER_FILL_TOLERANCE => {
+                          info!("Unhedge order {} filled completely after cancel request. Adjusting cumulative qty.", order_id_to_check);
+                          let filled_after_cancel = final_status.filled_qty - previously_filled_in_current;
+                          if filled_after_cancel > 0.0 { cumulative_filled_qty += filled_after_cancel; }
+                          // Корректируем до цели
+                          if (cumulative_filled_qty - spot_sell_qty).abs() > ORDER_FILL_TOLERANCE && cumulative_filled_qty < spot_sell_qty {
+                              cumulative_filled_qty = spot_sell_qty;
+                          }
+                         if cumulative_filled_qty >= spot_sell_qty - ORDER_FILL_TOLERANCE {
+                             info!("Total filled quantity {} meets target {} after fill during cancel. Exiting loop.", cumulative_filled_qty, spot_sell_qty);
+                             break Ok(());
+                         }
+                     }
+                     Ok(_) => { info!("Order {} still has remaining qty after cancel check.", order_id_to_check); }
+                     Err(e) => { warn!("Failed to get unhedge order status after cancel request: {}", e); }
+                 }
+
+
+                // Если цель еще не достигнута
+                if remaining_total_qty <= ORDER_FILL_TOLERANCE {
+                     info!("Total filled quantity {} meets target {} during replacement. Exiting loop.", cumulative_filled_qty, spot_sell_qty);
+                     break Ok(());
+                }
+
+                // Получаем новую цену
+                current_spot_price = match self.exchange.get_spot_price(&symbol).await {
+                     Ok(p) if p > 0.0 => p,
+                     Ok(p) => {
+                         error!("Received non-positive spot price during unhedge replacement: {}", p);
+                         return Err(anyhow!("Received non-positive spot price during unhedge replacement: {}", p));
+                     }
+                     Err(e) => {
+                        warn!("Failed to get spot price during unhedge replacement: {}. Aborting unhedge.", e);
+                        return Err(anyhow!("Unhedge failed during replacement (get price step): {}", e));
+                     }
+                };
+
+                limit_price = current_spot_price * (1.0 + self.slippage); // Цена ВЫШЕ рынка
+                current_order_target_qty = remaining_total_qty; // Цель нового ордера - оставшийся объем
+
+                // Ставим новый ордер
+                info!("New spot price: {}, placing new limit sell at {} for remaining qty {}", current_spot_price, limit_price, current_order_target_qty);
+                let new_spot_order = self
+                    .exchange
+                    .place_limit_order(&symbol, OrderSide::Sell, current_order_target_qty, limit_price)
+                    .await?;
+                info!("Placed replacement spot limit order: id={}", new_spot_order.id);
+                current_spot_order_id = Some(new_spot_order.id.clone()); // Сохраняем новый ID
+                // TODO: Update unhedge_operations in DB (new order ID)
+                start = Instant::now(); // Сбрасываем таймер для нового ордера
+            }
+            // TODO: Add progress callback call for unhedge here if needed
+        } // Конец цикла loop
+    }.await; // Конец async блока
+
+    // Обработка результата цикла продажи спота
+    if let Err(loop_err) = unhedge_loop_result {
+         error!("Unhedge spot sell loop failed for op_id={}: {}", original_hedge_op_id, loop_err);
+         // Статус исходного хеджа не меняем, просто выходим с ошибкой
+         return Err(loop_err);
+    }
+
+     // Убедимся, что итоговое кол-во равно цели (spot_sell_qty)
+     let final_spot_sold_qty = if (cumulative_filled_qty - spot_sell_qty).abs() < ORDER_FILL_TOLERANCE {
+         spot_sell_qty
+     } else {
+         warn!("Unhedge op_id={}: Final spot sold qty {} differs from target {}. Using actual sold.", original_hedge_op_id, cumulative_filled_qty, spot_sell_qty);
+         cumulative_filled_qty
+     };
+
+
+    // Если продажа спота прошла успешно, покупаем фьючерс на ИСХОДНОЕ НЕТТО количество
+    let futures_symbol = format!("{}{}", symbol, self.quote_currency);
+    info!(
+        "op_id={}: Placing market buy order on futures ({}) for original hedge net quantity {}",
+        original_hedge_op_id, futures_symbol, futures_buy_qty
+    );
+    let fut_order_result = self
+        .exchange
+        .place_futures_market_order(&futures_symbol, OrderSide::Buy, futures_buy_qty) // Передаем ИСХОДНОЕ нетто кол-во фьюча
+        .await;
+
+    match fut_order_result {
+         Ok(fut_order) => {
+             info!("Placed futures market order: id={}", fut_order.id);
+             info!("Unhedge completed successfully for original hedge op_id={}. Total spot sold: {}", original_hedge_op_id, final_spot_sold_qty);
+
+             // --- ОБНОВЛЯЕМ СТАТУС В БД ---
+             if let Err(e) = mark_hedge_as_unhedged(db, original_hedge_op_id).await {
+                 // Логируем ошибку, но не прерываем успешный результат операции
+                 error!("Failed to mark hedge operation {} as unhedged in DB: {}", original_hedge_op_id, e);
+             }
+             // --- КОНЕЦ ОБНОВЛЕНИЯ ---
+
+             Ok((final_spot_sold_qty, futures_buy_qty)) // Возвращаем фактически проданный спот и закрытый фьюч (его целевое/закрытое кол-во)
+         }
+         Err(e) => {
+             warn!("Failed to place futures buy order during unhedge for op_id={}: {}. Spot was already sold!", original_hedge_op_id, e);
+             // Статус исходного хеджа не меняем
+             Err(anyhow!("Failed to place futures order after spot sell: {}", e))
+         }
+    }
+} // Конец run_unhedge
+}

@@ -15,21 +15,29 @@ use std::collections::HashMap;
 use teloxide::utils::command::BotCommands;
 use tokio::task::AbortHandle;
 use tokio::sync::Mutex as TokioMutex;
+// --- ДОБАВЛЕНО: Импорт HedgeOperation ---
+use crate::storage::HedgeOperation;
+// --- КОНЕЦ ДОБАВЛЕНИЯ ---
 
 /// Определение состояний пользователя (для диалога)
 #[derive(Debug, Clone)]
 pub enum UserState {
-    AwaitingAssetSelection { last_bot_message_id: Option<i32> },
+    AwaitingAssetSelection { action_type: String, last_bot_message_id: Option<i32> }, // Добавили тип действия
     AwaitingSum { symbol: String, last_bot_message_id: Option<i32> },
     AwaitingVolatility { symbol: String, sum: f64, last_bot_message_id: Option<i32> },
-    AwaitingUnhedgeQuantity { symbol: String, last_bot_message_id: Option<i32> },
+    // --- ИЗМЕНЕНО: Состояние для выбора операции расхеджирования ---
+    AwaitingUnhedgeSelection {
+        symbol: String,
+        operations: Vec<HedgeOperation>, // Храним найденные операции
+        last_bot_message_id: Option<i32>
+    },
+    // --- УДАЛЕНО: Состояние AwaitingUnhedgeQuantity ---
     None,
 }
 
 /// Тип для хранения состояний пользователей (для диалога)
 pub type StateStorage = Arc<RwLock<HashMap<ChatId, UserState>>>;
 
-// --- ИЗМЕНЕНО: Добавляем operation_id ---
 #[derive(Debug)]
 pub struct RunningHedgeInfo {
     pub handle: AbortHandle,
@@ -37,9 +45,8 @@ pub struct RunningHedgeInfo {
     pub total_filled_qty: Arc<TokioMutex<f64>>,
     pub symbol: String,
     pub bot_message_id: i32,
-    pub operation_id: i64, // <-- Добавлено ID операции из БД
+    pub operation_id: i64,
 }
-// --- Конец изменений ---
 
 /// Тип для хранения информации о запущенных процессах хеджирования
 /// Ключ: (ChatId, Symbol)
@@ -59,8 +66,10 @@ pub enum Command {
     Balance(String),
     #[command(description = "начать диалог хеджирования: /hedge <symbol>")]
     Hedge(String),
-    #[command(description = "расхеджировать напрямую: /unhedge <quantity> <symbol>")]
+    // --- ИЗМЕНЕНО: Команда /unhedge принимает символ ---
+    #[command(description = "начать диалог расхеджирования: /unhedge <symbol>")]
     Unhedge(String),
+    // --- КОНЕЦ ИЗМЕНЕНИЯ ---
     #[command(description = "средняя ставка финансирования: /funding <symbol> [days]")]
     Funding(String),
 }

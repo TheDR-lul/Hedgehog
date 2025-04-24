@@ -282,20 +282,21 @@ pub async fn get_completed_unhedged_ops_for_symbol(
 pub async fn mark_hedge_as_unhedged(
     db: &Db,
     hedge_operation_id: i64,
-    unhedge_operation_id: i64, // ID записи в таблице unhedge_operations (если она есть)
+    // unhedge_operation_id: i64, // Больше не принимаем ID операции расхеджирования
 ) -> Result<(), SqlxError> {
-    // Используем query!
+    let ts = current_timestamp(); // Получаем текущее время
     sqlx::query!(
         r#"
         UPDATE hedge_operations
-        SET unhedged_op_id = ?
+        SET unhedged_op_id = ? -- Устанавливаем timestamp как маркер
         WHERE id = ? AND status = 'Completed' AND unhedged_op_id IS NULL
         "#,
-        unhedge_operation_id,
+        ts, // Передаем timestamp
         hedge_operation_id
     )
     .execute(db)
     .await?;
+    info!("Marked hedge operation {} as unhedged with timestamp {}", hedge_operation_id, ts); // Добавлен лог
     Ok(())
 }
 
