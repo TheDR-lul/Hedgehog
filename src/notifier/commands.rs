@@ -108,7 +108,7 @@ where
                         if bal.free > ORDER_FILL_TOLERANCE || bal.locked > ORDER_FILL_TOLERANCE {
                         // --- Конец изменений ---
                             text.push_str(&format!(
-                                "• {}: ️free {:.4}, locked {:.4}\n",
+                                "• {}: ️free {:.8}, locked {:.8}\n",
                                 coin, bal.free, bal.locked
                             ));
                             found_assets = true;
@@ -135,7 +135,7 @@ where
                     Ok(b) => {
                         bot.send_message(
                             chat_id,
-                            format!("💰 {}: free {:.4}, locked {:.4}", sym, b.free, b.locked),
+                            format!("💰 {}: free {:.8}, locked {:.8}", sym, b.free, b.locked),
                         ).await?;
                     }
                     Err(e) => {

@@ -63,7 +63,7 @@ where
                         for (coin, bal) in sorted_balances {
                             if bal.free > ORDER_FILL_TOLERANCE || bal.locked > ORDER_FILL_TOLERANCE {
                                 text.push_str(&format!(
-                                    "• {}: ️free {:.4}, locked {:.4}\n",
+                                    "• {}: ️free {:.8}, locked {:.8}\n",
                                     coin, bal.free, bal.locked
                                 ));
                                 found_assets = true;
