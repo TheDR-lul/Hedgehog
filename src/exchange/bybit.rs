@@ -1,7 +1,9 @@
 // src/exchange/bybit.rs
 
 // --- Используемые типажи и структуры ---
-use super::{Exchange, OrderStatus, FeeRate}; // <-- Добавляем импорт Info
+// --- ИСПРАВЛЕНО: Убран импорт локально определенных структур ---
+use super::{Exchange, OrderStatus, FeeRate};
+// --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 use crate::exchange::types::{Balance, Order, OrderSide};
 // --- Стандартные и внешние зависимости ---
 use anyhow::{anyhow, Result};
@@ -26,7 +28,7 @@ pub const LINEAR_CATEGORY: &str = "linear";
 
 // --- Структуры для парсинга ответов API ---
 
-/// Универсальная обёртка для ответов Bybit API v5 (без дженерика)
+/// Универсальная обёртка для ответов Bybit API v5
 #[derive(Deserialize, Debug)]
 struct ApiResponse {
     #[serde(rename = "retCode")]
@@ -39,7 +41,7 @@ struct ApiResponse {
     _server_time: Option<i64>,
 }
 
-/// Пустой результат для запросов без данных (например, отмена ордера, установка плеча)
+/// Пустой результат для запросов без данных
 #[derive(Deserialize, Debug, Default)]
 struct EmptyResult {}
 
@@ -102,7 +104,7 @@ struct SpotInstrumentsInfoResult {
 }
 
 #[derive(Deserialize, Debug, Clone)]
-pub struct SpotInstrumentInfo {
+pub struct SpotInstrumentInfo { // Локальное определение
     symbol: String,
     #[serde(rename = "lotSizeFilter")]
     pub lot_size_filter: LotSizeFilter,
@@ -117,7 +119,7 @@ struct LinearInstrumentsInfoResult {
 }
 
 #[derive(Deserialize, Debug, Clone)]
-pub struct LinearInstrumentInfo {
+pub struct LinearInstrumentInfo { // Локальное определение
     symbol: String,
     #[serde(rename = "lotSizeFilter")]
     pub lot_size_filter: LotSizeFilter,
@@ -247,14 +249,12 @@ struct PositionInfoResult {
 struct PositionEntry {
     symbol: String,
     leverage: String,
-    // Можно добавить другие поля, если нужны: avgPrice, positionValue, unrealisedPnl и т.д.
-    #[serde(rename = "positionIdx", default)] // 0=One-Way, 1=Buy-Hedge, 2=Sell-Hedge
+    #[serde(rename = "positionIdx", default)]
     _position_idx: i32,
     #[serde(rename = "riskId", default)]
     _risk_id: u64,
     #[serde(rename = "riskLimitValue", default)]
     _risk_limit_value: String,
-
 }
 
 
@@ -780,8 +780,10 @@ impl Exchange for Bybit {
                  let rounded_down = qty_d.trunc_with_scale(qty_decimals);
                  let min_qty = Decimal::from_str(min_order_qty_str).unwrap_or(dec!(0.0));
                  if rounded_down < min_qty && qty_d >= min_qty {
+                     warn!("Limit order quantity {} rounded down below min_order_qty {}. Using min_order_qty.", qty, min_order_qty_str);
                      min_qty.normalize().to_string()
                  } else if rounded_down <= dec!(0.0) {
+                     error!("Requested quantity {} is less than the minimum precision {} for {}", qty, base_precision_str, spot_pair);
                      return Err(anyhow!("Quantity {} is less than minimum precision {}", qty, base_precision_str));
                  } else {
                      rounded_down.normalize().to_string()
@@ -802,25 +804,27 @@ impl Exchange for Bybit {
     /// Размещение рыночного ордера (для ФЬЮЧЕРСОВ)
     async fn place_futures_market_order(
         &self,
-        symbol: &str,
+        symbol: &str, // Полный символ: BTCUSDT
         side: OrderSide,
         qty: f64,
     ) -> Result<Order> {
         let base_symbol = symbol.trim_end_matches(&self.quote_currency);
         if base_symbol.is_empty() || base_symbol == symbol { return Err(anyhow!("Invalid futures symbol format: {}", symbol)); }
 
-        let instrument_info = self.get_linear_instrument_info(base_symbol).await?;
+        let instrument_info = self.get_linear_instrument_info(base_symbol).await?; // Используем базовый для получения инфо
         let qty_step_str = instrument_info.lot_size_filter.qty_step.as_deref().ok_or_else(|| anyhow!("Missing qtyStep for linear symbol {}", symbol))?;
         let min_order_qty_str = &instrument_info.lot_size_filter.min_order_qty;
 
         let qty_decimals = qty_step_str.split('.').nth(1).map_or(0, |s| s.trim_end_matches('0').len()) as u32;
         let formatted_qty = match Decimal::from_f64(qty) {
              Some(qty_d) if qty_d > dec!(0.0) => {
-                 let rounded_down = qty_d.trunc_with_scale(qty_decimals);
+                 let rounded_down = qty_d.trunc_with_scale(qty_decimals); // Усекаем до нужной точности
                  let min_qty = Decimal::from_str(min_order_qty_str).unwrap_or(dec!(0.0));
                  if rounded_down < min_qty && qty_d >= min_qty {
+                     warn!("Futures market order quantity {} rounded down below min_order_qty {}. Using min_order_qty.", qty, min_order_qty_str);
                      min_qty.normalize().to_string()
                  } else if rounded_down <= dec!(0.0) {
+                     error!("Requested futures quantity {} is less than the minimum precision {} (qtyStep) for {}", qty, qty_step_str, symbol);
                      return Err(anyhow!("Quantity {} is less than minimum precision {} (qtyStep)", qty, qty_step_str));
                  } else {
                      rounded_down.normalize().to_string()
@@ -856,6 +860,7 @@ impl Exchange for Bybit {
                  let rounded_down = qty_d.trunc_with_scale(qty_decimals);
                  let min_qty = Decimal::from_str(min_order_qty_str).unwrap_or(dec!(0.0));
                  if rounded_down < min_qty && qty_d >= min_qty {
+                     warn!("Spot market order quantity {} rounded down below min_order_qty {}. Using min_order_qty.", qty, min_order_qty_str);
                      min_qty.normalize().to_string()
                  } else if rounded_down <= dec!(0.0) {
                      return Err(anyhow!("Quantity {} is less than minimum precision {}", qty, base_precision_str));
@@ -873,6 +878,8 @@ impl Exchange for Bybit {
         let body = if side == OrderSide::Sell {
             json!({ "category": SPOT_CATEGORY, "symbol": spot_pair, "side": side.to_string(), "orderType": "Market", "qty": formatted_qty })
         } else {
+            // Покупка по рынку за USDT делается через quoteOrderQty
+             error!("Spot Market Buy by base quantity not supported. Use limit order or quote quantity.");
             return Err(anyhow!("Spot Market Buy by base quantity not supported"));
         };
 
@@ -886,10 +893,10 @@ impl Exchange for Bybit {
         let spot_pair = self.format_pair(symbol);
         info!(symbol=%spot_pair, order_id, category=SPOT_CATEGORY, "Cancelling SPOT order");
         let body = json!({ "category": SPOT_CATEGORY, "symbol": spot_pair, "orderId": order_id });
-        match self.call_api::<EmptyResult>(Method::POST, "v5/order/cancel", None, Some(body), true).await {
-            Ok(_) => Ok(()),
-            Err(e) => { warn!("Attempted to cancel order {} which was not found or already inactive: {}", order_id, e); Ok(()) }
-        }
+        // Ошибки "не найден" или "уже исполнен/отменен" игнорируются внутри call_api
+        self.call_api::<EmptyResult>(Method::POST, "v5/order/cancel", None, Some(body), true).await?;
+        info!(order_id, "SPOT Order cancel request sent (or order was inactive)");
+        Ok(())
     }
 
     /// Получение спотовой цены
@@ -908,7 +915,13 @@ impl Exchange for Bybit {
         debug!(symbol=%spot_pair, order_id, category=SPOT_CATEGORY, "Fetching SPOT order status");
         let params = [("category", SPOT_CATEGORY), ("orderId", order_id)];
         let query_result: OrderQueryResult = self.call_api(Method::GET, "v5/order/realtime", Some(&params), None, true).await?;
-        let order_entry = query_result.list.into_iter().next().ok_or_else(|| anyhow!("Order ID {} not found in realtime query for {}", order_id, spot_pair))?;
+
+        // Если список пуст (ордер не найден в realtime), возвращаем ошибку, чтобы hedger мог это обработать
+        let order_entry = query_result.list.into_iter().next().ok_or_else(|| {
+            warn!("Order ID {} not found in realtime query for {}", order_id, spot_pair);
+            // Используем anyhow для создания ошибки
+            anyhow!("Order not found") // Hedger будет искать эту строку
+        })?;
 
         let filled = if order_entry.cum_exec_qty.is_empty() { 0.0 } else { order_entry.cum_exec_qty.parse::<f64>()? };
         let remaining = if order_entry.leaves_qty.is_empty() { 0.0 } else { order_entry.leaves_qty.parse::<f64>()? };
@@ -925,8 +938,10 @@ impl Exchange for Bybit {
         let risk_level = risk_limit_result.list.into_iter().find(|level| level.id == 1 || level.is_lowest_risk == 1).ok_or_else(|| anyhow!("No risk limit level 1 found for {}", linear_pair))?;
 
         if risk_level.mmr.is_empty() {
-            if self.base_url.contains("testnet") { Ok(0.005) } // Fallback for testnet
-            else { Err(anyhow!("MMR (maintenanceMargin) is empty for {}", linear_pair)) }
+            if self.base_url.contains("testnet") {
+                 warn!("MMR is empty for {} on testnet, using fallback 0.005", linear_pair);
+                 Ok(0.005)
+            } else { Err(anyhow!("MMR (maintenanceMargin) is empty for {}", linear_pair)) }
         } else {
             risk_level.mmr.parse::<f64>().map_err(|e| anyhow!("Failed to parse MMR for {}: {}", linear_pair, e))
         }
@@ -951,31 +966,33 @@ impl Exchange for Bybit {
 
     // --- РЕАЛИЗАЦИЯ НОВЫХ МЕТОДОВ ---
 
-    /// Получить текущее кредитное плечо для символа
+    /// Получить текущее кредитное плечо для символа (linear)
     async fn get_current_leverage(&self, symbol: &str) -> Result<f64> {
         let linear_pair = self.format_pair(symbol);
         info!(symbol=%linear_pair, category=LINEAR_CATEGORY, "Fetching current leverage");
 
         let params = [("category", LINEAR_CATEGORY), ("symbol", &linear_pair)];
+        // Важно: Эндпоинт v5/position/list возвращает инфо только если есть позиция или риск-лимит/плечо не дефолтные.
+        // Если плечо никогда не менялось и позиции нет, список может быть пуст.
         let position_result: PositionInfoResult = self.call_api(
             Method::GET,
             "v5/position/list",
             Some(&params),
             None,
-            true,
+            true, // Требует аутентификации
         ).await?;
 
-        // Bybit возвращает массив позиций, даже если она одна или ее нет.
-        // Если массив пуст или нет записи для нашего символа, плечо не определено.
-        // Если позиций несколько (Hedge Mode), плечо обычно одинаковое. Берем первое.
-        let position = position_result.list.into_iter()
-            .find(|p| p.symbol == linear_pair)
-            .ok_or_else(|| {
-                warn!("No position info found for {} to get leverage. Returning default 1.0", linear_pair);
-                // Если позиции нет, API может не вернуть инфо. Вернем 1.0 или ошибку?
-                // Лучше ошибку, чтобы вызывающий код не продолжил с неверным плечом.
-                anyhow!("No position info found for {} to get leverage", linear_pair)
-            })?;
+        let position = match position_result.list.into_iter().find(|p| p.symbol == linear_pair) {
+             Some(p) => p,
+             None => {
+                 // Если информации нет, возможно, используется плечо по умолчанию (обычно 10x на Bybit)
+                 // Или можно попробовать получить его из другого места, например, из risk-limit (но там maxLeverage)
+                 // Безопаснее вернуть ошибку, чтобы hedger не продолжил с неверным значением.
+                 warn!("No position info found for {} to get leverage. Cannot determine current leverage.", linear_pair);
+                 return Err(anyhow!("Current leverage info not available for {}", linear_pair));
+             }
+        };
+
 
         position.leverage.parse::<f64>().map_err(|e| {
             error!("Failed to parse current leverage for {}: {} (value: '{}')", linear_pair, e, position.leverage);
@@ -983,27 +1000,30 @@ impl Exchange for Bybit {
         })
     }
 
-    /// Установить кредитное плечо для символа
+    /// Установить кредитное плечо для символа (linear)
     async fn set_leverage(&self, symbol: &str, leverage: f64) -> Result<()> {
         let linear_pair = self.format_pair(symbol);
-        // Округляем до 2 знаков, т.к. Bybit часто требует этого
+        // Округляем до 2 знаков
         let leverage_str = format!("{:.2}", leverage);
-        // Проверяем, что плечо > 0
         if leverage <= 0.0 {
             error!("Attempted to set non-positive leverage: {}", leverage);
             return Err(anyhow!("Leverage must be positive"));
         }
+        // Проверка на максимальное плечо биржи (можно получить из /v5/market/instruments-info -> leverageFilter)
+        // TODO: Добавить проверку на максимальное плечо биржи, если нужно
+
         info!(symbol=%linear_pair, leverage=%leverage_str, category=LINEAR_CATEGORY, "Setting leverage");
 
         let body = json!({
             "category": LINEAR_CATEGORY,
             "symbol": linear_pair,
-            "buyLeverage": leverage_str,
+            "buyLeverage": leverage_str, // Устанавливаем одинаковое для лонг и шорт
             "sellLeverage": leverage_str,
-            "tradeMode": 0, // 0=Cross Margin (обычно используется для хеджа)
+            "tradeMode": 0, // 0=Cross Margin
         });
 
-        // Вызываем API. Ошибка 110043 (Leverage not modified) будет проигнорирована в call_api.
+        // Используем call_api, игнорируем результат EmptyResult, если успешно (retCode=0)
+        // Ошибка 110043 (Leverage not modified) будет проигнорирована внутри call_api.
         self.call_api::<EmptyResult>(
             Method::POST,
             "v5/position/set-leverage",
@@ -1012,8 +1032,7 @@ impl Exchange for Bybit {
             true,
         ).await?;
 
-        info!(symbol=%linear_pair, leverage=%leverage_str, "Set leverage request sent successfully (or leverage was already set)");
+        info!(symbol=%linear_pair, leverage=%leverage_str, "Set leverage request sent successfully (or leverage was already set to this value)");
         Ok(())
     }
-    // --- КОНЕЦ РЕАЛИЗАЦИИ НОВЫХ МЕТОДОВ ---
 }

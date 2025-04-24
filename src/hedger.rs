@@ -7,9 +7,10 @@ use tokio::time::sleep;
 use futures::future::BoxFuture;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
-
-// --- ДОБАВЛЕНО: Импортируем Config ---
+// --- ДОБАВЛЕНО: Импорт Config и Decimal ---
 use crate::config::Config;
+use rust_decimal::prelude::*;
+use std::str::FromStr;
 // --- КОНЕЦ ДОБАВЛЕНИЯ ---
 
 use crate::exchange::{Exchange, OrderStatus};
@@ -18,8 +19,7 @@ use crate::exchange::types::OrderSide;
 use crate::models::{HedgeRequest, UnhedgeRequest};
 use crate::storage::{Db, update_hedge_spot_order, update_hedge_final_status};
 
-
-pub const ORDER_FILL_TOLERANCE: f64 = 1e-8;
+pub const ORDER_FILL_TOLERANCE: f64 = 1e-8; // Допуск для сравнения float
 
 #[derive(Clone)]
 pub struct Hedger<E> {
@@ -27,27 +27,22 @@ pub struct Hedger<E> {
     slippage:     f64,
     max_wait:     Duration,
     quote_currency: String,
-    // --- ДОБАВЛЕНО: Храним конфиг для доступа к max_allowed_leverage ---
-    config: Config,
-    // --- КОНЕЦ ДОБАВЛЕНИЯ ---
+    config: Config, // Храним конфиг
 }
 
 #[derive(Debug)]
 pub struct HedgeParams {
-    pub spot_order_qty: f64,
-    pub fut_order_qty: f64,
+    pub spot_order_qty: f64, // Округленное
+    pub fut_order_qty: f64,  // Равно spot_order_qty
     pub current_spot_price: f64,
     pub initial_limit_price: f64,
     pub symbol: String,
-    // --- ДОБАВЛЕНО: Передаем рассчитанные значения для проверки ---
-    pub spot_value: f64,
-    pub available_collateral: f64,
-    // --- КОНЕЦ ДОБАВЛЕНИЯ ---
+    pub spot_value: f64, // Скорректированное значение спота
+    pub available_collateral: f64, // Исходный остаток для залога
 }
 
 #[derive(Debug, Clone)]
 pub struct HedgeProgressUpdate {
-    // ... (поля остаются прежними) ...
     pub current_spot_price: f64,
     pub new_limit_price: f64,
     pub is_replacement: bool,
@@ -57,23 +52,22 @@ pub struct HedgeProgressUpdate {
 
 pub type HedgeProgressCallback = Box<dyn FnMut(HedgeProgressUpdate) -> BoxFuture<'static, Result<()>> + Send + Sync>;
 
-
 impl<E> Hedger<E>
 where
-    // --- ИЗМЕНЕНО: Добавляем Clone к Exchange из-за хранения config ---
     E: Exchange + Clone + Send + Sync + 'static,
 {
-    pub fn new(exchange: E, config: Config) -> Self { // Принимаем Config вместо отдельных полей
+    /// Создаем Hedger, передавая Exchange и Config
+    pub fn new(exchange: E, config: Config) -> Self {
         Self {
             exchange,
-            slippage: config.slippage, // Берем из config
-            max_wait: Duration::from_secs(config.max_wait_secs), // Берем из config
-            quote_currency: config.quote_currency.clone(), // Берем из config
-            config, // Сохраняем весь конфиг
+            slippage: config.slippage,
+            max_wait: Duration::from_secs(config.max_wait_secs),
+            quote_currency: config.quote_currency.clone(),
+            config, // Сохраняем конфиг
         }
     }
 
-    // --- ИЗМЕНЕНО: calculate_hedge_params теперь возвращает больше данных ---
+    /// Расчет параметров хеджирования с учетом точности и проверкой плеча
     pub async fn calculate_hedge_params(&self, req: &HedgeRequest) -> Result<HedgeParams> {
         let HedgeRequest { sum, symbol, volatility } = req;
         debug!(
@@ -81,27 +75,19 @@ where
             symbol, sum, volatility
         );
 
-        // ... (Проверка комиссий остается) ...
-        match self.exchange.get_fee_rate(symbol, SPOT_CATEGORY).await {
-            Ok(fee) => info!(symbol, category=SPOT_CATEGORY, maker_fee=fee.maker, taker_fee=fee.taker, "Current spot fee rate"),
-            Err(e) => warn!("Could not get spot fee rate for {}: {}", symbol, e),
-        }
-        match self.exchange.get_fee_rate(symbol, LINEAR_CATEGORY).await {
-             Ok(fee) => info!(symbol, category=LINEAR_CATEGORY, maker_fee=fee.maker, taker_fee=fee.taker, "Current futures fee rate"),
-             Err(e) => warn!("Could not get futures fee rate for {}: {}", symbol, e),
-        }
+        // Шаг 1: Получаем информацию для обоих рынков
+        let spot_info = self.exchange.get_spot_instrument_info(symbol).await
+            .map_err(|e| anyhow!("Failed to get SPOT instrument info: {}", e))?;
+        let linear_info = self.exchange.get_linear_instrument_info(symbol).await
+             .map_err(|e| anyhow!("Failed to get LINEAR instrument info: {}", e))?;
 
+        // ... (Логирование комиссий, если нужно) ...
 
-        // --- Шаг 2: Расчет SpotValue и AvailableCollateral ---
+        // Шаг 2: Расчет SpotValue и AvailableCollateral
         let mmr = self.exchange.get_mmr(symbol).await?;
         let spot_value = sum / ((1.0 + volatility) * (1.0 + mmr));
-        let available_collateral = sum - spot_value; // Это остаток от Sum
-        // --- Конец Шага 2 ---
-
-        debug!(
-            "Calculated values: spot_value={}, available_collateral={}, MMR={}",
-            spot_value, available_collateral, mmr
-        );
+        let available_collateral = sum - spot_value;
+        debug!("Initial calculated values: spot_value={}, available_collateral={}, MMR={}", spot_value, available_collateral, mmr);
 
         if spot_value <= 0.0 || available_collateral <= 0.0 {
              error!("Calculated values are non-positive: spot={}, collateral={}", spot_value, available_collateral);
@@ -113,29 +99,69 @@ where
             error!("Invalid spot price received: {}", current_spot_price);
             return Err(anyhow!("Invalid spot price: {}", current_spot_price));
         }
-        // --- Расчет количеств (равных) ---
-        let spot_order_qty = spot_value / current_spot_price;
-        let fut_order_qty = spot_order_qty; // Приравниваем количество
-        // --- Конец расчета количеств ---
+
+        // Шаг 3: Определяем точность фьючерсов
+        let fut_qty_step_str = linear_info.lot_size_filter.qty_step.as_deref()
+             .ok_or_else(|| anyhow!("Missing qtyStep for linear symbol {}", linear_info.symbol))?;
+        let fut_decimals = fut_qty_step_str.split('.').nth(1).map_or(0, |s| s.trim_end_matches('0').len()) as u32;
+        debug!("Futures quantity precision requires {} decimal places (qtyStep: {})", fut_decimals, fut_qty_step_str);
+
+        // Рассчитываем идеальное кол-во
+        let ideal_spot_qty = spot_value / current_spot_price;
+        debug!("Ideal calculated quantity: {}", ideal_spot_qty);
+
+        // Шаг 4 и 5: Округляем кол-во до точности фьючерсов и используем его
+        let final_order_qty_decimal = Decimal::from_f64(ideal_spot_qty)
+            .ok_or_else(|| anyhow!("Failed to convert ideal qty {} to Decimal", ideal_spot_qty))?
+            .trunc_with_scale(fut_decimals); // Усекаем до нужной точности
+
+        let final_order_qty = final_order_qty_decimal.to_f64()
+             .ok_or_else(|| anyhow!("Failed to convert final qty {} back to f64", final_order_qty_decimal))?;
+
+        // Используем это финальное количество для обоих ордеров
+        let spot_order_qty = final_order_qty;
+        let fut_order_qty = final_order_qty;
+
+        // Пересчитываем SpotValue для консистентности в расчетах плеча
+        let adjusted_spot_value = final_order_qty * current_spot_price;
+        debug!(
+            "Final quantities rounded to futures precision: spot_qty={}, fut_qty={}",
+             spot_order_qty, fut_order_qty
+        );
+        debug!("Adjusted spot value based on rounded quantity: {}", adjusted_spot_value);
 
         let initial_limit_price = current_spot_price * (1.0 - self.slippage);
-        debug!(
-            "Calculated quantities based on price {}: spot_order_qty={}, fut_order_qty={}",
-            current_spot_price, spot_order_qty, fut_order_qty
-        );
         debug!("Initial limit price: {}", initial_limit_price);
 
+        // Шаг 6: Проверки с округленным количеством
+        // Проверка на минимальное количество (фьючерсы)
+        let min_fut_qty_str = &linear_info.lot_size_filter.min_order_qty;
+        let min_fut_qty = Decimal::from_str(min_fut_qty_str).unwrap_or(rust_decimal::Decimal::ZERO);
+        if final_order_qty_decimal < min_fut_qty {
+            error!("Final quantity {} is less than minimum futures order quantity {}", final_order_qty_decimal, min_fut_qty_str);
+            return Err(anyhow!("Calculated quantity {:.8} is less than minimum futures quantity {}", final_order_qty, min_fut_qty_str));
+        }
+         if spot_order_qty <= 0.0 {
+             error!("Final order quantity is non-positive.");
+             return Err(anyhow::anyhow!("Final order quantity is non-positive"));
+         }
 
-        if spot_order_qty <= 0.0 {
-             error!("Calculated order quantity is non-positive.");
-             return Err(anyhow::anyhow!("Calculated order quantity is non-positive"));
+        // Проверка требуемого плеча (используем adjusted_spot_value и исходный available_collateral)
+        // Делаем проверку на available_collateral > 0 перед делением
+        if available_collateral <= 0.0 {
+            error!("Available collateral ({}) is zero or negative, cannot calculate required leverage.", available_collateral);
+            return Err(anyhow!("Available collateral is zero or negative"));
+        }
+        let required_leverage = adjusted_spot_value / available_collateral;
+        debug!("Calculated required leverage based on adjusted value: {}", required_leverage);
+
+        if required_leverage.is_nan() || required_leverage.is_infinite() {
+            error!("Required leverage calculation resulted in NaN or Infinity.");
+             return Err(anyhow!("Invalid required leverage calculation"));
         }
 
-        // --- Шаги 3 и 4: Расчет и Проверка Требуемого Плеча ---
-        let required_leverage = spot_value / available_collateral; // Формула из Шага 3
-        debug!("Calculated required leverage: {}", required_leverage);
-
-        if required_leverage > self.config.max_allowed_leverage { // Сравнение с конфигом (Шаг 4)
+        // Сравнение с максимальным плечом из конфига
+        if required_leverage > self.config.max_allowed_leverage {
             error!(
                 "Required leverage {:.2}x exceeds max allowed leverage {:.2}x from config.",
                 required_leverage, self.config.max_allowed_leverage
@@ -146,20 +172,19 @@ where
             ));
         }
         info!("Required leverage {:.2}x is within max allowed {:.2}x", required_leverage, self.config.max_allowed_leverage);
-        // --- Конец Шагов 3 и 4 ---
 
         Ok(HedgeParams {
-            spot_order_qty,
-            fut_order_qty, // Равные количества
+            spot_order_qty, // Округленное
+            fut_order_qty,  // Такое же округленное
             current_spot_price,
             initial_limit_price,
             symbol: symbol.clone(),
-            spot_value, // Передаем дальше
-            available_collateral, // Передаем дальше
+            spot_value: adjusted_spot_value, // Передаем скорректированное значение
+            available_collateral, // Передаем исходный остаток
         })
     }
 
-
+    /// Запуск хеджирования с проверкой и установкой плеча
     pub async fn run_hedge(
         &self,
         params: HedgeParams,
@@ -171,13 +196,13 @@ where
     ) -> Result<(f64, f64)>
     {
         let HedgeParams {
-            spot_order_qty: initial_spot_qty,
-            fut_order_qty: initial_fut_qty, // Теперь равно initial_spot_qty
+            spot_order_qty: initial_spot_qty, // Уже округлено
+            fut_order_qty: initial_fut_qty,   // Уже округлено и равно spot_qty
             current_spot_price: mut current_spot_price,
             initial_limit_price: mut limit_price,
             symbol,
-            spot_value, // Получаем из params
-            available_collateral, // Получаем из params
+            spot_value, // Скорректированное значение спота
+            available_collateral, // Исходный остаток для залога
         } = params;
 
         info!(
@@ -185,20 +210,33 @@ where
             operation_id, symbol, initial_spot_qty, initial_fut_qty, spot_value, available_collateral
         );
 
-        // --- Шаги 3, 5 и 6: Проверка и Установка Плеча перед операциями ---
-        let required_leverage = spot_value / available_collateral; // Повторяем расчет для точности
+        // Шаги 3, 5 и 6: Проверка и Установка Плеча перед операциями
+        // Используем значения, переданные из calculate_hedge_params
+        if available_collateral <= 0.0 { // Доп. проверка
+            error!("op_id:{}: Available collateral is non-positive. Aborting.", operation_id);
+            let msg = "Available collateral is non-positive".to_string();
+            let _ = update_hedge_final_status(db, operation_id, "Failed", None, 0.0, Some(&msg)).await;
+            return Err(anyhow!(msg));
+        }
+        let required_leverage = spot_value / available_collateral;
         info!("Confirming required leverage: {:.2}x", required_leverage);
+
+        if required_leverage.is_nan() || required_leverage.is_infinite() {
+            error!("op_id:{}: Invalid required leverage calculation. Aborting.", operation_id);
+            let msg = "Invalid required leverage calculation".to_string();
+            let _ = update_hedge_final_status(db, operation_id, "Failed", None, 0.0, Some(&msg)).await;
+            return Err(anyhow!(msg));
+        }
+
 
         // Шаг 5: Получаем текущее плечо с биржи
         let current_leverage = match self.exchange.get_current_leverage(&symbol).await {
-             Ok(l) => {
-                 info!("Current leverage on exchange for {}: {:.2}x", symbol, l);
-                 l
-             }
+             Ok(l) => { info!("Current leverage on exchange for {}: {:.2}x", symbol, l); l }
              Err(e) => {
                  error!("op_id:{}: Failed to get current leverage: {}. Aborting hedge.", operation_id, e);
-                 let _ = update_hedge_final_status(db, operation_id, "Failed", None, 0.0, Some(&format!("Leverage check failed: {}", e))).await;
-                 return Err(e);
+                 let msg = format!("Leverage check failed: {}", e);
+                 let _ = update_hedge_final_status(db, operation_id, "Failed", None, 0.0, Some(&msg)).await;
+                 return Err(anyhow!(msg)); // Возвращаем ошибку
              }
         };
 
@@ -213,27 +251,31 @@ where
              return Err(anyhow!(msg));
         }
 
-        // Шаг 6: Устанавливаем плечо (пытаемся установить требуемое, если оно отличается от текущего)
+        // Шаг 6: Устанавливаем плечо (пытаемся установить требуемое)
         // Округляем до 2 знаков, как требует Bybit
         let target_leverage_set = (required_leverage * 100.0).round() / 100.0;
+        // Проверяем, нужно ли вообще устанавливать (избегаем лишних запросов)
         if (target_leverage_set - current_leverage).abs() > 0.01 {
              info!("op_id:{}: Attempting to set leverage to {:.2}x (required: {:.2}x)", operation_id, target_leverage_set, required_leverage);
              if let Err(e) = self.exchange.set_leverage(&symbol, target_leverage_set).await {
+                 // Если установка не удалась - это критично
                  error!("op_id:{}: Failed to set leverage to {:.2}x: {}. Aborting hedge.", operation_id, target_leverage_set, e);
                  let msg = format!("Failed to set leverage: {}", e);
                  let _ = update_hedge_final_status(db, operation_id, "Failed", None, 0.0, Some(&msg)).await;
-                 return Err(e);
+                 return Err(anyhow!(msg)); // Возвращаем ошибку
              }
              info!("op_id:{}: Leverage set/confirmed to ~{:.2}x successfully.", operation_id, target_leverage_set);
+             // Даем бирже немного времени на применение плеча перед размещением ордера
+             sleep(Duration::from_millis(500)).await;
         } else {
              info!("op_id:{}: Current exchange leverage {:.2}x is sufficient. No need to set.", operation_id, current_leverage);
         }
         // --- Конец Шагов 3, 5, 6 ---
 
 
-        // --- Дальнейшая логика (размещение ордеров, цикл) остается почти без изменений ---
+        // --- Дальнейшая логика (размещение ордеров, цикл) остается как в предыдущей версии ---
         let mut cumulative_filled_qty = 0.0;
-        let mut current_order_target_qty = initial_spot_qty;
+        let mut current_order_target_qty = initial_spot_qty; // Уже округлено
         let mut qty_filled_in_current_order = 0.0;
         let mut current_spot_order_id: Option<String> = None;
 
@@ -276,7 +318,6 @@ where
         let update_interval = Duration::from_secs(5);
 
         let hedge_loop_result: Result<()> = async {
-             // --- Цикл управления ордером (как в предыдущей версии исправленного кода) ---
              loop {
                 sleep(Duration::from_secs(1)).await;
                 let now = Instant::now();
@@ -462,7 +503,6 @@ where
                     last_update_sent = now;
                 }
             }
-             // --- Конец Цикла ---
         }.await;
 
         if let Err(loop_err) = hedge_loop_result {
@@ -471,16 +511,15 @@ where
             return Err(loop_err);
         }
 
-        // Размещение фьючерсного ордера (логика без изменений)
         let futures_symbol = format!("{}{}", symbol, self.quote_currency);
         info!(
-            "op_id:{}: Placing market sell order on futures ({}) for initial quantity {}",
-            operation_id, futures_symbol, initial_fut_qty // initial_fut_qty теперь равно initial_spot_qty
+            "op_id:{}: Placing market sell order on futures ({}) for final quantity {}",
+            operation_id, futures_symbol, initial_fut_qty // Используем финальное округленное initial_fut_qty
         );
         tokio::task::yield_now().await;
         let fut_order_result = self
             .exchange
-            .place_futures_market_order(&futures_symbol, OrderSide::Sell, initial_fut_qty)
+            .place_futures_market_order(&futures_symbol, OrderSide::Sell, initial_fut_qty) // Передаем initial_fut_qty
             .await;
 
         match fut_order_result {
@@ -488,6 +527,7 @@ where
                 info!("op_id:{}: Placed futures market order: id={}", operation_id, fut_order.id);
                 info!("op_id:{}: Hedge completed successfully. Total spot filled: {}", operation_id, cumulative_filled_qty);
                 let _ = update_hedge_final_status(db, operation_id, "Completed", Some(&fut_order.id), initial_fut_qty, None).await;
+                // Возвращаем округленные и равные initial_spot_qty и initial_fut_qty
                 Ok((cumulative_filled_qty, initial_fut_qty))
             }
             Err(e) => {
@@ -500,13 +540,14 @@ where
 
 
     // --- run_unhedge остается без изменений в этой итерации ---
-    pub async fn run_unhedge(
+    // (При необходимости в него можно добавить аналогичные проверки, но для unhedge
+    // обычно не требуется сложный расчет плеча, т.к. закрывается существующая позиция)
+     pub async fn run_unhedge(
         &self,
         req: UnhedgeRequest,
         // ... (параметры для БД и ID)
     ) -> Result<(f64, f64)> {
-        // ... (существующая логика run_unhedge) ...
-         let UnhedgeRequest { quantity: initial_spot_qty, symbol } = req;
+        let UnhedgeRequest { quantity: initial_spot_qty, symbol } = req;
         let initial_fut_qty = initial_spot_qty;
 
          info!(
@@ -685,6 +726,7 @@ where
              Ok(fut_order) => {
                  info!("Placed futures market order: id={}", fut_order.id);
                  info!("Unhedge completed successfully for {}. Total spot filled: {}", symbol, cumulative_filled_qty);
+                 // Возвращаем округленное значение спота и равное ему фьюча
                  Ok((cumulative_filled_qty, initial_fut_qty))
              }
              Err(e) => {
@@ -692,6 +734,5 @@ where
                  Err(anyhow!("Failed to place futures order after spot sell: {}", e))
              }
         }
-
     }
 }

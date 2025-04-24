@@ -78,11 +78,9 @@ pub trait Exchange {
     /// Получить статус ордера (сколько исполнено и сколько осталось)
     async fn get_order_status(&self, symbol: &str, order_id: &str) -> Result<OrderStatus>;
 
-    // --- ДОБАВЛЕНЫ НОВЫЕ МЕТОДЫ ---
-    /// Получить текущее кредитное плечо для символа
+    /// Получить текущее кредитное плечо для символа (фьючерсы linear)
     async fn get_current_leverage(&self, symbol: &str) -> Result<f64>;
 
-    /// Установить кредитное плечо для символа
+    /// Установить кредитное плечо для символа (фьючерсы linear)
     async fn set_leverage(&self, symbol: &str, leverage: f64) -> Result<()>;
-    // --- КОНЕЦ ДОБАВЛЕНИЯ ---
 }
