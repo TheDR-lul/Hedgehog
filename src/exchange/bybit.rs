@@ -120,7 +120,7 @@ struct LinearInstrumentsInfoResult {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct LinearInstrumentInfo { // Локальное определение
-    symbol: String,
+    pub symbol: String,
     #[serde(rename = "lotSizeFilter")]
     pub lot_size_filter: LotSizeFilter,
     #[serde(rename = "priceFilter")]

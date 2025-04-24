@@ -280,32 +280,37 @@ where
                         }
 
                         match result {
-                            Ok((spot_qty, fut_qty)) => {
-                                info!("Hedge execution successful for chat_id: {}. Spot: {}, Fut: {}", chat_id, spot_qty, fut_qty);
+                            Ok((spot_qty, fut_qty, final_spot_value)) => { // <-- Теперь принимаем 3 элемента
+                                info!(
+                                    "Hedge execution successful for chat_id: {}. Spot Qty: {}, Fut Qty: {}, Final Spot Value: {:.2}",
+                                    chat_id, spot_qty, fut_qty, final_spot_value // Логируем новое значение
+                                );
                                 let _ = bot.edit_message_text(
                                     chat_id,
                                     waiting_msg_id,
                                     format!(
-                                        "✅ Хеджирование ID:{} {} {} ({}) при V={:.1}% завершено:\n\n🟢 Спот куплено: {:.6}\n🔴 Фьюч продано: {:.6}",
-                                        operation_id, initial_sum, cfg_clone.quote_currency, symbol_for_messages, vol_raw_clone, spot_qty, fut_qty,
+                                        // Используем final_spot_value, который теперь получен
+                                        "✅ Хеджирование ID:{} ~{:.2} {} ({}) при V={:.1}% завершено:\n\n🟢 Спот куплено: {:.6}\n🔴 Фьюч продано: {:.6}",
+                                        operation_id, final_spot_value, cfg_clone.quote_currency, symbol_for_messages, vol_raw_clone, spot_qty, fut_qty,
                                     ),
                                 )
                                 .reply_markup(InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new()))
                                 .await;
                             }
+
                             Err(e) => {
                                 if is_cancelled {
-                                     info!("Hedge task for chat {}, symbol {} (op_id: {}) was cancelled.", chat_id, symbol_for_messages, operation_id);
-                                } else {
-                                    error!("Hedge execution failed for chat_id: {}, symbol: {}, op_id: {}: {}", chat_id, symbol_for_messages, operation_id, e);
-                                     let _ = bot.edit_message_text(
-                                        chat_id,
-                                        waiting_msg_id,
-                                        format!("❌ Ошибка выполнения хеджирования ID:{}: {}", operation_id, e)
-                                     )
-                                     .reply_markup(InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new()))
-                                     .await;
-                                }
+                                    info!("Hedge task for chat {}, symbol {} (op_id: {}) was cancelled.", chat_id, symbol_for_messages, operation_id);
+                               } else {
+                                   error!("Hedge execution failed for chat_id: {}, symbol: {}, op_id: {}: {}", chat_id, symbol_for_messages, operation_id, e);
+                                    let _ = bot.edit_message_text(
+                                       chat_id,
+                                       waiting_msg_id,
+                                       format!("❌ Ошибка выполнения хеджирования ID:{}: {}", operation_id, e)
+                                    )
+                                    .reply_markup(InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new()))
+                                    .await;
+                               }
                             }
                         }
                     });
