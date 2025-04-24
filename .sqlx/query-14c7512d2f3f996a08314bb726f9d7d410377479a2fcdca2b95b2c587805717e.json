@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO hedge_operations (\n            chat_id, base_symbol, quote_currency, initial_sum, volatility,\n            target_spot_qty, target_futures_qty, start_timestamp, status\n        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "14c7512d2f3f996a08314bb726f9d7d410377479a2fcdca2b95b2c587805717e"
+}

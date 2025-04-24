@@ -29,4 +29,3 @@ sentry.properties
 # Temporary files
 *.tmp
 *.temp
-.sqlx
