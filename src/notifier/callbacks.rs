@@ -3,7 +3,7 @@
 use crate::config::Config;
 use crate::exchange::{Exchange, types::OrderSide}; // Объединяем импорты
 use crate::storage::{
-    Db, get_completed_unhedged_ops_for_symbol, get_hedge_operation_by_id,
+    Db, get_completed_unhedged_ops_for_symbol,
     update_hedge_final_status, HedgeOperation, // Добавляем HedgeOperation для типа возвращаемого значения
 };
 use crate::hedger::Hedger;
@@ -12,8 +12,8 @@ use crate::hedger::ORDER_FILL_TOLERANCE;
 use teloxide::prelude::*;
 use teloxide::types::{CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
 use tracing::{info, warn, error};
-use chrono::{DateTime, Utc, TimeZone, LocalResult};
-use std::sync::Arc; // Для RwLock
+use chrono::{Utc, TimeZone, LocalResult};
+ // Для RwLock
 
 // --- КОНСТАНТЫ ДЛЯ CALLBACK DATA ---
 const ACTION_STATUS: &str = "status";

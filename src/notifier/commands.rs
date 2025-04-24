@@ -2,16 +2,14 @@
 
 use crate::config::Config;
 use crate::exchange::Exchange;
-// --- ИЗМЕНЕНО: Добавляем нужные импорты ---
 use crate::hedger::Hedger;
-use crate::storage::{Db, get_completed_unhedged_ops_for_symbol, HedgeOperation}; // Импортируем HedgeOperation
-// --- КОНЕЦ ИЗМЕНЕНИЙ ---
+use crate::storage::{Db, get_completed_unhedged_ops_for_symbol}; // Импортируем HedgeOperation
 use super::{Command, StateStorage, UserState};
 use teloxide::prelude::*;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
 use teloxide::utils::command::BotCommands;
 use tracing::{warn, error, info};
-use chrono::{DateTime, Utc, TimeZone, LocalResult}; // Импортируем LocalResult
+use chrono::{Utc, TimeZone, LocalResult}; 
 
 // Вспомогательная функция для "чистки" чата
 async fn cleanup_chat(bot: &Bot, chat_id: ChatId, user_msg_id: MessageId, bot_msg_id: Option<i32>) {

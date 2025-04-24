@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::{Error as SqlxError, Row}; // Переименовываем Error и добавляем Row
 use std::str::FromStr;
-use tracing::{error, info, warn};
+use tracing::info;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // Переопределяем Db как SqlitePool для простоты

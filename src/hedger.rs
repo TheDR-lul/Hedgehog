@@ -11,9 +11,9 @@ use crate::config::Config;
 use rust_decimal::prelude::*;
 use std::str::FromStr;
 use crate::exchange::{Exchange, OrderStatus};
-use crate::exchange::bybit::{SPOT_CATEGORY, LINEAR_CATEGORY};
+use crate::exchange::bybit::SPOT_CATEGORY;
 use crate::exchange::types::OrderSide;
-use crate::models::{HedgeRequest, UnhedgeRequest};
+use crate::models::HedgeRequest;
 use crate::storage::{Db, update_hedge_spot_order, update_hedge_final_status,mark_hedge_as_unhedged,HedgeOperation};
 
 pub const ORDER_FILL_TOLERANCE: f64 = 1e-8; // Допуск для сравнения float
@@ -193,7 +193,7 @@ where
         let HedgeParams {
             spot_order_qty: initial_spot_qty, // Целевое БРУТТО для спота
             fut_order_qty: initial_fut_qty,   // Целевое НЕТТО для фьюча
-            current_spot_price: mut current_spot_price, // Используется для limit_price и обновлений
+            mut current_spot_price, // Используется для limit_price и обновлений
             initial_limit_price: mut limit_price,
             symbol,
             spot_value, // Стоимость целевого БРУТТО спота (для расчета плеча)

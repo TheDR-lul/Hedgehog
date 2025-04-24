@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
-use anyhow::{Result, anyhow};
+use anyhow::anyhow;
 
 /// Сторона ордера
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
