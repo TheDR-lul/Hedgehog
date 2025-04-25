@@ -793,11 +793,94 @@ impl Exchange for Bybit {
 
         let qty_decimals = qty_step_str.split('.').nth(1).map_or(0, |s| s.trim_end_matches('0').len()) as u32;
         let formatted_qty = match Decimal::from_f64(qty) {
+            Some(qty_d) if qty_d > dec!(0.0) => {
+                let rounded_down = qty_d.trunc_with_scale(qty_decimals); // Усекаем до нужной точности
+                let min_qty = Decimal::from_str(min_order_qty_str).unwrap_or(dec!(0.0));
+                if rounded_down < min_qty && qty_d >= min_qty {
+                    warn!("Futures market order quantity {} rounded down below min_order_qty {}. Using min_order_qty.", qty, min_order_qty_str);
+                    min_qty.normalize().to_string()
+                } else if rounded_down <= dec!(0.0) {
+                    error!("Requested futures quantity {} is less than the minimum precision {} (qtyStep) for {}", qty, qty_step_str, symbol);
+                    return Err(anyhow!("Quantity {} is less than minimum precision {} (qtyStep)", qty, qty_step_str));
+                } else {
+                    rounded_down.normalize().to_string()
+                }
+            }
+            _ => return Err(anyhow!("Invalid qty value {}", qty)),
+        };
+        if formatted_qty == "0" { return Err(anyhow!("Formatted quantity is zero")); }
+
+        // --- ЛОГИРОВАНИЕ ПАРАМЕТРОВ ---
+        info!(
+            target: "bybit_futures_order",
+            symbol=%symbol,
+            side=%side,
+            original_qty=qty,
+            formatted_qty=%formatted_qty,
+            category=LINEAR_CATEGORY,
+            "Preparing FUTURES market order parameters"
+        );
+        // --- КОНЕЦ ЛОГИРОВАНИЯ ---
+
+        let body = json!({
+            "category": LINEAR_CATEGORY,
+            "symbol": symbol,
+            "side": side.to_string(),
+            "orderType": "Market",
+            "qty": formatted_qty
+        });
+
+        // --- ЛОГИРОВАНИЕ ТЕЛА ЗАПРОСА ---
+        let body_string = serde_json::to_string(&body).unwrap_or_else(|_| "Failed to serialize body".to_string());
+        info!(
+            target: "bybit_futures_order",
+            request_body=%body_string,
+            "Sending FUTURES market order request"
+        );
+        // --- КОНЕЦ ЛОГИРОВАНИЯ ---
+
+        let result: OrderCreateResult = self.call_api(
+            Method::POST,
+            "v5/order/create",
+            None,
+            Some(body),
+            true
+        ).await?; // Ошибка 10001 придет отсюда
+
+        info!(
+            target: "bybit_futures_order",
+            order_id = %result.id, // Передаем как именованный аргумент для structured logging
+            "FUTURES market order placed successfully: order_id={}", result.id // Используем {} в строке
+        );
+
+        Ok(Order { id: result.id, side, qty, price: None, ts: self.get_timestamp_ms().await? })
+    }
+
+    // --- НОВАЯ ФУНКЦИЯ: Размещение ЛИМИТНОГО ордера (для ФЬЮЧЕРСОВ) ---
+    async fn place_futures_limit_order(
+        &self,
+        symbol: &str, // Полный символ: BTCUSDT
+        side: OrderSide,
+        qty: f64,
+        price: f64, // Добавлен параметр цены
+    ) -> Result<Order> {
+        let base_symbol = symbol.trim_end_matches(&self.quote_currency);
+        if base_symbol.is_empty() || base_symbol == symbol { return Err(anyhow!("Invalid futures symbol format: {}", symbol)); }
+
+        let instrument_info = self.get_linear_instrument_info(base_symbol).await?;
+        let qty_step_str = instrument_info.lot_size_filter.qty_step.as_deref()
+            .ok_or_else(|| anyhow!("Missing qtyStep for linear symbol {}", symbol))?;
+        let min_order_qty_str = &instrument_info.lot_size_filter.min_order_qty;
+        let tick_size_str = &instrument_info.price_filter.tick_size; // Нужен tick_size для форматирования цены
+
+        // Форматируем количество
+        let qty_decimals = qty_step_str.split('.').nth(1).map_or(0, |s| s.trim_end_matches('0').len()) as u32;
+        let formatted_qty = match Decimal::from_f64(qty) {
              Some(qty_d) if qty_d > dec!(0.0) => {
-                 let rounded_down = qty_d.trunc_with_scale(qty_decimals); // Усекаем до нужной точности
+                 let rounded_down = qty_d.trunc_with_scale(qty_decimals);
                  let min_qty = Decimal::from_str(min_order_qty_str).unwrap_or(dec!(0.0));
                  if rounded_down < min_qty && qty_d >= min_qty {
-                     warn!("Futures market order quantity {} rounded down below min_order_qty {}. Using min_order_qty.", qty, min_order_qty_str);
+                     warn!("Futures limit order quantity {} rounded down below min_order_qty {}. Using min_order_qty.", qty, min_order_qty_str);
                      min_qty.normalize().to_string()
                  } else if rounded_down <= dec!(0.0) {
                      error!("Requested futures quantity {} is less than the minimum precision {} (qtyStep) for {}", qty, qty_step_str, symbol);
@@ -810,11 +893,62 @@ impl Exchange for Bybit {
         };
         if formatted_qty == "0" { return Err(anyhow!("Formatted quantity is zero")); }
 
-        info!(%symbol, %side, %formatted_qty, category=LINEAR_CATEGORY, "Placing FUTURES market order");
-        let body = json!({ "category": LINEAR_CATEGORY, "symbol": symbol, "side": side.to_string(), "orderType": "Market", "qty": formatted_qty });
-        let result: OrderCreateResult = self.call_api(Method::POST, "v5/order/create", None, Some(body), true).await?;
-        info!(order_id=%result.id, "FUTURES market order placed successfully");
-        Ok(Order { id: result.id, side, qty, price: None, ts: self.get_timestamp_ms().await? })
+        // Форматируем цену
+        let price_decimals = tick_size_str.split('.').nth(1).map_or(0, |s| s.trim_end_matches('0').len()) as u32;
+        let formatted_price = match Decimal::from_f64(price) {
+            Some(d) => d.round_dp(price_decimals).to_string(), // Округляем до нужной точности
+            None => return Err(anyhow!("Invalid price value {}", price)),
+        };
+
+        // --- ЛОГИРОВАНИЕ ---
+        info!(
+            target: "bybit_futures_order",
+            symbol=%symbol,
+            side=%side,
+            order_type="Limit", // Изменено
+            original_qty=qty,
+            formatted_qty=%formatted_qty,
+            original_price=price,
+            formatted_price=%formatted_price,
+            category=LINEAR_CATEGORY,
+            "Preparing FUTURES limit order parameters"
+        );
+        // --- КОНЕЦ ЛОГИРОВАНИЯ ---
+
+        let body = json!({
+            "category": LINEAR_CATEGORY,
+            "symbol": symbol,
+            "side": side.to_string(),
+            "orderType": "Limit", // Изменено
+            "qty": formatted_qty,
+            "price": formatted_price, // Добавлено
+            "timeInForce": "GTC" // Для лимитных ордеров обычно нужен TimeInForce
+        });
+
+        // --- ЛОГИРОВАНИЕ ---
+        let body_string = serde_json::to_string(&body).unwrap_or_else(|_| "Failed to serialize body".to_string());
+        info!(
+            target: "bybit_futures_order",
+            request_body=%body_string,
+            "Sending FUTURES limit order request"
+        );
+        // --- КОНЕЦ ЛОГИРОВАНИЯ ---
+
+        let result: OrderCreateResult = self.call_api(
+            Method::POST,
+            "v5/order/create",
+            None,
+            Some(body),
+            true
+        ).await?;
+
+        info!(
+            target: "bybit_futures_order",
+            order_id = %result.id,
+            "FUTURES limit order placed successfully: order_id={}", result.id
+        );
+        // Возвращаем цену, по которой размещен лимитный ордер
+        Ok(Order { id: result.id, side, qty, price: Some(price), ts: self.get_timestamp_ms().await? })
     }
 
     /// Размещение рыночного ордера (для СПОТА)

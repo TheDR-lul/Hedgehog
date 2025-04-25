@@ -69,6 +69,14 @@ pub trait Exchange {
         qty: f64,
     ) -> Result<Order>;
 
+    async fn place_futures_limit_order(
+        &self,
+        symbol: &str, // Full symbol (e.g., BTCUSDT)
+        side: OrderSide,
+        qty: f64,
+        price: f64, // Добавле
+    ) -> Result<Order>;
+
     /// Отменить ордер
     async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<()>;
 

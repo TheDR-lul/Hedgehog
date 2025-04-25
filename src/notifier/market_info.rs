@@ -1,15 +1,13 @@
 // src/notifier/market_info.rs
 
-use super::{Command, StateStorage, UserState, callback_data, navigation}; // Command здесь нужен для BotCommands
+use super::{StateStorage, UserState, callback_data}; // Command здесь нужен для BotCommands
 use crate::config::Config;
 use crate::exchange::Exchange;
 use crate::storage::Db;
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{
-    InlineKeyboardButton, InlineKeyboardMarkup, Message, MessageId, CallbackQuery, ChatId,
-};
-use teloxide::utils::command::BotCommands; // Нужен для Command::descriptions()
+    InlineKeyboardButton, InlineKeyboardMarkup, Message, MessageId, CallbackQuery,};
 use tracing::{info, warn, error};
 
 

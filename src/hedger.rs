@@ -595,44 +595,54 @@ where
         }.await; // --- Конец async блока для hedge_loop_result ---
 
 
-        // --- Обработка результата цикла и размещение фьючерсного ордера (без изменений) ---
-        if let Err(loop_err) = hedge_loop_result {
-            error!("op_id:{}: Hedge loop failed: {}", operation_id, loop_err);
-            let current_filled = *total_filled_qty_storage.lock().await;
-            let _ = update_hedge_final_status(db, operation_id, "Failed", None, current_filled, Some(&loop_err.to_string())).await;
-            return Err(loop_err);
+    // --- Обработка результата цикла и размещение фьючерсного ордера ---
+    if let Err(loop_err) = hedge_loop_result {
+        error!("op_id:{}: Hedge loop failed: {}", operation_id, loop_err);
+        let current_filled = *total_filled_qty_storage.lock().await;
+        let _ = update_hedge_final_status(db, operation_id, "Failed", None, current_filled, Some(&loop_err.to_string())).await;
+        return Err(loop_err);
+    }
+
+    let final_spot_qty_gross = *total_filled_qty_storage.lock().await;
+    info!("op_id:{}: Hedge spot buy loop finished. Final actual spot gross quantity: {}", operation_id, final_spot_qty_gross);
+    if (final_spot_qty_gross - initial_spot_qty).abs() > ORDER_FILL_TOLERANCE {
+        warn!("op_id:{}: Final GROSS filled {} differs from target {}. Using actual filled.", operation_id, final_spot_qty_gross, initial_spot_qty);
+    }
+
+    let final_spot_value_gross = final_spot_qty_gross * current_spot_price; // Используем последнюю известную current_spot_price
+
+    let futures_symbol = format!("{}{}", symbol, self.quote_currency);
+
+    // --- ИЗМЕНЕНИЕ: Рассчитываем цену и вызываем place_futures_limit_order ---
+    // Рассчитываем цену для лимитного ордера Sell - чуть НИЖЕ текущей спотовой цены
+    let futures_limit_price = current_spot_price * (1.0 - self.slippage);
+    info!(
+        "op_id:{}: Placing limit sell order on futures ({}) at price {:.2} for target NET quantity {}",
+        operation_id, futures_symbol, futures_limit_price, initial_fut_qty
+    );
+    tokio::task::yield_now().await;
+    let fut_order_result = self.exchange.place_futures_limit_order( // Вызываем новую функцию
+        &futures_symbol,
+        OrderSide::Sell,
+        initial_fut_qty,
+        futures_limit_price // Передаем рассчитанную цену
+    ).await;
+    // --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
+    match fut_order_result {
+        Ok(fut_order) => {
+            info!("op_id:{}: Placed futures limit order: id={}", operation_id, fut_order.id); // Обновлен лог
+            info!("op_id:{}: Hedge completed successfully. Total spot (gross) filled: {}", operation_id, final_spot_qty_gross);
+            let _ = update_hedge_final_status(db, operation_id, "Completed", Some(&fut_order.id), initial_fut_qty, None).await;
+            Ok((final_spot_qty_gross, initial_fut_qty, final_spot_value_gross))
         }
-
-         let final_spot_qty_gross = *total_filled_qty_storage.lock().await;
-         info!("op_id:{}: Hedge spot buy loop finished. Final actual spot gross quantity: {}", operation_id, final_spot_qty_gross);
-         if (final_spot_qty_gross - initial_spot_qty).abs() > ORDER_FILL_TOLERANCE {
-             warn!("op_id:{}: Final GROSS filled {} differs from target {}. Using actual filled.", operation_id, final_spot_qty_gross, initial_spot_qty);
-         }
-
-        let final_spot_value_gross = final_spot_qty_gross * current_spot_price;
-
-        let futures_symbol = format!("{}{}", symbol, self.quote_currency);
-        info!(
-            "op_id:{}: Placing market sell order on futures ({}) for target NET quantity {}",
-            operation_id, futures_symbol, initial_fut_qty
-        );
-        tokio::task::yield_now().await;
-        let fut_order_result = self.exchange.place_futures_market_order(&futures_symbol, OrderSide::Sell, initial_fut_qty).await;
-
-        match fut_order_result {
-            Ok(fut_order) => {
-                info!("op_id:{}: Placed futures market order: id={}", operation_id, fut_order.id);
-                info!("op_id:{}: Hedge completed successfully. Total spot (gross) filled: {}", operation_id, final_spot_qty_gross);
-                let _ = update_hedge_final_status(db, operation_id, "Completed", Some(&fut_order.id), initial_fut_qty, None).await;
-                Ok((final_spot_qty_gross, initial_fut_qty, final_spot_value_gross))
-            }
-            Err(e) => {
-                warn!("op_id:{}: Failed to place futures order: {}. Spot was already bought!", operation_id, e);
-                let _ = update_hedge_final_status(db, operation_id, "Failed", None, final_spot_qty_gross, Some(&format!("Futures order failed: {}", e))).await;
-                Err(anyhow!("Failed to place futures order after spot fill: {}", e))
-            }
+        Err(e) => {
+            warn!("op_id:{}: Failed to place futures limit order: {}. Spot was already bought!", operation_id, e); // Обновлен лог
+            let _ = update_hedge_final_status(db, operation_id, "Failed", None, final_spot_qty_gross, Some(&format!("Futures order failed: {}", e))).await;
+            Err(anyhow!("Failed to place futures limit order after spot fill: {}", e)) // Обновлен текст ошибки
         }
     }
+    } // Конец run_hedge
 
     /// Запуск расхеджирования (с проверкой баланса и ИГНОРИРОВАНИЕМ ПЫЛИ)
     pub async fn run_unhedge(
