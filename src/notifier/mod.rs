@@ -8,8 +8,8 @@ pub mod hedge_flow;
 pub mod unhedge_flow;
 pub mod active_ops;
 // Заглушки
-//pub mod progress;     // TODO: Реализовать
-//pub mod utils;        // TODO: Реализовать
+//pub mod progress;      // TODO: Реализовать
+//pub mod utils;         // TODO: Реализовать
 
 // --- Импорт Зависимостей и Типов ---
 use std::sync::{Arc, RwLock};
@@ -18,12 +18,12 @@ use std::collections::HashMap;
 use teloxide::utils::command::BotCommands;
 use tokio::task::AbortHandle;
 use tokio::sync::Mutex as TokioMutex;
-use crate::storage::{Db, HedgeOperation};
+use crate::storage::{Db, HedgeOperation}; // HedgeOperation используется в UserState
 use crate::config::Config;
 use crate::exchange::Exchange;
 use teloxide::Bot;
-use teloxide::prelude::Requester; // Нужен для методов типа .answer() или .edit_*
-use teloxide::payloads::AnswerCallbackQuerySetters; // <<<===== ДОБАВЛЕН ИМПОРТ
+use teloxide::prelude::Requester;
+use teloxide::payloads::AnswerCallbackQuerySetters;
 use tracing::{info, warn};
 
 // --- Общие Типы Данных Модуля Notifier ---
@@ -40,16 +40,15 @@ pub enum UserState {
         volatility: f64,
         last_bot_message_id: Option<i32>,
     },
-
     // Состояния для расхеджирования
-    AwaitingUnhedgeAssetSelection { last_bot_message_id: Option<i32> }, // TODO: Использовать при реализации выбора актива
+    AwaitingUnhedgeAssetSelection { last_bot_message_id: Option<i32> },
     AwaitingUnhedgeOperationSelection {
         symbol: String,
-        operations: Vec<HedgeOperation>,
+        operations: Vec<HedgeOperation>, // Вектор операций хранится в состоянии
         last_bot_message_id: Option<i32>
     },
     AwaitingUnhedgeConfirmation {
-        operation_id: i64,
+        operation_id: i64, // Храним только ID операции для подтверждения
         last_bot_message_id: Option<i32>,
     },
 
@@ -59,7 +58,7 @@ pub enum UserState {
         filter: Option<String>,
         pairs: Vec<String>,
         last_bot_message_id: Option<i32>
-    }, // TODO: Использовать при реализации
+    },
 
     // Состояния для других диалогов
     AwaitingFundingSymbolInput { last_bot_message_id: Option<i32> },
@@ -110,12 +109,36 @@ pub enum Command {
 
 // --- Главные Диспетчеры ---
 
-pub async fn dispatch_command<E>( /* ... параметры ... */ ) -> anyhow::Result<()>
+pub async fn dispatch_command<E>(
+    bot: Bot,
+    msg: Message,
+    cmd: Command,
+    exchange: Arc<E>,
+    state_storage: StateStorage,
+    running_operations: RunningOperations,
+    cfg: Arc<Config>,
+    db: Arc<Db>,
+) -> anyhow::Result<()>
 where E: Exchange + Clone + Send + Sync + 'static,
 {
-    // ... (код без изменений) ...
+    match cmd {
+        Command::Start => navigation::handle_start(bot, msg, exchange, state_storage, cfg, db).await?,
+        Command::Hedge(symbol) => hedge_flow::handle_hedge_command(bot, msg, symbol, exchange, state_storage, running_operations, cfg, db).await?,
+        Command::Unhedge(symbol) => unhedge_flow::handle_unhedge_command(bot, msg, symbol, exchange, state_storage, running_operations, cfg, db).await?,
+        // <<< ИСПРАВЛЕНО: Добавлен state_storage >>>
+        Command::Wallet => wallet_info::handle_wallet_command(bot, msg, exchange, state_storage, cfg, db).await?,
+        // <<< ИСПРАВЛЕНО: Добавлен state_storage >>>
+        Command::Balance(symbol) => wallet_info::handle_balance_command(bot, msg, symbol, exchange, state_storage, cfg, db).await?,
+        // <<< ИСПРАВЛЕНО: Добавлен state_storage >>>
+        Command::Status => market_info::handle_status_command(bot, msg, exchange, state_storage, cfg, db).await?,
+        // <<< ИСПРАВЛЕНО: Добавлены exchange, cfg, db в правильном порядке >>>
+        Command::Funding(params) => market_info::handle_funding_command(bot, msg, params, exchange, state_storage, cfg, db).await?,
+        // <<< ИСПРАВЛЕНО: Добавлены exchange, cfg, db и изменен порядок state_storage/running_operations >>>
+        Command::Active => active_ops::handle_active_command(bot, msg, exchange, state_storage, running_operations, cfg, db).await?,
+    }
     Ok(())
 }
+
 
 pub async fn dispatch_callback<E>(
     bot: Bot,
@@ -129,15 +152,25 @@ pub async fn dispatch_callback<E>(
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
-    if let Some(data) = q.data.as_ref() {
+    let query_id = q.id.clone(); // Клонируем ID для ответа
+
+    if let Some(data) = q.data.as_deref() { // Заимствуем данные колбэка
         info!("Dispatching callback: {}", data);
-        let (prefix, _payload) = data.split_once('_').unwrap_or((data.as_str(), ""));
 
         // Маршрутизация ...
         if data == callback_data::BACK_TO_MAIN {
             navigation::handle_back_to_main(bot, q, state_storage).await?;
         } else if data == callback_data::CANCEL_DIALOG {
-            navigation::handle_cancel_dialog(bot, q, state_storage).await?;
+            // <<< ИСПРАВЛЕНО: Вызов handle_cancel_dialog с новыми параметрами >>>
+            if let Some(msg) = q.message.as_ref() {
+                let chat_id = msg.chat().id;
+                let message_id = msg.id();
+                bot.answer_callback_query(query_id).await?; // Отвечаем ДО вызова
+                navigation::handle_cancel_dialog(bot, chat_id, message_id, state_storage).await?;
+            } else {
+                warn!("CallbackQuery missing message for CANCEL_DIALOG");
+                bot.answer_callback_query(query_id).text("Не удалось отменить: сообщение недоступно.").show_alert(true).await?;
+            }
         } else if data == callback_data::MENU_WALLET {
             wallet_info::handle_menu_wallet_callback(bot, q, exchange, cfg, db).await?;
         } else if data == callback_data::START_HEDGE {
@@ -149,37 +182,41 @@ where
         } else if data == callback_data::MENU_ACTIVE_OPS {
             active_ops::handle_menu_active_ops_callback(bot, q, running_operations, state_storage).await?;
         } else if data.starts_with(callback_data::PREFIX_CANCEL_ACTIVE_OP) {
-             active_ops::handle_cancel_active_op_callback(bot, q, exchange, state_storage, running_operations, cfg, db).await?;
+              active_ops::handle_cancel_active_op_callback(bot, q, exchange, state_storage, running_operations, cfg, db).await?;
         } else if data.starts_with(callback_data::PREFIX_HEDGE_ASSET) {
-             hedge_flow::handle_hedge_asset_callback(bot, q, exchange, state_storage, cfg, db).await?;
+              hedge_flow::handle_hedge_asset_callback(bot, q, exchange, state_storage, cfg, db).await?;
         } else if data.starts_with(callback_data::PREFIX_HEDGE_PAIR) {
-             warn!("Handler for PREFIX_HEDGE_PAIR not implemented yet.");
-             bot.answer_callback_query(q.id).text("Функция в разработке.").await?; // ИСПРАВЛЕНО
+              // <<< ИСПРАВЛЕНО: Заглушка >>>
+              warn!("Handler for PREFIX_HEDGE_PAIR not implemented yet.");
+              bot.answer_callback_query(query_id).text("Функция пока не реализована.").show_alert(false).await?;
         } else if data.starts_with(callback_data::PREFIX_HEDGE_CONFIRM) {
-             hedge_flow::handle_hedge_confirm_callback(bot, q, exchange, state_storage, running_operations, cfg, db).await?;
+              hedge_flow::handle_hedge_confirm_callback(bot, q, exchange, state_storage, running_operations, cfg, db).await?;
         } else if data == callback_data::VIEW_ALL_PAIRS {
-             warn!("Handler for VIEW_ALL_PAIRS not implemented yet.");
-             bot.answer_callback_query(q.id).text("Функция в разработке.").await?; // ИСПРАВЛЕНО
+              // <<< ИСПРАВЛЕНО: Заглушка >>>
+              warn!("Handler for VIEW_ALL_PAIRS not implemented yet.");
+              bot.answer_callback_query(query_id).text("Функция пока не реализована.").show_alert(false).await?;
         } else if data.starts_with(callback_data::PREFIX_UNHEDGE_ASSET) {
-             unhedge_flow::handle_unhedge_asset_callback(bot, q, exchange, state_storage, cfg, db).await?;
+              unhedge_flow::handle_unhedge_asset_callback(bot, q, exchange, state_storage, cfg, db).await?;
         } else if data.starts_with(callback_data::PREFIX_UNHEDGE_OP_SELECT) {
-             unhedge_flow::handle_unhedge_select_op_callback(bot, q, exchange, state_storage, running_operations, cfg, db).await?;
+              unhedge_flow::handle_unhedge_select_op_callback(bot, q, exchange, state_storage, running_operations, cfg, db).await?;
         } else if data.starts_with(callback_data::PREFIX_UNHEDGE_CONFIRM) {
-             unhedge_flow::handle_unhedge_confirm_callback(bot, q, exchange, state_storage, running_operations, cfg, db).await?;
+              unhedge_flow::handle_unhedge_confirm_callback(bot, q, exchange, state_storage, running_operations, cfg, db).await?;
         } else if data == callback_data::SHOW_STATUS {
-             market_info::handle_show_status_callback(bot, q, exchange, cfg, db).await?;
+              market_info::handle_show_status_callback(bot, q, exchange, cfg, db).await?;
         } else if data == callback_data::SHOW_FUNDING {
-             market_info::handle_show_funding_callback(bot, q, state_storage).await?;
+              market_info::handle_show_funding_callback(bot, q, state_storage).await?;
         } else if data.starts_with(callback_data::PREFIX_PAGE_NEXT) || data.starts_with(callback_data::PREFIX_PAGE_PREV) {
-             warn!("Pagination callback '{}' not implemented yet.", data);
-             bot.answer_callback_query(q.id).text("Навигация по страницам пока не работает").await?; // ИСПРАВЛЕНО
+             // <<< ИСПРАВЛЕНО: Заглушка >>>
+              warn!("Pagination callback '{}' not implemented yet.", data);
+              bot.answer_callback_query(query_id).text("Навигация по страницам пока не работает").show_alert(false).await?;
         } else {
-             warn!("Unhandled callback data: {}", data);
-             bot.answer_callback_query(q.id).text("Неизвестное действие.").await?; // ИСПРАВЛЕНО
+             // <<< ИСПРАВЛЕНО: Заглушка для неизвестных колбэков >>>
+              warn!("Unhandled callback data: {}", data);
+              bot.answer_callback_query(query_id).text("Неизвестное действие.").show_alert(false).await?;
         }
     } else {
         warn!("CallbackQuery received without data");
-        bot.answer_callback_query(q.id).await?; // Просто отвечаем
+        bot.answer_callback_query(query_id).await?; // Просто отвечаем
     }
 
     Ok(())
@@ -198,8 +235,10 @@ pub async fn dispatch_message<E>(
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
+    // Получаем копию состояния или None
     let state = { state_storage.read().expect("Lock failed").get(&msg.chat.id).cloned().unwrap_or(UserState::None) };
-    info!("Dispatching message in state: {:?}", state);
+    // Используем msg.chat.id для лога
+    info!("Dispatching message for chat {} in state: {:?}", msg.chat.id, state);
 
     // Маршрутизируем сообщение в зависимости от состояния
     match state {
@@ -215,18 +254,14 @@ where
         UserState::AwaitingFundingSymbolInput { .. } =>
             market_info::handle_funding_symbol_input(bot, msg, exchange, state_storage, cfg, db).await?,
 
-        // TODO: Добавить обработку для состояний расхеджирования, если они потребуют ввода текста
-        UserState::AwaitingUnhedgeAssetSelection { .. } => { // Пример заглушки
-            warn!("Handler for AwaitingUnhedgeAssetSelection state (text input) not implemented yet.");
-            if let Err(e) = bot.delete_message(msg.chat.id, msg.id).await { tracing::warn!("Failed to delete unhandled message: {}", e); }
-        },
-        UserState::AwaitingUnhedgeOperationSelection { .. } => { // Пример заглушки
-            warn!("Handler for AwaitingUnhedgeOperationSelection state (text input) not implemented yet.");
-             if let Err(e) = bot.delete_message(msg.chat.id, msg.id).await { tracing::warn!("Failed to delete unhandled message: {}", e); }
-        },
-        UserState::AwaitingUnhedgeConfirmation { .. } => { // Пример заглушки
-             warn!("Handler for AwaitingUnhedgeConfirmation state (text input) not implemented yet.");
-             if let Err(e) = bot.delete_message(msg.chat.id, msg.id).await { tracing::warn!("Failed to delete unhandled message: {}", e); }
+        // Заглушки для нереализованных текстовых вводов (например, для unhedge, если понадобится)
+        UserState::AwaitingUnhedgeAssetSelection { .. } |
+        UserState::AwaitingUnhedgeOperationSelection { .. } |
+        UserState::AwaitingUnhedgeConfirmation { .. } => {
+            warn!("Handler for state {:?} (text input) not implemented yet. Deleting message.", state);
+            if let Err(e) = bot.delete_message(msg.chat.id, msg.id).await {
+                 tracing::warn!("Failed to delete unhandled message: {}", e);
+            }
         },
 
 
@@ -237,10 +272,10 @@ where
                 // Команды уже должны быть обработаны dispatch_command
             } else if msg.text().is_some() {
                  // Удаляем обычное текстовое сообщение, если оно не ожидается
-                 warn!("Received unexpected text message in state {:?}. Deleting.", state);
-                 if let Err(e) = bot.delete_message(msg.chat.id, msg.id).await {
-                     tracing::warn!("Failed to delete unexpected message: {}", e);
-                 }
+                warn!("Received unexpected text message in state {:?}. Deleting.", state);
+                if let Err(e) = bot.delete_message(msg.chat.id, msg.id).await {
+                    tracing::warn!("Failed to delete unexpected message: {}", e);
+                }
             }
             // Игнорируем другие типы сообщений (фото и т.д.)
         }

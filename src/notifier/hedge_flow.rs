@@ -762,94 +762,110 @@ pub async fn handle_hedge_confirm_callback<E>(
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
-    // <<<--- ИСПРАВЛЕНО: Клонируем ID, если он String ---
-    let query_id = q.id.clone(); // Если q.id - String, клонируем. Если Copy, clone() не повредит.
-    // ---
+    let query_id = q.id.clone(); // Клонируем ID
 
-    // Сначала проверяем данные, не перемещая q
-    if let Some(data) = q.data.as_deref() { // Заимствуем данные
-        if let Some(payload) = data.strip_prefix(callback_data::PREFIX_HEDGE_CONFIRM) {
-            if payload == "yes" {
-                // --- Ветка "Да" ---
-                if let Some(msg) = q.message { // << Перемещение q.message происходит здесь
-                    let chat_id = msg.chat().id;
-                    info!("User {} confirmed hedge operation", chat_id);
+    // Используем q.message.as_ref() чтобы получить ссылку без перемещения
+    if let Some(msg_ref) = q.message.as_ref() {
+        let chat_id = msg_ref.chat().id;
+        let message_id = msg_ref.id(); // ID сообщения для редактирования при отмене
 
-                    let (symbol, sum, volatility_fraction) = {
-                        let state_guard = state_storage.read().expect("Lock failed");
-                        match state_guard.get(&chat_id) {
-                            Some(UserState::AwaitingHedgeConfirmation { symbol, sum, volatility, .. }) => (symbol.clone(), *sum, *volatility),
-                            _ => {
-                                warn!("User {} confirmed hedge but was in wrong state", chat_id);
-                                bot.answer_callback_query(query_id.clone()).text("Состояние изменилось, начните заново.").show_alert(true).await?; // Используем клон query_id
-                                let _ = navigation::show_main_menu(&bot, chat_id, Some(msg.id())).await;
-                                { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); }
+        if let Some(data) = q.data.as_deref() {
+            if let Some(payload) = data.strip_prefix(callback_data::PREFIX_HEDGE_CONFIRM) {
+                if payload == "yes" {
+                    // --- Ветка "Да" ---
+                    // q.message перемещается ТОЛЬКО здесь, если нужно
+                    if let Some(msg) = q.message {
+                        // let chat_id = msg.chat().id; // chat_id уже есть
+                        info!("User {} confirmed hedge operation", chat_id);
+
+                        let (symbol, sum, volatility_fraction) = {
+                            let state_guard = state_storage.read().expect("Lock failed");
+                            match state_guard.get(&chat_id) {
+                                Some(UserState::AwaitingHedgeConfirmation { symbol, sum, volatility, .. }) => (symbol.clone(), *sum, *volatility),
+                                _ => {
+                                    warn!("User {} confirmed hedge but was in wrong state", chat_id);
+                                    bot.answer_callback_query(query_id).text("Состояние изменилось, начните заново.").show_alert(true).await?;
+                                    let _ = navigation::show_main_menu(&bot, chat_id, Some(message_id)).await; // Используем message_id
+                                    { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); }
+                                    return Ok(());
+                                }
+                            }
+                        };
+                        { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); }
+
+                        let waiting_text = format!("⏳ Запуск хеджирования для {}...", symbol);
+                        bot.edit_message_text(chat_id, message_id, waiting_text) // Используем message_id
+                           .reply_markup(InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new()))
+                           .await?;
+
+                        let hedge_request = HedgeRequest { sum, symbol: symbol.clone(), volatility: volatility_fraction };
+                        let hedger = Hedger::new((*exchange).clone(), (*cfg).clone());
+
+                        match hedger.calculate_hedge_params(&hedge_request).await {
+                            Ok(params) => {
+                                info!("Hedge parameters re-calculated just before execution for {}: {:?}", chat_id, params);
+                                spawn_hedge_task(
+                                    bot.clone(), exchange.clone(), cfg.clone(), db.clone(),
+                                    running_operations.clone(), chat_id, params, sum,
+                                    volatility_fraction * 100.0, msg, // msg перемещается сюда
+                                ).await;
+                                // Не отвечаем на query_id здесь, т.к. задача запущена
+                            }
+                            Err(e) => {
+                                error!("Hedge parameter calculation failed just before execution for {}: {}", chat_id, e);
+                                let error_text = format!("❌ Ошибка расчета параметров перед запуском: {}\nПопробуйте снова.", e);
+                                let _ = bot.edit_message_text(chat_id, message_id, error_text) // Используем message_id
+                                         .reply_markup(navigation::make_main_menu_keyboard())
+                                         .await;
+                                // Отвечаем на query_id при ошибке
+                                bot.answer_callback_query(query_id).await?;
                                 return Ok(());
                             }
                         }
-                    };
-                    { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); }
-
-                    let waiting_text = format!("⏳ Запуск хеджирования для {}...", symbol);
-                    bot.edit_message_text(chat_id, msg.id(), waiting_text)
-                       .reply_markup(InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new()))
-                       .await?;
-
-                    let hedge_request = HedgeRequest { sum, symbol: symbol.clone(), volatility: volatility_fraction };
-                    let hedger = Hedger::new((*exchange).clone(), (*cfg).clone());
-
-                    match hedger.calculate_hedge_params(&hedge_request).await {
-                        Ok(params) => {
-                            info!("Hedge parameters re-calculated just before execution for {}: {:?}", chat_id, params);
-                            spawn_hedge_task(
-                                bot.clone(), exchange.clone(), cfg.clone(), db.clone(),
-                                running_operations.clone(), chat_id, params, sum,
-                                volatility_fraction * 100.0, msg,
-                            ).await;
-                        }
-                        Err(e) => {
-                            error!("Hedge parameter calculation failed just before execution for {}: {}", chat_id, e);
-                            let error_text = format!("❌ Ошибка расчета параметров перед запуском: {}\nПопробуйте снова.", e);
-                            let _ = bot.edit_message_text(chat_id, msg.id(), error_text)
-                                     .reply_markup(navigation::make_main_menu_keyboard())
-                                     .await;
-                        }
+                    } else {
+                        warn!("CallbackQuery missing message on 'yes' confirmation for {}", query_id);
+                        // Отвечаем на query_id, т.к. произошла ошибка
+                        bot.answer_callback_query(query_id).await?;
+                        return Ok(());
                     }
 
+                } else if payload == "no" {
+                    // --- Ветка "Нет" (используем новые параметры) ---
+                    info!("User {} cancelled hedge at confirmation", chat_id);
+                    bot.answer_callback_query(query_id).await?; // <<< Отвечаем ДО вызова
+                    // bot ПЕРЕМЕЩАЕТСЯ сюда
+                    navigation::handle_cancel_dialog(bot, chat_id, message_id, state_storage).await?;
+                    return Ok(()); // Выходим
+
                 } else {
-                    warn!("CallbackQuery missing message on 'yes' confirmation for {}", query_id);
+                    warn!("Invalid payload for hedge confirmation callback: {}", payload);
+                    bot.answer_callback_query(query_id).await?; // Отвечаем на некорректный payload
+                    return Ok(()); // Выходим
                 }
-
-            } else if payload == "no" {
-                // --- Ветка "Нет" ---
-                 let chat_id = q.message.as_ref().map(|m| m.chat().id);
-                 info!("User {} cancelled hedge at confirmation", chat_id.map_or("UNKNOWN".to_string(), |c| c.to_string()));
-
-                // Вызываем оригинальную функцию handle_cancel_dialog с q
-                navigation::handle_cancel_dialog(bot, q, state_storage).await?;
-                // handle_cancel_dialog должен сам вызвать answer_callback_query
+            } else if data == callback_data::CANCEL_DIALOG {
+                 // --- Ветка Отмена (используем новые параметры) ---
+                info!("User cancelled hedge dialog via cancel button");
+                bot.answer_callback_query(query_id).await?; // <<< Отвечаем ДО вызова
+                 // bot ПЕРЕМЕЩАЕТСЯ сюда
+                navigation::handle_cancel_dialog(bot, chat_id, message_id, state_storage).await?;
                 return Ok(()); // Выходим
-
-            } else {
-                warn!("Invalid payload for hedge confirmation callback: {}", payload);
+            }
+             else {
+                 warn!("Invalid callback data format for hedge confirmation prefix: {}", data);
+                 bot.answer_callback_query(query_id).await?; // Отвечаем на некорректный формат
+                 return Ok(()); // Выходим
             }
         } else {
-             // Если data есть, но префикс не совпадает, возможно это кнопка Отмена из диалога?
-             if data == callback_data::CANCEL_DIALOG {
-                 info!("User cancelled hedge dialog via cancel button");
-                 // Вызываем оригинальную функцию handle_cancel_dialog с q
-                 navigation::handle_cancel_dialog(bot, q, state_storage).await?;
-                 return Ok(()); // Выходим
-             } else {
-                warn!("Invalid callback data format for hedge confirmation prefix: {}", data);
-             }
+            warn!("CallbackQuery missing data in handle_hedge_confirm_callback");
+            bot.answer_callback_query(query_id).await?; // Отвечаем
+            return Ok(()); // Выходим
         }
     } else {
-        warn!("CallbackQuery missing data in handle_hedge_confirm_callback");
+         warn!("CallbackQuery missing message in handle_hedge_confirm_callback");
+         bot.answer_callback_query(query_id).await?; // Отвечаем
+         return Ok(()); // Выходим
     }
-
-    // Отвечаем на колбэк только если не вышли ранее
-    bot.answer_callback_query(query_id).await?; // Используем клон query_id
+     // Сюда не должны доходить, если все ветки обработаны
     Ok(())
 }
 
