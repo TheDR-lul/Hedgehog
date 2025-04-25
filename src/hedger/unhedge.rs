@@ -111,7 +111,7 @@ where
     );
 
     let actual_spot_sell_qty_decimal =
-        Decimal::from_f64(actual_spot_sell_qty).unwrap_or_else(|| Decimal::ZERO);
+        Decimal::try_from(actual_spot_sell_qty).unwrap_or_else(|_| Decimal::ZERO);
 
     if actual_spot_sell_qty <= ORDER_FILL_TOLERANCE
         || actual_spot_sell_qty_decimal < min_spot_qty_decimal

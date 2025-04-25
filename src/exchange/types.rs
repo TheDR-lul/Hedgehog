@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 use anyhow::anyhow;
 
-/// Сторона ордера
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum OrderSide {
     Buy,
     Sell,
@@ -29,11 +29,31 @@ impl FromStr for OrderSide {
     }
 }
 
+// --- ДОБАВЛЕНО: Методы sign() и opposite() ---
+impl OrderSide {
+    pub fn sign(&self) -> f64 {
+        match self {
+            OrderSide::Buy => -1.0,
+            OrderSide::Sell => 1.0,
+        }
+    }
+
+    pub fn opposite(&self) -> Self {
+        match self {
+            OrderSide::Buy => OrderSide::Sell,
+            OrderSide::Sell => OrderSide::Buy,
+        }
+    }
+}
+
+
 /// Описание ордера
-#[derive(Debug, Clone)]
+// --- ИЗМЕНЕНО: Убрал OrderSide из derive, т.к. он теперь Copy ---
+// --- Хотя можно и оставить, Clone все равно нужен ---
+#[derive(Debug, Clone)] // OrderSide теперь Copy, так что Order остается Clone
 pub struct Order {
     pub id:     String,
-    pub side:   OrderSide,
+    pub side:   OrderSide, // Это поле теперь будет копироваться
     pub qty:    f64,
     pub price:  Option<f64>,
     pub ts:     i64,

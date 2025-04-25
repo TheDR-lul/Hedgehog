@@ -135,8 +135,3 @@ where
         .await
     }
 }
-
-// Реэкспорт для удобства использования извне модуля hedger
-pub use hedge::run_hedge; // Если хотим прямой доступ к run_hedge
-pub use params::calculate_hedge_params; // Если хотим прямой доступ
-pub use unhedge::run_unhedge; // Если хотим прямой доступ
