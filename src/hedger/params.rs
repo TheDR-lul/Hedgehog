@@ -1,3 +1,5 @@
+// g:\git\Hedgehog\src\hedger\params.rs
+
 use anyhow::{anyhow, Result};
 use rust_decimal::prelude::*;
 use std::str::FromStr;
@@ -13,7 +15,7 @@ pub(super) async fn calculate_hedge_params_impl<E>(
     exchange: &E,
     req: &HedgeRequest,
     slippage: f64,
-    quote_currency: &str,
+    quote_currency: &str, // Убедись, что этот параметр передается при вызове!
     max_allowed_leverage: f64,
 ) -> Result<HedgeParams>
 where
@@ -21,7 +23,7 @@ where
 {
     let HedgeRequest {
         sum,
-        symbol,
+        symbol, // Это базовый символ, e.g., "BTC"
         volatility,
     } = req;
     debug!("Calculating hedge params for {}...", symbol);
@@ -30,6 +32,7 @@ where
         .get_spot_instrument_info(symbol)
         .await
         .map_err(|e| anyhow!("Failed to get SPOT instrument info: {}", e))?;
+    // Передаем базовый символ, т.к. bybit.rs сам добавит quote_currency для linear
     let linear_info = exchange
         .get_linear_instrument_info(symbol)
         .await
@@ -49,7 +52,12 @@ where
         }
     };
 
-    let mmr = exchange.get_mmr(symbol).await?;
+    // --- ИСПРАВЛЕНО: Формируем фьючерсный символ ПЕРЕД вызовом get_mmr ---
+    let futures_symbol = format!("{}{}", symbol, quote_currency);
+    debug!("Using futures symbol {} for MMR lookup", futures_symbol);
+
+    // --- ИСПРАВЛЕНО: Передаем фьючерсный символ в get_mmr ---
+    let mmr = exchange.get_mmr(&futures_symbol).await?;
     let initial_spot_value = sum / ((1.0 + volatility) * (1.0 + mmr));
 
     if initial_spot_value <= 0.0 {
@@ -212,7 +220,7 @@ where
     let initial_limit_price = current_spot_price * (1.0 - slippage);
     debug!("Initial limit price for spot buy: {}", initial_limit_price);
 
-    let futures_symbol = format!("{}{}", symbol, quote_currency);
+    // futures_symbol уже был создан выше перед вызовом get_mmr
 
     Ok(HedgeParams {
         spot_order_qty,
@@ -226,6 +234,6 @@ where
         min_fut_qty_decimal,  // Передаем дальше
         spot_decimals,        // Передаем дальше
         fut_decimals,         // Передаем дальше
-        futures_symbol,       // Передаем дальше
+        futures_symbol,       // Используем уже созданный futures_symbol
     })
 }

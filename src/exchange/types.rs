@@ -59,6 +59,15 @@ pub struct Order {
     pub ts:     i64,
 }
 
+/// Расширенный статус ордера с деталями исполнения
+#[derive(Debug, Clone)]
+pub struct DetailedOrderStatus {
+    pub filled_qty: f64,
+    pub remaining_qty: f64,
+    pub cumulative_executed_value: f64, // Совокупная стоимость исполненного
+    pub average_price: f64,             // Средняя цена исполнения
+}
+
 /// Баланс монеты
 #[derive(Debug, Clone)]
 pub struct Balance {

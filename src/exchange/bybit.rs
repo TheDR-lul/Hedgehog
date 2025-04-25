@@ -2,7 +2,7 @@
 
 // --- Используемые типажи и структуры ---
 use super::{Exchange, OrderStatus, FeeRate};
-use crate::exchange::types::{Balance, Order, OrderSide};
+use crate::exchange::types::{Balance, Order, OrderSide,DetailedOrderStatus};
 // --- Стандартные и внешние зависимости ---
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -176,6 +176,7 @@ struct OrderQueryResult {
     list: Vec<OrderQueryEntry>,
 }
 
+// Убедитесь, что эта структура выглядит так:
 #[derive(Deserialize, Debug)]
 struct OrderQueryEntry {
     #[serde(rename = "orderId")]
@@ -187,19 +188,18 @@ struct OrderQueryEntry {
     #[serde(rename = "orderStatus")]
     status: String,
     #[serde(rename = "cumExecQty")]
-    cum_exec_qty: String,
+    cum_exec_qty: String, // Исполненное количество
     #[serde(rename = "cumExecValue")]
-    _cum_exec_value: String,
+    cum_exec_value: String, // <-- ДОБАВЛЕНО: Совокупная стоимость
+    #[serde(rename = "avgPrice")]
+    avg_price: String,      // <-- ДОБАВЛЕНО: Средняя цена
     #[serde(rename = "leavesQty")]
-    leaves_qty: String,
+    leaves_qty: String, // Оставшееся количество
     #[serde(rename = "price")]
     _price: String,
-    #[serde(rename = "avgPrice")]
-    _avg_price: String,
     #[serde(rename = "createdTime")]
     _created_time: String,
 }
-
 /// Ответ по тикерам
 #[derive(Deserialize,Serialize ,Debug, Default)]
 struct TickersResult {
@@ -1011,28 +1011,36 @@ impl Exchange for Bybit {
 
     /// Получение MMR для ЛИНЕЙНОГО контракта
     async fn get_mmr(&self, symbol: &str) -> Result<f64> {
-        let linear_pair = self.format_pair(symbol);
-        debug!(symbol=%linear_pair, category=LINEAR_CATEGORY, "Fetching MMR via risk limit");
-        let params = [("category", LINEAR_CATEGORY), ("symbol", &linear_pair)];
+        // УБРАНО: let linear_pair = self.format_pair(symbol);
+        // Используем symbol напрямую
+        debug!(symbol=%symbol, category=LINEAR_CATEGORY, "Fetching MMR via risk limit");
+        // Используем symbol напрямую
+        let params = [("category", LINEAR_CATEGORY), ("symbol", symbol)];
         let risk_limit_result: RiskLimitResult = self.call_api(Method::GET, "v5/market/risk-limit", Some(&params), None, false).await?;
-        let risk_level = risk_limit_result.list.into_iter().find(|level| level.id == 1 || level.is_lowest_risk == 1).ok_or_else(|| anyhow!("No risk limit level 1 found for {}", linear_pair))?;
+        // Используем symbol напрямую в сообщении об ошибке
+        let risk_level = risk_limit_result.list.into_iter().find(|level| level.id == 1 || level.is_lowest_risk == 1).ok_or_else(|| anyhow!("No risk limit level 1 found for {}", symbol))?;
 
         if risk_level.mmr.is_empty() {
+            // Используем symbol напрямую в сообщении об ошибке
             if self.base_url.contains("testnet") {
-                 warn!("MMR is empty for {} on testnet, using fallback 0.005", linear_pair);
+                 warn!("MMR is empty for {} on testnet, using fallback 0.005", symbol);
                  Ok(0.005)
-            } else { Err(anyhow!("MMR (maintenanceMargin) is empty for {}", linear_pair)) }
+            } else { Err(anyhow!("MMR (maintenanceMargin) is empty for {}", symbol)) }
         } else {
-            risk_level.mmr.parse::<f64>().map_err(|e| anyhow!("Failed to parse MMR for {}: {}", linear_pair, e))
+            // Используем symbol напрямую в сообщении об ошибке
+            risk_level.mmr.parse::<f64>().map_err(|e| anyhow!("Failed to parse MMR for {}: {}", symbol, e))
         }
     }
 
     /// Получение средней ставки финансирования
     async fn get_funding_rate(&self, symbol: &str, days: u16) -> Result<f64> {
-        let linear_pair = self.format_pair(symbol);
+        // УБРАНО: let linear_pair = self.format_pair(symbol);
+        // Используем symbol напрямую
         let limit = days.min(200).to_string();
-        debug!(symbol=%linear_pair, days, limit=%limit, "Fetching funding rate history");
-        let params = [("category", LINEAR_CATEGORY), ("symbol", &linear_pair), ("limit", limit.as_str())];
+        // Используем symbol напрямую
+        debug!(symbol=%symbol, days, limit=%limit, "Fetching funding rate history");
+        // Используем symbol напрямую
+        let params = [("category", LINEAR_CATEGORY), ("symbol", symbol), ("limit", limit.as_str())];
         let funding_result: FundingResult = self.call_api(Method::GET, "v5/market/funding-rate-history", Some(&params), None, false).await?;
 
         if funding_result.list.is_empty() { return Ok(0.0); }
@@ -1043,15 +1051,16 @@ impl Exchange for Bybit {
         if count == 0 { Ok(0.0) } else { Ok(sum / count as f64) }
     }
 
-
     // --- РЕАЛИЗАЦИЯ НОВЫХ МЕТОДОВ ---
 
     /// Получить текущее кредитное плечо для символа (linear)
     async fn get_current_leverage(&self, symbol: &str) -> Result<f64> {
-        let linear_pair = self.format_pair(symbol);
-        info!(symbol=%linear_pair, category=LINEAR_CATEGORY, "Fetching current leverage");
+        // УБРАНО: let linear_pair = self.format_pair(symbol);
+        // Используем symbol напрямую, т.к. он уже должен быть полным (e.g., "BTCUSDT")
+        info!(symbol=%symbol, category=LINEAR_CATEGORY, "Fetching current leverage");
 
-        let params = [("category", LINEAR_CATEGORY), ("symbol", &linear_pair)];
+        // Используем symbol напрямую
+        let params = [("category", LINEAR_CATEGORY), ("symbol", symbol)];
         // Важно: Эндпоинт v5/position/list возвращает инфо только если есть позиция или риск-лимит/плечо не дефолтные.
         // Если плечо никогда не менялось и позиции нет, список может быть пуст.
         let position_result: PositionInfoResult = self.call_api(
@@ -1062,27 +1071,30 @@ impl Exchange for Bybit {
             true, // Требует аутентификации
         ).await?;
 
-        let position = match position_result.list.into_iter().find(|p| p.symbol == linear_pair) {
+        // Используем symbol напрямую
+        let position = match position_result.list.into_iter().find(|p| p.symbol == symbol) {
              Some(p) => p,
              None => {
                  // Если информации нет, возможно, используется плечо по умолчанию (обычно 10x на Bybit)
                  // Или можно попробовать получить его из другого места, например, из risk-limit (но там maxLeverage)
                  // Безопаснее вернуть ошибку, чтобы hedger не продолжил с неверным значением.
-                 warn!("No position info found for {} to get leverage. Cannot determine current leverage.", linear_pair);
-                 return Err(anyhow!("Current leverage info not available for {}", linear_pair));
+                 // Используем symbol напрямую в сообщении об ошибке
+                 warn!("No position info found for {} to get leverage. Cannot determine current leverage.", symbol);
+                 return Err(anyhow!("Current leverage info not available for {}", symbol));
              }
         };
 
-
+        // Используем symbol напрямую в сообщении об ошибке
         position.leverage.parse::<f64>().map_err(|e| {
-            error!("Failed to parse current leverage for {}: {} (value: '{}')", linear_pair, e, position.leverage);
-            anyhow!("Failed to parse current leverage for {}: {}", linear_pair, e)
+            error!("Failed to parse current leverage for {}: {} (value: '{}')", symbol, e, position.leverage);
+            anyhow!("Failed to parse current leverage for {}: {}", symbol, e)
         })
     }
 
     /// Установить кредитное плечо для символа (linear)
     async fn set_leverage(&self, symbol: &str, leverage: f64) -> Result<()> {
-        let linear_pair = self.format_pair(symbol);
+        // УБРАНО: let linear_pair = self.format_pair(symbol);
+        // Используем symbol напрямую
         // Округляем до 2 знаков
         let leverage_str = format!("{:.2}", leverage);
         if leverage <= 0.0 {
@@ -1092,11 +1104,12 @@ impl Exchange for Bybit {
         // Проверка на максимальное плечо биржи (можно получить из /v5/market/instruments-info -> leverageFilter)
         // TODO: Добавить проверку на максимальное плечо биржи, если нужно
 
-        info!(symbol=%linear_pair, leverage=%leverage_str, category=LINEAR_CATEGORY, "Setting leverage");
+        // Используем symbol напрямую
+        info!(symbol=%symbol, leverage=%leverage_str, category=LINEAR_CATEGORY, "Setting leverage");
 
         let body = json!({
             "category": LINEAR_CATEGORY,
-            "symbol": linear_pair,
+            "symbol": symbol, // Используем symbol напрямую
             "buyLeverage": leverage_str, // Устанавливаем одинаковое для лонг и шорт
             "sellLeverage": leverage_str,
             "tradeMode": 0, // 0=Cross Margin
@@ -1112,7 +1125,8 @@ impl Exchange for Bybit {
             true,
         ).await?;
 
-        info!(symbol=%linear_pair, leverage=%leverage_str, "Set leverage request sent successfully (or leverage was already set to this value)");
+        // Используем symbol напрямую
+        info!(symbol=%symbol, leverage=%leverage_str, "Set leverage request sent successfully (or leverage was already set to this value)");
         Ok(())
     }
 
@@ -1211,4 +1225,58 @@ impl Exchange for Bybit {
     
             Ok(FuturesTickerInfo { symbol: ticker.symbol, bid_price, ask_price, last_price })
         }
+        async fn get_spot_order_execution_details(&self, symbol: &str, order_id: &str) -> Result<DetailedOrderStatus> {
+    let spot_pair = self.format_pair(symbol);
+    debug!(symbol=%spot_pair, order_id, category=SPOT_CATEGORY, "Fetching SPOT order execution details");
+
+    // Используем тот же эндпоинт, что и для обычного статуса
+    let params = [("category", SPOT_CATEGORY), ("orderId", order_id)];
+    let query_result: OrderQueryResult = self.call_api(
+        Method::GET,
+        "v5/order/realtime", // Используем realtime эндпоинт
+        Some(&params),
+        None,
+        true, // Требует аутентификации
+    ).await?;
+
+    // Ищем нужный ордер в ответе
+    let order_entry = query_result.list.into_iter().next().ok_or_else(|| {
+        warn!("Order ID {} not found in realtime query for {}", order_id, spot_pair);
+        // Возвращаем ошибку, совместимую с той, что ожидает hedger
+        anyhow!("Order not found")
+    })?;
+
+    // Парсим необходимые поля с обработкой ошибок
+    let filled_quantity = order_entry.cum_exec_qty.trim().parse::<f64>().unwrap_or_else(|error| {
+        warn!(order_id, value=%order_entry.cum_exec_qty, %error, "Failed to parse cumExecQty, using 0.0");
+        0.0
+    });
+    let remaining_quantity = order_entry.leaves_qty.trim().parse::<f64>().unwrap_or_else(|error| {
+        warn!(order_id, value=%order_entry.leaves_qty, %error, "Failed to parse leavesQty, using 0.0");
+        0.0
+    });
+    let cumulative_value = order_entry.cum_exec_value.trim().parse::<f64>().unwrap_or_else(|error| {
+        warn!(order_id, value=%order_entry.cum_exec_value, %error, "Failed to parse cumExecValue, using 0.0");
+        0.0
+    });
+    let average_price = order_entry.avg_price.trim().parse::<f64>().unwrap_or_else(|error| {
+        // Для avgPrice 0.0 может быть валидным значением, если ордер еще не исполнялся
+        trace!(order_id, value=%order_entry.avg_price, %error, "Failed to parse avgPrice or it was empty/zero, using 0.0");
+        0.0
+    });
+
+    info!(
+        order_id, status=%order_entry.status,
+        filled=filled_quantity, remaining=remaining_quantity,
+        cum_value=cumulative_value, avg_price=average_price,
+        "Detailed order status received (SPOT)"
+    );
+
+    Ok(DetailedOrderStatus {
+        filled_qty: filled_quantity,
+        remaining_qty: remaining_quantity,
+        cumulative_executed_value: cumulative_value,
+        average_price: average_price,
+    })
+}
 }

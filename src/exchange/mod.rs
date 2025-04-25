@@ -5,7 +5,7 @@ pub mod bybit;
 
 pub use bybit::Bybit;
 // Импортируем типы из types и структуры информации об инструментах из bybit
-pub use types::{Balance, OrderSide, Order, OrderStatus};
+pub use types::{Balance, OrderSide, Order, OrderStatus,DetailedOrderStatus};
 pub use bybit::{SpotInstrumentInfo, LinearInstrumentInfo}; // Добавили импорт для Info
 use crate::exchange::types::FuturesTickerInfo;
 
@@ -108,5 +108,7 @@ pub trait Exchange {
     
         /// Отменить ФЬЮЧЕРСНЫЙ ордер
     async fn cancel_futures_order(&self, symbol: &str, order_id: &str) -> Result<()>; // Новый метод
+
+    async fn get_spot_order_execution_details(&self, symbol: &str, order_id: &str) -> Result<DetailedOrderStatus>;
     
 }
