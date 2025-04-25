@@ -117,22 +117,35 @@ where
     let hedger = Hedger::new((*exchange).clone(), (*cfg).clone());
     let original_op_id = op_to_unhedge.id;
     let symbol = op_to_unhedge.base_symbol.clone(); // Клон символа для задачи
-    let bot_clone = bot.clone(); // Клон бота для задачи и колбэка
-    let db_clone = db.clone(); // Клон пула БД для задачи
-    let cfg_clone = cfg.clone(); // Клон конфига для колбэка
-    let original_op_clone = op_to_unhedge.clone(); // Клон данных операции для колбэка
+
+    // --- Клоны для колбэка прогресса ---
+    let bot_for_callback = bot.clone();
+    let symbol_for_callback = symbol.clone();
+    let cfg_for_callback = cfg.clone();
+    let original_op_for_callback = op_to_unhedge.clone();
+    // --- Конец клонов для колбэка ---
+
+    // --- Клоны для основной задачи spawn ---
+    let bot_for_spawn = bot.clone();
+    let db_for_spawn = db.clone();
+    // `op_to_unhedge` и `symbol` будут перемещены в spawn ниже
+    // --- Конец клонов для основной задачи spawn ---
+
 
     // --- Создание колбэка прогресса для расхеджирования ---
     let progress_callback: HedgeProgressCallback = Box::new(move |update: HedgeProgressUpdate| {
-        let bot_for_callback = bot_clone.clone();
-        let qc = cfg_clone.quote_currency.clone(); // Используем клон cfg
-        let symbol_cb = symbol.clone(); // Используем клон symbol
+        // Используем клоны, созданные специально для колбэка
+        let bot_cb = bot_for_callback.clone(); // Клонируем еще раз внутри, т.к. async move
+        let qc = cfg_for_callback.quote_currency.clone(); // Используем клон cfg
+        let symbol_cb = symbol_for_callback.clone(); // Используем клон symbol
         let msg_id_cb = message_id_to_edit; // Копируем ID сообщения
         let chat_id_cb = chat_id; // Копируем ID чата
         let operation_id_cb = original_op_id; // Копируем ID операции
         // Используем целевое количество спота из оригинальной операции для расчета общего %
-        // (Хотя сам прогрессбар пока показывает прогресс текущего ордера)
-        let _overall_target_qty = original_op_clone.spot_filled_qty;
+        let _overall_target_qty = original_op_for_callback.spot_filled_qty;
+
+        // --- УДАЛЕНО: Неиспользуемая переменная qc ---
+        // let qc = cfg_clone.quote_currency.clone();
 
         async move {
             // Прогресс текущего ордера
@@ -148,7 +161,7 @@ where
             // --- Адаптированный текст для Расхеджирования ---
             let text = format!(
                  "⏳ Расхеджирование ID:{} {} ({}) в процессе...\nРын.цена: {:.2}\nОрдер на ПРОДАЖУ: {:.2} {}\nИсполнено (тек.ордер): {:.6}/{:.6} ({:.1}%)",
-                 operation_id_cb, progress_bar, symbol_cb,
+                 operation_id_cb, progress_bar, symbol_cb, // Используем symbol_cb
                  update.current_spot_price, update.new_limit_price, status_text,
                  update.filled_qty, update.target_qty, current_order_filled_percent
                  // Можно добавить общий прогресс, если передавать cumulative_filled_qty в update
@@ -162,7 +175,7 @@ where
             // let kb = InlineKeyboardMarkup::new(vec![vec![cancel_button]]);
             let kb = InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new()); // Пока без кнопки отмены
 
-            if let Err(e) = bot_for_callback.edit_message_text(chat_id_cb, msg_id_cb, text)
+            if let Err(e) = bot_cb.edit_message_text(chat_id_cb, msg_id_cb, text) // Используем bot_cb
                 .reply_markup(kb)
                 .await {
                 // Игнорируем ошибку "message is not modified"
@@ -177,15 +190,19 @@ where
 
     tokio::spawn(async move {
         // --- Передаем колбэк в run_unhedge ---
-        match hedger.run_unhedge(op_to_unhedge, db_clone.as_ref(), progress_callback).await { // <-- Передан колбэк
+        // `op_to_unhedge` перемещается сюда
+        // `db_for_spawn` перемещается сюда
+        // `progress_callback` перемещается сюда
+        match hedger.run_unhedge(op_to_unhedge, db_for_spawn.as_ref(), progress_callback).await {
             Ok((sold_spot_qty, bought_fut_qty)) => {
                 info!("Unhedge OK for original op_id: {}", original_op_id);
                 let text = format!(
                     "✅ Расхеджирование {} (из операции ID:{}) завершено:\n\n🟢 Спот продано: {:.8}\n🔴 Фьюч куплено: {:.8}",
-                    symbol, original_op_id, sold_spot_qty, bought_fut_qty
+                    symbol, original_op_id, sold_spot_qty, bought_fut_qty // `symbol` перемещен сюда
                 );
                 // Редактируем исходное сообщение с результатом
-                let _ = bot_clone.edit_message_text(chat_id, message_id_to_edit, text)
+                // `bot_for_spawn` перемещается сюда
+                let _ = bot_for_spawn.edit_message_text(chat_id, message_id_to_edit, text)
                              .reply_markup(navigation::make_main_menu_keyboard())
                              .await
                              .map_err(|e| warn!("op_id:{}: Failed edit success unhedge message: {}", original_op_id, e));
@@ -194,7 +211,8 @@ where
                 error!("Unhedge FAILED for original op_id: {}: {}", original_op_id, e);
                 let error_text = format!("❌ Ошибка расхеджирования операции ID:{}: {}", original_op_id, e);
                 // Редактируем исходное сообщение с ошибкой
-                let _ = bot_clone.edit_message_text(chat_id, message_id_to_edit, error_text)
+                // `bot_for_spawn` используется здесь (если не был использован в Ok)
+                let _ = bot_for_spawn.edit_message_text(chat_id, message_id_to_edit, error_text)
                              .reply_markup(navigation::make_main_menu_keyboard())
                              .await
                              .map_err(|e| warn!("op_id:{}: Failed edit error unhedge message: {}", original_op_id, e));
@@ -204,7 +222,6 @@ where
         // (Пока не добавлялась, т.к. нет отмены для unhedge)
     });
 } // Конец spawn_unhedge_task
-
 /// Определяет, нужно ли выбирать актив или можно сразу показать операции
 async fn start_unhedge_asset_or_op_selection(
     bot: Bot,
