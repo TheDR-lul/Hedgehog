@@ -3,14 +3,14 @@
 use super::{
     Command, StateStorage, UserState, RunningOperations, RunningOperationInfo, OperationType, callback_data, // Импорт общих типов
     navigation, // Для вызова handle_back_to_main, handle_cancel_dialog
-    progress, // Для колбэка прогресса (пока заглушка)
-    utils, // Если будут общие утилиты notifier
+    //progress, // Для колбэка прогресса (пока заглушка)
+    //utils, // Если будут общие утилиты notifier
 };
 use crate::config::Config;
 use crate::exchange::{Exchange, Balance};
 use crate::storage::{Db, insert_hedge_operation, update_hedge_final_status, update_hedge_spot_order}; // Нужные функции DB
-use crate::hedger::{Hedger, HedgeParams, HedgeRequest, HedgeProgressUpdate, HedgeProgressCallback, ORDER_FILL_TOLERANCE}; // Типы из Hedger
-use crate::models; // Если HedgeRequest там
+use crate::hedger::{Hedger, HedgeParams, HedgeProgressUpdate, HedgeProgressCallback, ORDER_FILL_TOLERANCE}; // Типы из Hedger
+use crate::models::HedgeRequest; // Если HedgeRequest там
 use std::sync::Arc;
 use std::time::Duration; // Для sleep
 use tokio::sync::Mutex as TokioMutex; // Для Arc<Mutex<>> в RunningOperationInfo
@@ -331,10 +331,10 @@ where
     E: Exchange + Clone + Send + Sync + 'static,
 {
     if let Some(msg) = q.message {
-        let chat_id = msg.chat.id;
+        let chat_id = msg.chat().id;
         info!("Processing '{}' callback for chat_id: {}", callback_data::START_HEDGE, chat_id);
         // Запускаем выбор актива, редактируя текущее сообщение
-        prompt_asset_selection(bot, chat_id, state_storage, exchange, cfg, db, Some(msg.id)).await?;
+        prompt_asset_selection(bot, chat_id, state_storage, exchange, cfg, db, Some(msg.id())).await?;
     } else {
         warn!("CallbackQuery missing message in handle_start_hedge_callback");
     }
@@ -458,7 +458,7 @@ pub async fn handle_hedge_asset_callback<E>(
      E: Exchange + Clone + Send + Sync + 'static,
  {
     if let (Some(data), Some(msg)) = (q.data, q.message) {
-        let chat_id = msg.chat.id;
+        let chat_id = msg.chat().id;
         if let Some(symbol) = data.strip_prefix(callback_data::PREFIX_HEDGE_ASSET) {
              info!("User {} selected asset {} for hedge via callback", chat_id, symbol);
 
@@ -472,7 +472,7 @@ pub async fn handle_hedge_asset_callback<E>(
                 // Переходим к запросу суммы
                 let text = format!("Введите сумму {} для хеджирования {}:", cfg.quote_currency, symbol);
                 let kb = make_dialog_keyboard();
-                bot.edit_message_text(chat_id, msg.id, text).reply_markup(kb).await?;
+                bot.edit_message_text(chat_id, msg.id(), text).reply_markup(kb).await?;
 
                 // Обновляем состояние
                 {
@@ -481,20 +481,20 @@ pub async fn handle_hedge_asset_callback<E>(
                     if let Some(current_state @ UserState::AwaitingHedgeAssetSelection { .. }) = state_guard.get_mut(&chat_id) {
                          *current_state = UserState::AwaitingHedgeSum {
                             symbol: symbol.to_string(),
-                            last_bot_message_id: Some(msg.id.0),
+                            last_bot_message_id: Some(msg.id().0),
                         };
                         info!("User state for {} set to AwaitingHedgeSum for {}", chat_id, symbol);
                     } else {
                          warn!("State changed unexpectedly for {} before setting AwaitingHedgeSum", chat_id);
                          // Если состояние изменилось, лучше ничего не делать или вернуть в меню
-                         let _ = navigation::show_main_menu(&bot, chat_id, Some(msg.id)).await;
+                         let _ = navigation::show_main_menu(&bot, chat_id, Some(msg.id())).await;
                     }
                 }
             } else {
                  warn!("User {} clicked hedge asset button but was in wrong state", chat_id);
                  // Сбрасываем состояние и возвращаем в меню
                  { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); }
-                 let _ = navigation::show_main_menu(&bot, chat_id, Some(msg.id)).await;
+                 let _ = navigation::show_main_menu(&bot, chat_id, Some(msg.id())).await;
                  bot.answer_callback_query(q.id).text("Состояние изменилось, начните заново.").show_alert(true).await?;
                  return Ok(()); // Возвращаемся, чтобы не отвечать на колбэк второй раз
             }
@@ -855,7 +855,7 @@ pub async fn handle_hedge_confirm_callback<E>(
      E: Exchange + Clone + Send + Sync + 'static,
  {
      if let (Some(data), Some(msg)) = (q.data, q.message) {
-        let chat_id = msg.chat.id;
+        let chat_id = msg.chat().id;
         if let Some(payload) = data.strip_prefix(callback_data::PREFIX_HEDGE_CONFIRM) {
              if payload == "yes" {
                  info!("User {} confirmed hedge operation", chat_id);
@@ -868,7 +868,7 @@ pub async fn handle_hedge_confirm_callback<E>(
                          _ => {
                              warn!("User {} confirmed hedge but was in wrong state", chat_id);
                              bot.answer_callback_query(q.id).text("Состояние изменилось, начните заново.").show_alert(true).await?;
-                             let _ = navigation::show_main_menu(&bot, chat_id, Some(msg.id)).await; // Возврат в меню
+                             let _ = navigation::show_main_menu(&bot, chat_id, Some(msg.id())).await; // Возврат в меню
                               { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); } // Сброс
                              return Ok(());
                          }
@@ -880,7 +880,7 @@ pub async fn handle_hedge_confirm_callback<E>(
                  // Показываем индикатор запуска
                  let waiting_text = format!("⏳ Запуск хеджирования для {}...", symbol);
                  // Убираем кнопки подтверждения
-                 bot.edit_message_text(chat_id, msg.id, waiting_text)
+                 bot.edit_message_text(chat_id, msg.id(), waiting_text)
                     .reply_markup(InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new()))
                     .await?;
 
@@ -908,7 +908,7 @@ pub async fn handle_hedge_confirm_callback<E>(
                      Err(e) => {
                          error!("Hedge parameter calculation failed just before execution for {}: {}", chat_id, e);
                          let error_text = format!("❌ Ошибка расчета параметров перед запуском: {}\nПопробуйте снова.", e);
-                         let _ = bot.edit_message_text(chat_id, msg.id, error_text)
+                         let _ = bot.edit_message_text(chat_id, msg.id(), error_text)
                                      .reply_markup(navigation::make_main_menu_keyboard())
                                      .await;
                          // Состояние уже сброшено в None
