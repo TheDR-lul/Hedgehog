@@ -23,35 +23,35 @@ use teloxide::types::{
 use tracing::{info, warn, error};
 use futures::future::FutureExt;
 
-// --- Вспомогательные функции для этого модуля ---
+// --- Вспомогательные функции для этого модуля --- (без изменений)
 
 fn make_hedge_confirmation_keyboard() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![
             InlineKeyboardButton::callback("✅ Да, запустить", format!("{}{}", callback_data::PREFIX_HEDGE_CONFIRM, "yes")),
-            InlineKeyboardButton::callback("❌ Нет, отмена", callback_data::CANCEL_DIALOG), // Имя кнопки "Отмена" должно совпадать с callback_data
+            InlineKeyboardButton::callback("❌ Нет, отмена", callback_data::CANCEL_DIALOG),
         ],
     ])
 }
 
 fn make_dialog_keyboard() -> InlineKeyboardMarkup {
      InlineKeyboardMarkup::new(vec![vec![
-        InlineKeyboardButton::callback("❌ Отмена", callback_data::CANCEL_DIALOG), // Имя кнопки "Отмена" должно совпадать с callback_data
+        InlineKeyboardButton::callback("❌ Отмена", callback_data::CANCEL_DIALOG),
     ]])
 }
 
 /// Запускает фоновую задачу хеджирования
 async fn spawn_hedge_task<E>(
     bot: Bot,
-    exchange: Arc<E>, // Передаем Arc для клонирования внутри задачи
-    cfg: Arc<Config>,   // Передаем Arc для клонирования внутри задачи
-    db: Arc<Db>,     // Передаем Arc для клонирования внутри задачи
+    exchange: Arc<E>,
+    cfg: Arc<Config>,
+    db: Arc<Db>,
     running_operations: RunningOperations,
     chat_id: ChatId,
-    params: HedgeParams, // params перемещается в задачу
+    params: HedgeParams,
     initial_sum: f64,
     volatility_percent: f64,
-    waiting_message: MaybeInaccessibleMessage, // waiting_message перемещается в задачу
+    waiting_message: MaybeInaccessibleMessage,
 )
 where
     E: Exchange + Clone + Send + Sync + 'static,
@@ -59,23 +59,21 @@ where
     let bot_message_id = waiting_message.id();
     let _message_chat_id = waiting_message.chat().id;
 
-    // <<<--- ИСПРАВЛЕНО: Клонируем символ трижды ---
-    let symbol_for_callback = params.symbol.clone();  // Для progress_callback
-    let symbol_for_task_body = params.symbol.clone(); // Для остального тела задачи
-    let symbol_for_info = params.symbol.clone();      // Для RunningOperationInfo
-    // ---
+    let symbol_for_callback = params.symbol.clone();
+    let symbol_for_task_body = params.symbol.clone();
+    let symbol_for_info = params.symbol.clone();
 
-    let hedger = Hedger::new((*exchange).clone(), (*cfg).clone()); // Клонируем для hedger
+    let hedger = Hedger::new((*exchange).clone(), (*cfg).clone());
 
     let operation_id_result = insert_hedge_operation(
-        db.as_ref(), // Заимствуем из Arc
+        db.as_ref(),
         chat_id.0,
-        &params.symbol, // Заимствуем из params перед перемещением
-        &cfg.quote_currency, // Заимствуем из Arc
+        &params.symbol,
+        &cfg.quote_currency,
         initial_sum,
         volatility_percent / 100.0,
-        params.spot_order_qty, // Заимствуем из params перед перемещением
-        params.fut_order_qty, // Заимствуем из params перед перемещением
+        params.spot_order_qty,
+        params.fut_order_qty,
     ).await;
 
     let operation_id = match operation_id_result {
@@ -97,25 +95,23 @@ where
     let total_filled_qty_storage = Arc::new(TokioMutex::new(0.0f64));
 
     let bot_clone = bot.clone();
-    let cfg_clone = cfg.clone(); // Клонируем Arc для колбэка
-    let db_clone = db.clone();   // Клонируем Arc для задачи
+    let cfg_clone = cfg.clone();
+    let db_clone = db.clone();
     let current_spot_order_id_storage_clone = current_spot_order_id_storage.clone();
     let total_filled_qty_storage_clone = total_filled_qty_storage.clone();
     let running_operations_clone = running_operations.clone();
 
     // --- Создание колбэка прогресса ---
     let progress_callback: HedgeProgressCallback = Box::new(move |update: HedgeProgressUpdate| {
-        // Захватываем клоны: bot_clone, cfg_clone, symbol_for_callback
         let bot_for_callback = bot_clone.clone();
-        let qc = cfg_clone.quote_currency.clone(); // Клонируем строку из Arc<Config>
-        let symbol_cb = symbol_for_callback.clone(); // Клонируем строку для async move
-        let msg_id_cb = bot_message_id; // MessageId is Copy
-        let chat_id_cb = chat_id;       // ChatId is Copy
-        let initial_sum_cb = initial_sum; // f64 is Copy
-        let operation_id_cb = operation_id; // i64 is Copy
+        let qc = cfg_clone.quote_currency.clone();
+        let symbol_cb = symbol_for_callback.clone();
+        let msg_id_cb = bot_message_id;
+        let chat_id_cb = chat_id;
+        let initial_sum_cb = initial_sum;
+        let operation_id_cb = operation_id;
 
         async move {
-            // Используем захваченные переменные (_cb)
             let symbol = symbol_cb;
             let filled_percent = if update.target_qty > ORDER_FILL_TOLERANCE {
                 (update.filled_qty / update.target_qty) * 100.0 } else { 0.0 };
@@ -148,21 +144,17 @@ where
     });
     // --- Конец колбэка прогресса ---
 
-    // Клонируем Arc<> для задачи
     let exchange_task = exchange.clone();
-    let cfg_task = cfg.clone(); // Этот клон будет использован внутри задачи
+    let cfg_task = cfg.clone();
 
     let task = tokio::spawn(async move {
-        // Перемещаются: params, progress_callback, current_spot...clone, total_filled...clone, operation_id, db_clone
-        // Также используются (захватываются): exchange_task, cfg_task, symbol_for_task_body, chat_id, bot_message_id, running_operations_clone, volatility_percent
-        // bot (оригинал) используется для edit_message_text в конце
         let result = hedger.run_hedge(
-            params, // Перемещается сюда
-            progress_callback, // Перемещается сюда
-            current_spot_order_id_storage_clone, // Перемещается сюда
-            total_filled_qty_storage_clone, // Перемещается сюда
-            operation_id, // Копируется (i64)
-            db_clone.as_ref(), // Заимствуется из Arc
+            params,
+            progress_callback,
+            current_spot_order_id_storage_clone,
+            total_filled_qty_storage_clone,
+            operation_id,
+            db_clone.as_ref(),
         ).await;
 
         let is_cancelled_by_button = result.is_err() && result.as_ref().err().map_or(false, |e| e.to_string().contains("cancelled by user"));
@@ -177,7 +169,6 @@ where
             Ok((spot_qty_gross, fut_qty_net, final_spot_value_gross)) => {
                 info!( "op_id:{}: Hedge OK. Spot Gross: {}, Fut Net: {}, Value: {:.2}", operation_id, spot_qty_gross, fut_qty_net, final_spot_value_gross );
                 tokio::time::sleep(Duration::from_millis(500)).await;
-                // <<<--- ИСПРАВЛЕНО: Используем exchange_task и symbol_for_task_body ---
                 let final_net_spot_balance = match exchange_task.get_balance(&symbol_for_task_body).await {
                     Ok(b) => { info!("op_id:{}: Fetched final spot balance: {}", operation_id, b.free); b.free },
                     Err(e) => {
@@ -190,8 +181,6 @@ where
                     operation_id, final_spot_value_gross, cfg_task.quote_currency, symbol_for_task_body,
                     volatility_percent, spot_qty_gross, final_net_spot_balance, fut_qty_net,
                 );
-                // ---
-                // Используем оригинальный `bot`, который не был перемещен в задачу
                 let _ = bot.edit_message_text(chat_id, bot_message_id, success_text)
                          .reply_markup(navigation::make_main_menu_keyboard())
                          .await;
@@ -202,7 +191,6 @@ where
                 } else {
                     error!("op_id:{}: Hedge execution failed: {}", operation_id, e);
                     let error_text = format!("❌ Ошибка хеджирования ID:{}: {}", operation_id, e);
-                     // Используем оригинальный `bot`
                      let _ = bot.edit_message_text(chat_id, bot_message_id, error_text)
                                 .reply_markup(navigation::make_main_menu_keyboard())
                                 .await;
@@ -211,17 +199,14 @@ where
         }
     });
 
-    // Сохраняем информацию о запущенной задаче
     let info = RunningOperationInfo {
         handle: task.abort_handle(),
         operation_id,
         operation_type: OperationType::Hedge,
-        // <<<--- ИСПРАВЛЕНО: Используем symbol_for_info ---
         symbol: symbol_for_info,
-        // ---
         bot_message_id: bot_message_id.0,
-        current_spot_order_id: current_spot_order_id_storage, // Перемещаем Arc
-        total_filled_spot_qty: total_filled_qty_storage, // Перемещаем Arc
+        current_spot_order_id: current_spot_order_id_storage,
+        total_filled_spot_qty: total_filled_qty_storage,
     };
     running_operations.lock().await.insert((chat_id, operation_id), info);
     info!("op_id:{}: Stored running hedge info.", operation_id);
@@ -249,7 +234,8 @@ where
 
     let mut previous_bot_message_id: Option<i32> = None;
     {
-        let mut state_guard = state_storage.write().expect("Lock failed");
+        // <<< ИСПРАВЛЕНО: .await >>>
+        let mut state_guard = state_storage.write().await;
         if let Some(old_state) = state_guard.get(&chat_id) {
             previous_bot_message_id = match old_state {
                 UserState::AwaitingHedgeAssetSelection { last_bot_message_id, .. } => *last_bot_message_id,
@@ -263,7 +249,7 @@ where
             info!("Resetting state for {} due to /hedge command", chat_id);
             state_guard.insert(chat_id, UserState::None);
         }
-    }
+    } // Блокировка state_guard освобождается здесь
     if let Some(bot_msg_id) = previous_bot_message_id {
         if let Err(e) = bot.delete_message(chat_id, MessageId(bot_msg_id)).await { warn!("Failed delete prev bot msg: {}", e); }
     }
@@ -276,12 +262,12 @@ where
         prompt_asset_selection(bot, chat_id, state_storage, exchange, cfg, db, None).await?;
     } else {
         info!("Processing /hedge command for chat_id: {}, symbol: {}", chat_id, symbol);
-        // TODO: Валидация символа
         let text = format!("Введите сумму {} для хеджирования {}:", cfg.quote_currency, symbol);
         let kb = make_dialog_keyboard();
         let bot_msg = bot.send_message(chat_id, text).reply_markup(kb).await?;
         {
-            let mut state_guard = state_storage.write().expect("Lock failed");
+             // <<< ИСПРАВЛЕНО: .await >>>
+            let mut state_guard = state_storage.write().await;
             state_guard.insert(chat_id, UserState::AwaitingHedgeSum {
                 symbol: symbol.clone(),
                 last_bot_message_id: Some(bot_msg.id.0),
@@ -304,7 +290,8 @@ pub async fn handle_start_hedge_callback<E>(
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
-    if let Some(msg) = q.message {
+    // Используем as_ref() и .id() / .chat()
+    if let Some(msg) = q.message.as_ref() {
         let chat_id = msg.chat().id;
         info!("Processing '{}' callback for chat_id: {}", callback_data::START_HEDGE, chat_id);
         bot.answer_callback_query(q.id).await?;
@@ -319,7 +306,7 @@ where
 
 /// Запрашивает у пользователя выбор актива для хеджирования
 async fn prompt_asset_selection<E>(
-    bot: Bot,
+    bot: Bot, // Принимаем по значению, так как передаем дальше
     chat_id: ChatId,
     state_storage: StateStorage,
     exchange: Arc<E>,
@@ -338,8 +325,10 @@ where
         let kb = InlineKeyboardMarkup::new(vec![vec![
              InlineKeyboardButton::callback("⬅️ Назад", callback_data::BACK_TO_MAIN)
         ]]);
+        // Принимает &Bot
         let _ = bot.edit_message_text(chat_id, msg_id, loading_text).reply_markup(kb).await;
     } else {
+         // Принимает &Bot
         let sent_msg = bot.send_message(chat_id, loading_text).await?;
         bot_message_id = Some(sent_msg.id);
     }
@@ -378,7 +367,8 @@ where
             }
 
             {
-                let mut state_guard = state_storage.write().expect("Lock failed");
+                // <<< ИСПРАВЛЕНО: .await >>>
+                let mut state_guard = state_storage.write().await;
                 state_guard.insert(chat_id, UserState::AwaitingHedgeAssetSelection {
                     last_bot_message_id: bot_message_id.map(|id| id.0),
                 });
@@ -396,7 +386,8 @@ where
              } else {
                  let _ = bot.send_message(chat_id, error_text).reply_markup(kb).await;
              }
-              { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); }
+              // <<< ИСПРАВЛЕНО: .await >>>
+              { state_storage.write().await.insert(chat_id, UserState::None); }
              return Err(e.into());
         }
     }
@@ -415,15 +406,17 @@ pub async fn handle_hedge_asset_callback<E>(
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
-    if let (Some(data), Some(msg)) = (q.data, q.message) {
+    // Используем as_ref() и .id() / .chat()
+    if let (Some(data), Some(msg)) = (q.data.as_deref(), q.message.as_ref()) {
         let chat_id = msg.chat().id;
         if let Some(symbol) = data.strip_prefix(callback_data::PREFIX_HEDGE_ASSET) {
              info!("User {} selected asset {} for hedge via callback", chat_id, symbol);
 
-            let is_correct_state = matches!(
-                state_storage.read().expect("Lock failed").get(&chat_id),
-                Some(UserState::AwaitingHedgeAssetSelection { .. })
-            );
+            let is_correct_state = {
+                // <<< ИСПРАВЛЕНО: .await >>>
+                 let state_guard = state_storage.read().await;
+                 matches!(state_guard.get(&chat_id), Some(UserState::AwaitingHedgeAssetSelection { .. }))
+            }; // Блокировка чтения освобождается здесь
 
             if is_correct_state {
                 let text = format!("Введите сумму {} для хеджирования {}:", cfg.quote_currency, symbol);
@@ -431,7 +424,8 @@ where
                 bot.edit_message_text(chat_id, msg.id(), text).reply_markup(kb).await?;
 
                 {
-                    let mut state_guard = state_storage.write().expect("Lock failed");
+                    // <<< ИСПРАВЛЕНО: .await >>>
+                    let mut state_guard = state_storage.write().await;
                     if let Some(current_state @ UserState::AwaitingHedgeAssetSelection { .. }) = state_guard.get_mut(&chat_id) {
                          *current_state = UserState::AwaitingHedgeSum {
                              symbol: symbol.to_string(),
@@ -442,10 +436,11 @@ where
                          warn!("State changed unexpectedly for {} before setting AwaitingHedgeSum", chat_id);
                          let _ = navigation::show_main_menu(&bot, chat_id, Some(msg.id())).await;
                     }
-                }
+                } // Блокировка записи освобождается здесь
             } else {
                  warn!("User {} clicked hedge asset button but was in wrong state", chat_id);
-                 { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); }
+                 // <<< ИСПРАВЛЕНО: .await >>>
+                 { state_storage.write().await.insert(chat_id, UserState::None); }
                  let _ = navigation::show_main_menu(&bot, chat_id, Some(msg.id())).await;
                  bot.answer_callback_query(q.id).text("Состояние изменилось, начните заново.").show_alert(true).await?;
                  return Ok(());
@@ -482,7 +477,8 @@ where
     }
 
     let previous_bot_message_id = {
-         let state_guard = state_storage.read().expect("Lock failed");
+         // <<< ИСПРАВЛЕНО: .await >>>
+         let state_guard = state_storage.read().await;
          match state_guard.get(&chat_id) {
             Some(UserState::AwaitingHedgeAssetSelection { last_bot_message_id }) => *last_bot_message_id,
             _ => {
@@ -490,14 +486,13 @@ where
                 return Ok(());
             }
          }
-    };
+    }; // Блокировка чтения освобождается здесь
 
     info!("User {} entered ticker '{}' for hedge", chat_id, text);
 
     if let Err(e) = bot.delete_message(chat_id, message_id).await { warn!("Failed to delete user ticker message: {}", e); }
 
-    // TODO: Валидация тикера
-    let is_valid_ticker = true; // Заглушка
+    let is_valid_ticker = true;
 
     if is_valid_ticker {
         let prompt_text = format!("Введите сумму {} для хеджирования {}:", cfg.quote_currency, text);
@@ -508,7 +503,8 @@ where
             match bot.edit_message_text(chat_id, bot_msg_id, prompt_text).reply_markup(kb).await {
                Ok(_) => {
                     {
-                        let mut state_guard = state_storage.write().expect("Lock failed");
+                        // <<< ИСПРАВЛЕНО: .await >>>
+                        let mut state_guard = state_storage.write().await;
                          if let Some(current_state @ UserState::AwaitingHedgeAssetSelection { .. }) = state_guard.get_mut(&chat_id) {
                              *current_state = UserState::AwaitingHedgeSum {
                                  symbol: text.clone(),
@@ -518,19 +514,21 @@ where
                         } else {
                              warn!("State changed for {} before setting AwaitingHedgeSum after ticker input", chat_id);
                         }
-                    }
+                    } // Блокировка записи освобождается здесь
                 }
                 Err(e) => {
                     error!("Failed to edit message {} to prompt sum: {}", bot_msg_id, e);
                     let _ = navigation::show_main_menu(&bot, chat_id, None).await;
-                    { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); }
+                     // <<< ИСПРАВЛЕНО: .await >>>
+                    { state_storage.write().await.insert(chat_id, UserState::None); }
                 }
             }
         } else {
              warn!("No previous bot message id found for chat_id {} to edit for sum prompt", chat_id);
              let bot_msg = bot.send_message(chat_id, prompt_text).reply_markup(kb).await?;
               {
-                 let mut state_guard = state_storage.write().expect("Lock failed");
+                 // <<< ИСПРАВЛЕНО: .await >>>
+                 let mut state_guard = state_storage.write().await;
                 state_guard.insert(chat_id, UserState::AwaitingHedgeSum {
                      symbol: text.clone(),
                      last_bot_message_id: Some(bot_msg.id.0),
@@ -562,7 +560,8 @@ pub async fn handle_sum_input(
     let text = msg.text().unwrap_or("").trim();
 
     let (symbol, previous_bot_message_id) = {
-        let state_guard = state_storage.read().expect("Lock failed");
+        // <<< ИСПРАВЛЕНО: .await >>>
+        let state_guard = state_storage.read().await;
         match state_guard.get(&chat_id) {
             Some(UserState::AwaitingHedgeSum { symbol, last_bot_message_id }) => (symbol.clone(), *last_bot_message_id),
             _ => {
@@ -570,7 +569,7 @@ pub async fn handle_sum_input(
                 return Ok(());
             }
         }
-    };
+    }; // Блокировка чтения освобождается здесь
 
      if let Err(e) = bot.delete_message(chat_id, message_id).await { warn!("Failed to delete user sum message: {}", e); }
 
@@ -585,7 +584,8 @@ pub async fn handle_sum_input(
                  match bot.edit_message_text(chat_id, bot_msg_id, prompt_text).reply_markup(kb).await {
                     Ok(_) => {
                          {
-                             let mut state_guard = state_storage.write().expect("Lock failed");
+                            // <<< ИСПРАВЛЕНО: .await >>>
+                             let mut state_guard = state_storage.write().await;
                               if let Some(current_state @ UserState::AwaitingHedgeSum { .. }) = state_guard.get_mut(&chat_id) {
                                   *current_state = UserState::AwaitingHedgeVolatility {
                                       symbol: symbol.clone(),
@@ -596,26 +596,28 @@ pub async fn handle_sum_input(
                              } else {
                                  warn!("State changed for {} before setting AwaitingHedgeVolatility", chat_id);
                              }
-                         }
+                         } // Блокировка записи освобождается здесь
                     }
                     Err(e) => {
                          error!("Failed to edit message {} to prompt volatility: {}", bot_msg_id, e);
                          let _ = navigation::show_main_menu(&bot, chat_id, None).await;
-                         { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); }
+                         // <<< ИСПРАВЛЕНО: .await >>>
+                         { state_storage.write().await.insert(chat_id, UserState::None); }
                     }
                  }
              } else {
-                  warn!("No previous bot message id found for chat_id {} to edit for volatility prompt", chat_id);
-                  let bot_msg = bot.send_message(chat_id, prompt_text).reply_markup(kb).await?;
-                   {
-                      let mut state_guard = state_storage.write().expect("Lock failed");
-                      state_guard.insert(chat_id, UserState::AwaitingHedgeVolatility {
-                          symbol: symbol.clone(),
-                          sum,
-                          last_bot_message_id: Some(bot_msg.id.0),
-                     });
-                       info!("User state for {} set to AwaitingHedgeVolatility", chat_id);
-                   }
+                 warn!("No previous bot message id found for chat_id {} to edit for volatility prompt", chat_id);
+                 let bot_msg = bot.send_message(chat_id, prompt_text).reply_markup(kb).await?;
+                  {
+                     // <<< ИСПРАВЛЕНО: .await >>>
+                     let mut state_guard = state_storage.write().await;
+                     state_guard.insert(chat_id, UserState::AwaitingHedgeVolatility {
+                         symbol: symbol.clone(),
+                         sum,
+                         last_bot_message_id: Some(bot_msg.id.0),
+                    });
+                      info!("User state for {} set to AwaitingHedgeVolatility", chat_id);
+                  }
              }
          }
          Ok(_) => {
@@ -654,7 +656,8 @@ where
     let text = msg.text().unwrap_or("").trim();
 
     let (symbol, sum, previous_bot_message_id) = {
-        let state_guard = state_storage.read().expect("Lock failed");
+         // <<< ИСПРАВЛЕНО: .await >>>
+        let state_guard = state_storage.read().await;
         match state_guard.get(&chat_id) {
             Some(UserState::AwaitingHedgeVolatility { symbol, sum, last_bot_message_id }) => (symbol.clone(), *sum, *last_bot_message_id),
             _ => {
@@ -662,7 +665,7 @@ where
                 return Ok(());
             }
         }
-    };
+    }; // Блокировка чтения освобождается здесь
 
      if let Err(e) = bot.delete_message(chat_id, message_id).await { warn!("Failed to delete user volatility message: {}", e); }
 
@@ -707,7 +710,8 @@ where
                     bot.edit_message_text(chat_id, bot_msg_id, confirmation_text).reply_markup(kb).await?;
 
                     {
-                        let mut state_guard = state_storage.write().expect("Lock failed");
+                         // <<< ИСПРАВЛЕНО: .await >>>
+                        let mut state_guard = state_storage.write().await;
                         if let Some(current_state @ UserState::AwaitingHedgeVolatility { .. }) = state_guard.get_mut(&chat_id) {
                             *current_state = UserState::AwaitingHedgeConfirmation {
                                 symbol: symbol.clone(),
@@ -719,7 +723,7 @@ where
                        } else {
                             warn!("State changed for {} before setting AwaitingHedgeConfirmation", chat_id);
                        }
-                    }
+                    } // Блокировка записи освобождается здесь
                 }
                 Err(e) => {
                     error!("Hedge parameter calculation failed for {}: {}", chat_id, e);
@@ -752,7 +756,7 @@ where
 /// Обработчик колбэка подтверждения хеджа (кнопки yes/no с префиксом h_conf_)
 pub async fn handle_hedge_confirm_callback<E>(
     bot: Bot,
-    q: CallbackQuery, // q - будет перемещена только если payload == "yes" и нужно сообщение
+    q: CallbackQuery,
     exchange: Arc<E>,
     state_storage: StateStorage,
     running_operations: RunningOperations,
@@ -762,39 +766,38 @@ pub async fn handle_hedge_confirm_callback<E>(
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
-    let query_id = q.id.clone(); // Клонируем ID
+    let query_id = q.id.clone();
 
-    // Используем q.message.as_ref() чтобы получить ссылку без перемещения
     if let Some(msg_ref) = q.message.as_ref() {
         let chat_id = msg_ref.chat().id;
-        let message_id = msg_ref.id(); // ID сообщения для редактирования при отмене
+        let message_id = msg_ref.id();
 
         if let Some(data) = q.data.as_deref() {
             if let Some(payload) = data.strip_prefix(callback_data::PREFIX_HEDGE_CONFIRM) {
                 if payload == "yes" {
-                    // --- Ветка "Да" ---
-                    // q.message перемещается ТОЛЬКО здесь, если нужно
-                    if let Some(msg) = q.message {
-                        // let chat_id = msg.chat().id; // chat_id уже есть
+                    if let Some(msg) = q.message { // q.message перемещается здесь
                         info!("User {} confirmed hedge operation", chat_id);
 
                         let (symbol, sum, volatility_fraction) = {
-                            let state_guard = state_storage.read().expect("Lock failed");
+                            // <<< ИСПРАВЛЕНО: .await >>>
+                            let state_guard = state_storage.read().await;
                             match state_guard.get(&chat_id) {
                                 Some(UserState::AwaitingHedgeConfirmation { symbol, sum, volatility, .. }) => (symbol.clone(), *sum, *volatility),
                                 _ => {
                                     warn!("User {} confirmed hedge but was in wrong state", chat_id);
                                     bot.answer_callback_query(query_id).text("Состояние изменилось, начните заново.").show_alert(true).await?;
-                                    let _ = navigation::show_main_menu(&bot, chat_id, Some(message_id)).await; // Используем message_id
-                                    { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); }
+                                    let _ = navigation::show_main_menu(&bot, chat_id, Some(message_id)).await;
+                                     // <<< ИСПРАВЛЕНО: .await >>>
+                                    { state_storage.write().await.insert(chat_id, UserState::None); }
                                     return Ok(());
                                 }
                             }
-                        };
-                        { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); }
+                        }; // Блокировка чтения освобождается здесь
+                         // <<< ИСПРАВЛЕНО: .await >>>
+                        { state_storage.write().await.insert(chat_id, UserState::None); }
 
                         let waiting_text = format!("⏳ Запуск хеджирования для {}...", symbol);
-                        bot.edit_message_text(chat_id, message_id, waiting_text) // Используем message_id
+                        bot.edit_message_text(chat_id, message_id, waiting_text)
                            .reply_markup(InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new()))
                            .await?;
 
@@ -807,65 +810,57 @@ where
                                 spawn_hedge_task(
                                     bot.clone(), exchange.clone(), cfg.clone(), db.clone(),
                                     running_operations.clone(), chat_id, params, sum,
-                                    volatility_fraction * 100.0, msg, // msg перемещается сюда
+                                    volatility_fraction * 100.0, msg,
                                 ).await;
-                                // Не отвечаем на query_id здесь, т.к. задача запущена
                             }
                             Err(e) => {
                                 error!("Hedge parameter calculation failed just before execution for {}: {}", chat_id, e);
                                 let error_text = format!("❌ Ошибка расчета параметров перед запуском: {}\nПопробуйте снова.", e);
-                                let _ = bot.edit_message_text(chat_id, message_id, error_text) // Используем message_id
+                                let _ = bot.edit_message_text(chat_id, message_id, error_text)
                                          .reply_markup(navigation::make_main_menu_keyboard())
                                          .await;
-                                // Отвечаем на query_id при ошибке
                                 bot.answer_callback_query(query_id).await?;
                                 return Ok(());
                             }
                         }
                     } else {
                         warn!("CallbackQuery missing message on 'yes' confirmation for {}", query_id);
-                        // Отвечаем на query_id, т.к. произошла ошибка
                         bot.answer_callback_query(query_id).await?;
                         return Ok(());
                     }
 
                 } else if payload == "no" {
-                    // --- Ветка "Нет" (используем новые параметры) ---
                     info!("User {} cancelled hedge at confirmation", chat_id);
-                    bot.answer_callback_query(query_id).await?; // <<< Отвечаем ДО вызова
-                    // bot ПЕРЕМЕЩАЕТСЯ сюда
+                    bot.answer_callback_query(query_id).await?;
                     navigation::handle_cancel_dialog(bot, chat_id, message_id, state_storage).await?;
-                    return Ok(()); // Выходим
+                    return Ok(());
 
                 } else {
                     warn!("Invalid payload for hedge confirmation callback: {}", payload);
-                    bot.answer_callback_query(query_id).await?; // Отвечаем на некорректный payload
-                    return Ok(()); // Выходим
+                    bot.answer_callback_query(query_id).await?;
+                    return Ok(());
                 }
             } else if data == callback_data::CANCEL_DIALOG {
-                 // --- Ветка Отмена (используем новые параметры) ---
                 info!("User cancelled hedge dialog via cancel button");
-                bot.answer_callback_query(query_id).await?; // <<< Отвечаем ДО вызова
-                 // bot ПЕРЕМЕЩАЕТСЯ сюда
+                bot.answer_callback_query(query_id).await?;
                 navigation::handle_cancel_dialog(bot, chat_id, message_id, state_storage).await?;
-                return Ok(()); // Выходим
+                return Ok(());
             }
              else {
                  warn!("Invalid callback data format for hedge confirmation prefix: {}", data);
-                 bot.answer_callback_query(query_id).await?; // Отвечаем на некорректный формат
-                 return Ok(()); // Выходим
+                 bot.answer_callback_query(query_id).await?;
+                 return Ok(());
             }
         } else {
             warn!("CallbackQuery missing data in handle_hedge_confirm_callback");
-            bot.answer_callback_query(query_id).await?; // Отвечаем
-            return Ok(()); // Выходим
+            bot.answer_callback_query(query_id).await?;
+            return Ok(());
         }
     } else {
          warn!("CallbackQuery missing message in handle_hedge_confirm_callback");
-         bot.answer_callback_query(query_id).await?; // Отвечаем
-         return Ok(()); // Выходим
+         bot.answer_callback_query(query_id).await?;
+         return Ok(());
     }
-     // Сюда не должны доходить, если все ветки обработаны
     Ok(())
 }
 
