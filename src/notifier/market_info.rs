@@ -140,12 +140,12 @@ where
     E: Exchange + Clone + Send + Sync + 'static,
 {
     if let Some(msg) = q.message {
-        let chat_id = msg.chat.id;
+        let chat_id = msg.chat().id;
         info!("Processing '{}' callback for chat_id: {}", callback_data::MENU_INFO, chat_id);
 
         let text = "📊 Информация:";
         let kb = make_info_menu_keyboard();
-        bot.edit_message_text(chat_id, msg.id, text).reply_markup(kb).await?;
+        bot.edit_message_text(chat_id, msg.id(), text).reply_markup(kb).await?;
 
     } else {
         warn!("CallbackQuery missing message in handle_menu_info_callback");
@@ -218,7 +218,7 @@ pub async fn handle_show_funding_callback(
         // Устанавливаем состояние ожидания ввода символа
         {
             let mut state_guard = state_storage.write().expect("Lock failed");
-            state_guard.insert(chat_id, UserState::AwaitingFundingSymbolInput { last_bot_message_id: Some(msg.id.0) });
+            state_guard.insert(chat_id, UserState::AwaitingFundingSymbolInput { last_bot_message_id: Some(msg.id().0) });
             info!("User state for {} set to AwaitingFundingSymbolInput", chat_id);
         }
 
