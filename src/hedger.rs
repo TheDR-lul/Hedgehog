@@ -322,8 +322,10 @@ where
         let mut cumulative_filled_qty = 0.0;
         let mut current_order_target_qty = initial_spot_qty;
         let mut qty_filled_in_current_order = 0.0;
+        // Инициализируем как None
         let mut current_spot_order_id: Option<String> = None;
 
+        // Вспомогательная функция для обновления ID в хранилище и БД
         let update_current_order_id_local = |id: Option<String>| {
              let storage_clone = Arc::clone(&current_order_id_storage);
              let filled_storage_clone = Arc::clone(&total_filled_qty_storage);
@@ -332,10 +334,13 @@ where
                  let id_clone_for_storage = id.clone();
                  let id_clone_for_db = id.clone();
                  let filled_qty_for_db = *filled_storage_clone.lock().await;
+                 // Обновляем общее хранилище
                  *storage_clone.lock().await = id_clone_for_storage;
+                 // Обновляем БД
                  if let Err(e) = update_hedge_spot_order(&db_clone, operation_id, id_clone_for_db.as_deref(), filled_qty_for_db).await {
                      error!("op_id:{}: Failed to update spot order info in DB: {}", operation_id, e);
                  }
+                 // Возвращаем ID для присваивания локальной переменной
                  id
              }
         };
@@ -352,9 +357,12 @@ where
             }
         };
         info!("op_id:{}: Placed initial spot limit order: id={}", operation_id, spot_order.id);
-        // --- ИСПРАВЛЕНИЕ: Unused assignment ---
-        _ = update_current_order_id_local(Some(spot_order.id.clone())).await;
+
+        // --- ИСПРАВЛЕНИЕ: Присваиваем ID локальной переменной ---
+        // Вызываем вспомогательную функцию и присваиваем результат локальной переменной
+        current_spot_order_id = update_current_order_id_local(Some(spot_order.id.clone())).await;
         // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+
         *total_filled_qty_storage.lock().await = 0.0;
 
         let mut start = Instant::now();
@@ -373,6 +381,7 @@ where
                 let order_id_to_check = match id_to_check_opt {
                     Some(id) => id,
                     None => {
+                         // Этот блок теперь не должен срабатывать сразу после размещения ордера
                          if cumulative_filled_qty < initial_spot_qty - ORDER_FILL_TOLERANCE && now.duration_since(start) > Duration::from_secs(2) {
                              warn!("op_id:{}: No active order ID, but target not reached. Aborting hedge.", operation_id);
                              return Err(anyhow!("No active spot order, but target not reached after fill/cancellation."));
@@ -399,9 +408,8 @@ where
                              cumulative_filled_qty = cumulative_filled_qty.min(initial_spot_qty);
 
                              *total_filled_qty_storage.lock().await = cumulative_filled_qty;
-                             // Присваивание None здесь теперь должно быть безопасно
-                             current_spot_order_id = None;
-                             _ = update_current_order_id_local(None).await; // Обновляем хранилище
+                             current_spot_order_id = None; // Безопасно
+                             _ = update_current_order_id_local(None).await;
 
                              if let Err(db_err) = update_hedge_spot_order(db, operation_id, None, cumulative_filled_qty).await {
                                  error!("op_id:{}: Failed to update spot filled qty in DB after order not found: {}", operation_id, db_err);
@@ -431,7 +439,6 @@ where
                     cumulative_filled_qty += filled_since_last_check;
                     cumulative_filled_qty = cumulative_filled_qty.max(0.0).min(initial_spot_qty * 1.00001);
                     *total_filled_qty_storage.lock().await = cumulative_filled_qty;
-                    // Обновляем БД с текущим ID (если он есть)
                     if let Err(e) = update_hedge_spot_order(db, operation_id, current_spot_order_id.as_deref(), cumulative_filled_qty).await {
                         error!("op_id:{}: Failed to update spot filled qty in DB: {}", operation_id, e);
                     }
@@ -449,8 +456,7 @@ where
                               error!("op_id:{}: Failed to update final spot filled qty in DB: {}", operation_id, e);
                           }
                     }
-                    // Присваивание None здесь теперь должно быть безопасно
-                    current_spot_order_id = None;
+                    current_spot_order_id = None; // Безопасно
                     _ = update_current_order_id_local(None).await;
                     break Ok(());
                 }
@@ -470,10 +476,6 @@ where
                         operation_id, order_id_to_check, qty_filled_in_current_order, current_order_target_qty, self.max_wait
                     );
 
-                    // --- ИСПРАВЛЕНИЕ: Удалено неиспользуемое вычисление ---
-                    // let remaining_total_qty = initial_spot_qty - cumulative_filled_qty; // <-- Удалено
-                    // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
-
                     tokio::task::yield_now().await;
                     if let Err(e) = self.exchange.cancel_order(&symbol, &order_id_to_check).await {
                         warn!("op_id:{}: Attempt to cancel order {} failed or was ignored (may be inactive): {}", operation_id, order_id_to_check, e);
@@ -483,8 +485,7 @@ where
                         sleep(Duration::from_millis(500)).await;
                     }
 
-                    // Присваивание None здесь теперь должно быть безопасно
-                    current_spot_order_id = None;
+                    current_spot_order_id = None; // Безопасно
                     _ = update_current_order_id_local(None).await;
                     qty_filled_in_current_order = 0.0;
 
@@ -527,7 +528,6 @@ where
                          break Ok(());
                      }
 
-                    // Пересчитываем остаток ЗДЕСЬ, перед размещением нового ордера
                     let remaining_total_qty = initial_spot_qty - cumulative_filled_qty;
                     if remaining_total_qty <= ORDER_FILL_TOLERANCE {
                          info!("op_id:{}: Remaining total quantity is negligible after cancellation process. Exiting loop.", operation_id);
@@ -561,11 +561,8 @@ where
                         }
                     };
                     info!("op_id:{}: Placed replacement spot limit order: id={}", operation_id, new_spot_order.id);
-                    // --- ИСПРАВЛЕНИЕ: Unused assignment ---
-                    _ = update_current_order_id_local(Some(new_spot_order.id.clone())).await;
-                     // Обновляем локальную переменную для следующей итерации
-                    current_spot_order_id = Some(new_spot_order.id.clone());
-                    // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+                    // Присваиваем ID и локальной переменной, и обновляем хранилище
+                    current_spot_order_id = update_current_order_id_local(Some(new_spot_order.id.clone())).await;
                     start = now;
                 }
 
@@ -643,7 +640,7 @@ where
         original_op: HedgeOperation,
         db: &Db,
     ) -> Result<(f64, f64)> {
-
+        // (Без изменений по сравнению с предыдущей версией)
         let symbol = original_op.base_symbol.clone();
         let original_hedge_op_id = original_op.id;
         let futures_buy_qty = original_op.target_futures_qty;
@@ -655,9 +652,8 @@ where
 
         let mut cumulative_filled_qty = 0.0;
         let mut qty_filled_in_current_order = 0.0;
-        let mut current_spot_order_id: Option<String> = None; // Отслеживаем текущий ID
+        let mut current_spot_order_id: Option<String> = None;
 
-        // --- ПРОВЕРКА БАЛАНСА ---
         let spot_sell_qty = match self.exchange.get_balance(&symbol).await {
              Ok(balance) => {
                  info!("op_id={}: Checked available balance {} for {}", original_hedge_op_id, balance.free, symbol);
@@ -674,7 +670,6 @@ where
              }
         };
 
-        // --- ПОЛУЧАЕМ MIN_ORDER_QTY ---
         let spot_info = self.exchange.get_spot_instrument_info(&symbol).await
             .map_err(|e| anyhow!("op_id={}: Failed to get SPOT instrument info for {}: {}", original_hedge_op_id, symbol, e))?;
         let min_spot_qty_decimal = Decimal::from_str(&spot_info.lot_size_filter.min_order_qty)
@@ -684,7 +679,6 @@ where
         let initial_order_target_qty = spot_sell_qty;
         info!("op_id={}: Proceeding unhedge with actual spot sell quantity target: {}", original_hedge_op_id, initial_order_target_qty);
 
-        // --- Получаем начальную цену ---
         let mut current_spot_price = match self.exchange.get_spot_price(&symbol).await {
              Ok(p) if p > 0.0 => p,
              Ok(p) => {
@@ -700,7 +694,6 @@ where
         let mut limit_price = current_spot_price * (1.0 + self.slippage);
         info!("op_id={}: Initial spot price: {}, placing limit sell at {} for qty {}", original_hedge_op_id, current_spot_price, limit_price, initial_order_target_qty);
 
-        // --- Размещаем ПЕРВЫЙ ордер ---
         let spot_order = match self
             .exchange
             .place_limit_order(&symbol, OrderSide::Sell, initial_order_target_qty, limit_price)
@@ -719,25 +712,19 @@ where
         };
 
         info!("op_id={}: Placed initial spot limit order: id={}", original_hedge_op_id, spot_order.id);
-        current_spot_order_id = Some(spot_order.id.clone()); // Устанавливаем начальный ID
+        current_spot_order_id = Some(spot_order.id.clone());
         let mut current_order_target_qty = initial_order_target_qty;
         let mut start = Instant::now();
 
-        // --- Основной цикл управления спот-ордером на продажу ---
         let unhedge_loop_result: Result<()> = async {
             loop {
                 sleep(Duration::from_secs(1)).await;
                 let now = Instant::now();
 
-                // --- ИСПРАВЛЕНИЕ: Заимствование ---
-                // Клонируем Option<String> перед match
                 let id_to_check_opt = current_spot_order_id.clone();
-
-                // Получаем owned String для проверок в этой итерации
                 let order_id_to_check = match id_to_check_opt {
-                    Some(id) => id, // Теперь это owned String
+                    Some(id) => id,
                     None => {
-                        // Логика обработки отсутствия активного ордера
                         if cumulative_filled_qty >= spot_sell_qty - ORDER_FILL_TOLERANCE {
                             info!("op_id={}: No active unhedge order and target sell qty reached. Exiting loop.", original_hedge_op_id);
                             break Ok(());
@@ -746,31 +733,22 @@ where
                             return Err(anyhow!("No active spot order, but target sell qty not reached after fill/cancellation."));
                         }
                         debug!("op_id={}: No active order ID, continuing wait.", original_hedge_op_id);
-                        continue; // Продолжаем цикл ожидания
+                        continue;
                     }
                 };
-                // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
-
-                 // Используем order_id_to_check (копию) для запроса статуса
                  let status_result = self.exchange.get_order_status(&symbol, &order_id_to_check).await;
 
                  let status: OrderStatus = match status_result {
                     Ok(s) => s,
                     Err(e) => {
-                        // Обработка "Order not found"
                         if e.to_string().contains("Order not found") && now.duration_since(start) > Duration::from_secs(5) {
                             warn!("op_id={}: Unhedge order {} not found after delay, assuming it filled/cancelled for its target qty {}. Continuing...", original_hedge_op_id, order_id_to_check, current_order_target_qty);
                             let assumed_filled_in_this_order = current_order_target_qty;
                             cumulative_filled_qty += assumed_filled_in_this_order;
                             cumulative_filled_qty = cumulative_filled_qty.min(spot_sell_qty);
-
-                            // --- ИСПРАВЛЕНИЕ: Заимствование ---
-                            // Теперь можно безопасно присваивать None
                             current_spot_order_id = None;
-                            // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
                             qty_filled_in_current_order = 0.0;
-
                             if cumulative_filled_qty >= spot_sell_qty - ORDER_FILL_TOLERANCE {
                                 info!("op_id={}: Total filled spot quantity {} meets target {} after unhedge order not found assumption. Exiting loop.", original_hedge_op_id, cumulative_filled_qty, spot_sell_qty);
                                 break Ok(());
@@ -796,7 +774,6 @@ where
                     debug!("op_id={}: Unhedge fill update. Filled in current: {:.8}, Cumulative: {:.8}", original_hedge_op_id, qty_filled_in_current_order, cumulative_filled_qty);
                 }
 
-                // Проверка исполнения по remaining_qty
                 if status.remaining_qty <= ORDER_FILL_TOLERANCE {
                      info!("op_id={}: Unhedge spot order {} considered filled by exchange (remaining_qty: {}, current order filled: {}, total cumulative: {}). Exiting loop.",
                             original_hedge_op_id, order_id_to_check, status.remaining_qty, status.filled_qty, cumulative_filled_qty);
@@ -804,22 +781,15 @@ where
                          warn!("op_id={}: Unhedge: Filled qty {:.8} slightly exceeds target {}. Using target.", original_hedge_op_id, cumulative_filled_qty, spot_sell_qty);
                          cumulative_filled_qty = spot_sell_qty;
                      }
-                     // --- ИСПРАВЛЕНИЕ: Заимствование ---
-                     // Теперь можно безопасно присваивать None
                      current_spot_order_id = None;
-                     // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
                      break Ok(());
                 }
 
-
-                // --- Логика перестановки ордера ---
                 if start.elapsed() > self.max_wait && status.remaining_qty > ORDER_FILL_TOLERANCE {
                     warn!("op_id={}: Unhedge spot order {} partially filled ({}/{}) or not filled within {:?}. Replacing...",
                           original_hedge_op_id, order_id_to_check, qty_filled_in_current_order, current_order_target_qty, self.max_wait);
 
                     let remaining_total_qty = spot_sell_qty - cumulative_filled_qty;
-
-                    // Проверка на пыль
                     let remaining_total_qty_decimal = Decimal::from_f64(remaining_total_qty)
                         .unwrap_or_else(|| Decimal::ZERO);
 
@@ -828,7 +798,6 @@ where
                             "op_id={}: Remaining qty {:.8} is less than min order qty {}. IGNORING DUST and finishing spot sell.",
                             original_hedge_op_id, remaining_total_qty, min_spot_qty_decimal
                         );
-                        // Используем order_id_to_check (копию ID) для отмены
                          info!("op_id={}: Cancelling order {} before ignoring dust.", original_hedge_op_id, order_id_to_check);
                          if let Err(e) = self.exchange.cancel_order(&symbol, &order_id_to_check).await {
                              warn!("op_id={}: Cancellation failed for order {} (likely inactive): {}", original_hedge_op_id, order_id_to_check, e);
@@ -836,13 +805,9 @@ where
                              info!("op_id={}: Cancel request sent for order {} before ignoring dust.", original_hedge_op_id, order_id_to_check);
                              sleep(Duration::from_millis(500)).await;
                          }
-                         // --- ИСПРАВЛЕНИЕ: Заимствование ---
-                         // Теперь можно безопасно присваивать None
                          current_spot_order_id = None;
-                         // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
                          qty_filled_in_current_order = 0.0;
 
-                         // Проверяем статус после отмены на случай исполнений
                          match self.exchange.get_order_status(&symbol, &order_id_to_check).await {
                             Ok(final_status) => {
                                 let filled_after_cancel = final_status.filled_qty - previously_filled_in_current;
@@ -855,13 +820,9 @@ where
                             Err(e) => warn!("op_id:{}: Failed to get final status for {} after cancel: {}", original_hedge_op_id, order_id_to_check, e),
                          }
 
-                         break Ok(()); // Выходим из цикла, пыль проигнорирована
+                         break Ok(());
                     }
-                    // --- Конец проверки на пыль ---
 
-
-                    // Если остаток достаточно большой...
-                    // Отменяем старый ордер (используем order_id_to_check)
                      info!("op_id={}: Cancelling order {} to replace it.", original_hedge_op_id, order_id_to_check);
                      if let Err(e) = self.exchange.cancel_order(&symbol, &order_id_to_check).await {
                          warn!("op_id={}: Cancellation failed for order {} (likely inactive): {}", original_hedge_op_id, order_id_to_check, e);
@@ -870,13 +831,9 @@ where
                          info!("op_id={}: Successfully sent cancel request for unhedge order {}", original_hedge_op_id, order_id_to_check);
                          sleep(Duration::from_millis(500)).await;
                      }
-                     // --- ИСПРАВЛЕНИЕ: Заимствование ---
-                     // Теперь можно безопасно присваивать None
                      current_spot_order_id = None;
-                     // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
                      qty_filled_in_current_order = 0.0;
 
-                     // Проверяем статус после отмены
                      match self.exchange.get_order_status(&symbol, &order_id_to_check).await {
                          Ok(final_status) => {
                              let filled_after_cancel = final_status.filled_qty - previously_filled_in_current;
@@ -895,14 +852,12 @@ where
                          Err(e) => { warn!("op_id:{}: Failed to get unhedge order status after cancel request: {}", original_hedge_op_id, e); }
                      }
 
-
                     let remaining_total_qty = spot_sell_qty - cumulative_filled_qty;
                     if remaining_total_qty <= ORDER_FILL_TOLERANCE {
                         info!("op_id={}: Total filled quantity {} meets target {} during replacement process. Exiting loop.", original_hedge_op_id, cumulative_filled_qty, spot_sell_qty);
                         break Ok(());
                     }
 
-                    // Получаем новую цену
                     current_spot_price = match self.exchange.get_spot_price(&symbol).await {
                          Ok(p) if p > 0.0 => p,
                          Ok(p) => {
@@ -918,7 +873,6 @@ where
                     limit_price = current_spot_price * (1.0 + self.slippage);
                     current_order_target_qty = remaining_total_qty;
 
-                    // Ставим новый ордер
                     info!("op_id={}: New spot price: {}, placing new limit sell at {} for remaining qty {}", original_hedge_op_id, current_spot_price, limit_price, current_order_target_qty);
                     let new_spot_order = match self
                         .exchange
@@ -933,18 +887,13 @@ where
                     };
 
                     info!("op_id={}: Placed replacement spot limit order: id={}", original_hedge_op_id, new_spot_order.id);
-                    // --- ИСПРАВЛЕНИЕ: Заимствование ---
-                    // Теперь можно безопасно присваивать Some(...)
                     current_spot_order_id = Some(new_spot_order.id.clone());
-                    // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
                     start = Instant::now();
-                } // --- Конец блока замены ордера ---
+                }
+            }
+        }.await;
 
-            } // Конец цикла loop
-        }.await; // Конец async блока unhedge_loop_result
 
-
-        // --- Обработка результата цикла продажи спота ---
         if let Err(loop_err) = unhedge_loop_result {
             error!("op_id={}: Unhedge spot sell loop failed: {}", original_hedge_op_id, loop_err);
             return Err(loop_err);
@@ -958,7 +907,6 @@ where
         }
 
 
-        // --- Покупаем фьючерс ---
         let futures_symbol = format!("{}{}", symbol, self.quote_currency);
         info!(
             "op_id={}: Placing market buy order on futures ({}) for original hedge net quantity {}",
@@ -973,7 +921,7 @@ where
             Ok(fut_order) => {
                 info!("op_id={}: Placed futures market order: id={}", original_hedge_op_id, fut_order.id);
                 info!("op_id={}: Unhedge completed successfully for original hedge op_id={}. Total spot sold: {:.8}, Futures bought back: {:.8}",
-                       original_hedge_op_id, original_hedge_op_id, final_spot_sold_qty, futures_buy_qty); // Передаем 4 аргумента
+                       original_hedge_op_id, original_hedge_op_id, final_spot_sold_qty, futures_buy_qty);
 
                 if let Err(e) = mark_hedge_as_unhedged(db, original_hedge_op_id).await {
                     error!("op_id={}: Failed to mark hedge operation {} as unhedged in DB: {}", original_hedge_op_id, original_hedge_op_id, e);
@@ -987,5 +935,5 @@ where
                 Err(anyhow!("Failed to place futures order after spot sell: {}", e))
             }
         }
-    } // Конец run_unhedge
-} // Конец impl Hedger
+    }
+}
