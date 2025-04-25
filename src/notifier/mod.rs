@@ -74,7 +74,6 @@ pub struct RunningOperationInfo {
     pub operation_type: OperationType,
     pub symbol: String,
     pub bot_message_id: i32,
-    pub current_spot_order_id: Arc<TokioMutex<Option<String>>>,
     pub total_filled_spot_qty: Arc<TokioMutex<f64>>,
 }
 

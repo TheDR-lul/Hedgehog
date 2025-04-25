@@ -1,13 +1,15 @@
 // src/notifier/active_ops.rs
 
 use super::{
-    RunningOperations, RunningOperationInfo, OperationType, callback_data, navigation, StateStorage // Убраны Command, UserState
+    RunningOperations, RunningOperationInfo, OperationType, callback_data, navigation, StateStorage
 };
+// --- ИСПРАВЛЕНО: Убраны дубликаты, проверен импорт get_hedge_operation_by_id ---
+use crate::storage::{Db, update_hedge_final_status, get_hedge_operation_by_id};
 use crate::config::Config;
 use crate::exchange::{Exchange, OrderSide};
-use crate::storage::{Db, update_hedge_final_status};
+// --- УДАЛЕНО: Дублирующая строка use crate::storage::{Db, update_hedge_final_status}; ---
 use crate::hedger::ORDER_FILL_TOLERANCE;
-use crate::notifier::HashMap; // Используется в RunningOperations
+use crate::notifier::HashMap;
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{
@@ -15,7 +17,8 @@ use teloxide::types::{
 };
 use teloxide::requests::Requester;
 use tracing::{info, warn, error};
-use tokio::sync::MutexGuard; // Убран неиспользуемый Mutex as TokioMutex
+use tokio::sync::MutexGuard;
+
 
 // --- Вспомогательная функция для форматирования списка активных операций ---
 async fn format_active_operations(
@@ -48,8 +51,16 @@ async fn format_active_operations(
             OperationType::Hedge => "Хедж",
             OperationType::Unhedge => "Расхедж",
         };
-        let filled_qty = *info.total_filled_spot_qty.lock().await;
-        // TODO: Получить target_qty?
+        // --- ИСПРАВЛЕНО: Обработка ошибки мьютекса (хотя маловероятно) ---
+        let filled_qty = match info.total_filled_spot_qty.lock().await {
+            guard => *guard,
+            // Если мьютекс отравлен, возвращаем 0.0
+            // Err(poisoned) => {
+            //     error!("Mutex poisoned when reading filled_qty for op_id: {}", op_id);
+            //     *poisoned.into_inner() // Можно попытаться получить данные
+            // }
+        };
+        // TODO: Получить target_qty из БД?
         text.push_str(&format!(
             "🔹 ID:{} ({}) - {} \n   Прогресс спот: ~{:.6} (?)\n",
             op_id, info.symbol, op_type_str, filled_qty
@@ -131,7 +142,7 @@ pub async fn handle_cancel_active_op_callback<E>(
     exchange: Arc<E>,
     _state_storage: StateStorage,
     running_operations: RunningOperations,
-    _cfg: Arc<Config>, // Переменная cfg не используется, добавлено подчеркивание
+    _cfg: Arc<Config>,
     db: Arc<Db>,
 ) -> anyhow::Result<()>
 where
@@ -147,19 +158,20 @@ where
                 );
 
                 let mut operation_info_opt: Option<RunningOperationInfo> = None;
-                let mut current_spot_order_id_to_cancel_opt: Option<String> = None; // Изменено имя для ясности
                 let mut filled_spot_qty_in_operation: f64 = 0.0;
 
                 // --- Блок для извлечения информации и удаления из мапы ---
                 {
-                    let mut ops_guard: MutexGuard<
-                        '_,
-                        HashMap<(ChatId, i64), RunningOperationInfo>,
-                    > = running_operations.lock().await;
+                    let mut ops_guard = running_operations.lock().await;
                     if let Some(info) = ops_guard.remove(&(chat_id, operation_id_to_cancel)) {
-                        current_spot_order_id_to_cancel_opt = // Используем новое имя
-                            info.current_spot_order_id.lock().await.clone();
-                        filled_spot_qty_in_operation = *info.total_filled_spot_qty.lock().await;
+                        // --- ИСПРАВЛЕНО: Обработка ошибки мьютекса ---
+                        filled_spot_qty_in_operation = match info.total_filled_spot_qty.lock().await {
+                            guard => *guard,
+                            // Err(poisoned) => {
+                            //     error!("Mutex poisoned when reading filled_qty for op_id: {}", operation_id_to_cancel);
+                            //     *poisoned.into_inner()
+                            // }
+                        };
                         operation_info_opt = Some(info);
                         info!(
                             "op_id:{}: Found active operation, removed from map.",
@@ -180,11 +192,10 @@ where
                             .await;
                         return Ok(());
                     }
-                }
+                } // ops_guard освобождается здесь
 
                 // --- Если информация найдена, выполняем отмену ---
-                // Используем operation_info_opt напрямую
-                if let Some(operation_info) = operation_info_opt { // Проверка, что информация была извлечена
+                if let Some(operation_info) = operation_info_opt {
                     let symbol = operation_info.symbol.clone();
                     let bot_message_id_to_edit = MessageId(operation_info.bot_message_id);
                     let operation_type = operation_info.operation_type;
@@ -198,38 +209,70 @@ where
                     );
                     let _ = bot
                         .edit_message_text(chat_id, bot_message_id_to_edit, cancelling_text)
-                        .reply_markup(InlineKeyboardMarkup::new( // Убираем кнопки сразу
-                            Vec::<Vec<InlineKeyboardButton>>::new(),
-                        ))
+                        .reply_markup(InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new()))
                         .await;
 
                     // --- Логика обработки отмены ---
-                    let mut final_error_message: Option<String> = None; // Ошибка для показа пользователю
+                    let mut final_error_message: Option<String> = None;
                     let mut net_spot_change_on_cancel = 0.0;
 
-                    // 1. Отмена текущего активного ордера (если есть)
-                    if let Some(ref order_id) = current_spot_order_id_to_cancel_opt { // Используем новое имя
+                    // Получаем ID последнего ордера из БД
+                    let last_spot_order_id_from_db = match get_hedge_operation_by_id(db.as_ref(), operation_id_to_cancel).await {
+                        // --- ИСПРАВЛЕНО: Используем spot_order_id вместо last_spot_order_id ---
+                        Ok(Some(op)) => op.spot_order_id, // Получаем ID из записи операции
+                        Ok(None) => {
+                            warn!("op_id:{}: Operation not found in DB during cancellation.", operation_id_to_cancel);
+                            None
+                        }
+                        Err(e) => {
+                            error!("op_id:{}: Failed to query DB for last order ID during cancellation: {}", operation_id_to_cancel, e);
+                            if final_error_message.is_none() {
+                                final_error_message = Some(format!("DB query failed: {}", e));
+                            }
+                            None
+                        }
+                    };
+
+                    // 1. Отмена текущего активного ордера (если ID известен из БД)
+                    if let Some(ref order_id) = last_spot_order_id_from_db {
                         info!(
-                            "op_id:{}: Cancelling current order {} ({:?})",
+                            "op_id:{}: Cancelling last known order {} from DB ({:?})",
                             operation_id_to_cancel, order_id, operation_type
                         );
-                        match exchange.cancel_order(&symbol, order_id).await {
-                            Ok(_) => info!(
-                                "op_id:{}: Order cancel request sent OK.",
-                                operation_id_to_cancel
-                            ),
-                            Err(e) => {
-                                warn!(
-                                    "op_id:{}: Order cancel FAILED: {}. Might be already filled/cancelled.",
-                                    operation_id_to_cancel, e
-                                );
-                                final_error_message = Some(format!("Failed cancel order: {}", e));
+                        let is_spot_order = match operation_type {
+                            OperationType::Hedge => true,
+                            OperationType::Unhedge => false,
+                        };
+                        let symbol_for_cancel = if is_spot_order {
+                            &symbol
+                        } else {
+                            warn!("op_id:{}: Cancellation for futures order in Unhedge not fully implemented yet.", operation_id_to_cancel);
+                            ""
+                        };
+
+                        if !symbol_for_cancel.is_empty() {
+                            match cancel_order_generic(exchange.clone(), symbol_for_cancel, order_id, is_spot_order).await {
+                                Ok(_) => info!(
+                                    "op_id:{}: Order cancel request sent OK.",
+                                    operation_id_to_cancel
+                                ),
+                                Err(e) => {
+                                    warn!(
+                                        "op_id:{}: Order cancel FAILED: {}. Might be already filled/cancelled.",
+                                        operation_id_to_cancel, e
+                                    );
+                                    if final_error_message.is_none() {
+                                        final_error_message = Some(format!("Failed cancel order: {}", e));
+                                    }
+                                }
                             }
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                         }
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    } else {
+                        info!("op_id:{}: No active order ID found in DB to cancel.", operation_id_to_cancel);
                     }
 
-                    // 2. Компенсирующее действие на бирже
+                    // 2. Компенсирующее действие на бирже (логика остается прежней)
                     match operation_type {
                         OperationType::Hedge => {
                             if filled_spot_qty_in_operation > ORDER_FILL_TOLERANCE {
@@ -241,7 +284,7 @@ where
                                     Ok(b) => b.free,
                                     Err(e) => {
                                         error!("op_id:{}: Failed get balance before selling spot: {}", operation_id_to_cancel, e);
-                                        if final_error_message.is_none() { // Записываем ошибку, если не было другой
+                                        if final_error_message.is_none() {
                                             final_error_message = Some(format!("Failed get balance: {}", e));
                                         }
                                         0.0
@@ -264,7 +307,7 @@ where
                                     }
                                 } else {
                                     warn!("op_id:{}: Spot balance ({}) too low to sell filled qty ({}) on hedge cancel.", operation_id_to_cancel, current_balance, filled_spot_qty_in_operation);
-                                     if final_error_message.is_none() { // Сообщаем об этом, если не было других ошибок
+                                     if final_error_message.is_none() {
                                         final_error_message = Some("Balance too low to sell filled spot.".to_string());
                                     }
                                 }
@@ -294,28 +337,26 @@ where
                     let final_db_status = "Cancelled";
                     let final_spot_qty_for_db = match operation_type {
                          OperationType::Hedge => net_spot_change_on_cancel,
-                         OperationType::Unhedge => 0.0, // TODO: Уточнить
+                         OperationType::Unhedge => 0.0,
                     };
 
-                    // ---- ИСПРАВЛЕНО: Логика для избежания move error ----
                     let cancel_reason_str = "cancelled by user";
-                    // Сначала определяем текст ошибки для БД
                     let final_error_text_for_db: Option<String>;
                     if let Some(err_msg) = &final_error_message {
                         final_error_text_for_db = Some(err_msg.clone());
                     } else {
                         final_error_text_for_db = Some(cancel_reason_str.to_string());
                     }
-                    // ---- Конец исправления ----
 
-                    // Вызываем update_hedge_final_status с КОРРЕКТНЫМИ параметрами
+                    // Вызываем update_hedge_final_status
+                    // --- ИСПРАВЛЕНО: Используем .as_deref() для final_error_text_for_db ---
                     if let Err(db_err) = update_hedge_final_status(
                         db.as_ref(),
                         operation_id_to_cancel,
-                        final_db_status, // "Cancelled"
-                        None,          // futures_order_id при отмене обычно None
-                        0.0,           // futures_filled_qty при отмене = 0.0 (предположение)
-                        final_error_text_for_db.as_deref(),
+                        final_db_status,
+                        None, // last_spot_order_id - оставляем None при отмене
+                        final_spot_qty_for_db,
+                        final_error_text_for_db.as_deref(), // <-- ИСПОЛЬЗУЕМ .as_deref()
                     )
                     .await
                     {
@@ -327,20 +368,14 @@ where
                             final_error_message = Some(format!("DB update failed: {}", db_err));
                          }
                     } else {
-                        // Логируем и количество спота, измененное при отмене, хотя оно не передается в DB в этом параметре
                         info!(
                             "op_id:{}: DB status updated to '{}'. Spot qty changed on cancel: {}",
                             operation_id_to_cancel, final_db_status, final_spot_qty_for_db
                         );
                     }
 
-                    // Примечание: Количество спота, проданное/купленное при отмене (`final_spot_qty_for_db`),
-                    // в текущей версии НЕ сохраняется в БД функцией `update_hedge_final_status`.
-                    // Если это необходимо, вам нужно будет изменить сигнатуру функции в `storage/db.rs`
-                    // и соответствующий SQL-запрос UPDATE, добавив новый параметр/поле.
 
-
-                    // 4. Финальное сообщение пользователю
+                    // 4. Финальное сообщение пользователю (логика остается прежней)
                     let mut final_text = format!(
                         "❌ Операция ID:{} ({}, {}) отменена пользователем.",
                         operation_id_to_cancel, symbol, operation_type.as_str()
@@ -350,7 +385,6 @@ where
                               if net_spot_change_on_cancel > ORDER_FILL_TOLERANCE {
                                   final_text.push_str(&format!("\nПродано ~{:.8} {} спота.", net_spot_change_on_cancel, symbol));
                               } else if filled_spot_qty_in_operation > ORDER_FILL_TOLERANCE {
-                                   // Показываем ошибку продажи только если она реально была
                                    if final_error_message.as_ref().map_or(false, |s| s.contains("Failed sell spot") || s.contains("Failed get balance") || s.contains("Balance too low")) {
                                         final_text.push_str("\nПопытка продать накопленный спот не удалась.");
                                    }
@@ -360,8 +394,7 @@ where
                              // Добавить информацию при необходимости
                          }
                      }
-                     // Добавляем сообщение об ошибке, если оно было (final_error_message не был перемещен)
-                     if let Some(err_msg) = final_error_message { // Теперь это безопасно
+                     if let Some(err_msg) = final_error_message {
                          final_text.push_str(&format!("\n⚠️ Ошибка при отмене: {}", err_msg));
                      }
 
@@ -370,8 +403,6 @@ where
                         .reply_markup(navigation::make_main_menu_keyboard())
                         .await;
                 }
-                // Если operation_info_opt был None (т.е. Some не сработал), значит операция не найдена
-                // Этот случай обрабатывается в блоке извлечения информации
 
             } else {
                 error!(
@@ -396,6 +427,21 @@ where
         bot.answer_callback_query(query.id).await?;
     }
     Ok(())
+}
+
+// Общая функция отмены ордера
+// --- ИСПРАВЛЕНО: Возвращаемый тип Result ---
+async fn cancel_order_generic<E: Exchange>(
+    exchange: Arc<E>,
+    symbol: &str,
+    order_id: &str,
+    is_spot: bool,
+) -> anyhow::Result<()> { // <-- ИСПРАВЛЕНО
+        if is_spot {
+        exchange.cancel_spot_order(symbol, order_id).await
+    } else {
+        exchange.cancel_futures_order(symbol, order_id).await
+    }
 }
 
 

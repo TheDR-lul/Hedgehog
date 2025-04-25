@@ -103,7 +103,7 @@ where
         &self,
         params: HedgeParams,
         progress_callback: HedgeProgressCallback,
-        current_order_id_storage: Arc<TokioMutex<Option<String>>>,
+        // --- ИСПРАВЛЕНО: Убрали current_order_id_storage ---
         total_filled_qty_storage: Arc<TokioMutex<f64>>,
         operation_id: i64,
         db: &Db,
@@ -112,7 +112,7 @@ where
             self, // Передаем всего Hedger, чтобы иметь доступ к exchange, max_wait и т.д.
             params,
             progress_callback,
-            current_order_id_storage,
+            // --- ИСПРАВЛЕНО: Убрали current_order_id_storage ---
             total_filled_qty_storage,
             operation_id,
             db,

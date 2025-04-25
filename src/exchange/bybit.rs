@@ -1,8 +1,8 @@
 // src/exchange/bybit.rs
 
 // --- Используемые типажи и структуры ---
-use super::{Exchange, OrderStatus, FeeRate};
-use crate::exchange::types::{Balance, Order, OrderSide,DetailedOrderStatus};
+use super::{Exchange, OrderStatus, FeeRate, FuturesTickerInfo}; // Добавил FuturesTickerInfo
+use crate::exchange::types::{Balance, Order, OrderSide, DetailedOrderStatus};
 // --- Стандартные и внешние зависимости ---
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -18,7 +18,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, trace, warn};
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
-use crate::exchange::FuturesTickerInfo;
+// Убрал FuturesTickerInfo отсюда, т.к. импортировали выше
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -176,7 +176,6 @@ struct OrderQueryResult {
     list: Vec<OrderQueryEntry>,
 }
 
-// Убедитесь, что эта структура выглядит так:
 #[derive(Deserialize, Debug)]
 struct OrderQueryEntry {
     #[serde(rename = "orderId")]
@@ -188,19 +187,20 @@ struct OrderQueryEntry {
     #[serde(rename = "orderStatus")]
     status: String,
     #[serde(rename = "cumExecQty")]
-    cum_exec_qty: String, // Исполненное количество
+    cum_exec_qty: String,
     #[serde(rename = "cumExecValue")]
-    cum_exec_value: String, // <-- ДОБАВЛЕНО: Совокупная стоимость
+    cum_exec_value: String,
     #[serde(rename = "avgPrice")]
-    avg_price: String,      // <-- ДОБАВЛЕНО: Средняя цена
+    avg_price: String,
     #[serde(rename = "leavesQty")]
-    leaves_qty: String, // Оставшееся количество
+    leaves_qty: String,
     #[serde(rename = "price")]
     _price: String,
     #[serde(rename = "createdTime")]
     _created_time: String,
 }
-/// Ответ по тикерам
+
+/// Ответ по тикерам (общий)
 #[derive(Deserialize,Serialize ,Debug, Default)]
 struct TickersResult {
     category: String,
@@ -213,6 +213,25 @@ struct TickerInfo {
     #[serde(rename = "lastPrice")]
     price: String,
 }
+
+// --- ИСПРАВЛЕНО: Структуры для фьючерсного тикера вынесены на уровень модуля ---
+#[derive(Deserialize, Debug)]
+struct FuturesTickerApiResponse {
+    symbol: String,
+    #[serde(rename = "lastPrice")]
+    last_price: String,
+    #[serde(rename = "bid1Price")]
+    bid1_price: String,
+    #[serde(rename = "ask1Price")]
+    ask1_price: String,
+}
+
+#[derive(Deserialize, Debug, Default)]
+struct FuturesTickersApiResult {
+    category: String,
+    list: Vec<FuturesTickerApiResponse>,
+}
+// --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
 /// Ответ по времени сервера
 #[derive(Deserialize, Debug, Default)]
@@ -525,7 +544,8 @@ impl Bybit {
             {
                  warn!(code = ret_code, msg = ret_msg, %url, "Bybit API Warning (Order not found/filled/canceled or Leverage not modified - ignoring)");
                  if endpoint.contains("realtime") {
-                     return Ok(T::default()); // Возвращаем пустой результат (например, пустой OrderQueryResult)
+                     // Для realtime возвращаем ошибку, чтобы hedger мог ее обработать
+                     return Err(anyhow!("Order not found")); // Используем стандартное сообщение
                  }
                  // Для отмены или установки плеча без изменений просто продолжим, вернув Ok с default
             } else {
@@ -611,24 +631,17 @@ impl Exchange for Bybit {
 
         let mut balances = Vec::new();
         for entry in account.coins {
-            // Парсим total и locked как раньше
             let total = entry.wallet.parse::<f64>().unwrap_or(0.0);
             let locked = entry.locked.parse::<f64>().unwrap_or(0.0);
-
-            // --- ИСПРАВЛЕННАЯ ЛОГИКА ПАРСИНГА FREE ---
-            // Считаем free как разницу total и locked, игнорируя устаревшее поле available
             let free = (total - locked).max(0.0);
-            // --- КОНЕЦ ИСПРАВЛЕННОЙ ЛОГИКИ ---
 
-            // --- ОТЛАДОЧНЫЙ ЛОГ (оставляем) ---
             if entry.coin.eq_ignore_ascii_case("BTC") || entry.coin.eq_ignore_ascii_case(&self.quote_currency) {
                 debug!(
                     "Raw Balance Entry: Coin={}, Wallet='{}', Locked='{}', Available='{}' -> Parsed: Total={}, Free={}, Locked={}",
-                    entry.coin, entry.wallet, entry.locked, entry.available, // Показываем сырое 'available' для сравнения
-                    total, free, locked // Показываем вычисленное free
+                    entry.coin, entry.wallet, entry.locked, entry.available,
+                    total, free, locked
                 );
             }
-            // Добавляем в результат, если есть хоть какой-то баланс
             if total > 1e-9 || free > 1e-9 || locked > 1e-9 {
                  balances.push((entry.coin, Balance { free, locked }));
             } else {
@@ -695,14 +708,14 @@ impl Exchange for Bybit {
         };
         debug!(%pair, %category, "Fetching fee rate");
 
-        let params = [("symbol", pair.as_str())]; // Category не обязателен
+        let params = [("symbol", pair.as_str())];
 
         let fee_result: FeeRateResult = self.call_api(
             Method::GET,
             "v5/account/fee-rate",
             Some(&params),
             None,
-            true, // Требует аутентификации
+            true,
         ).await?;
 
         let entry = fee_result.list.into_iter()
@@ -779,21 +792,21 @@ impl Exchange for Bybit {
     /// Размещение рыночного ордера (для ФЬЮЧЕРСОВ)
     async fn place_futures_market_order(
         &self,
-        symbol: &str, // Полный символ: BTCUSDT
+        symbol: &str,
         side: OrderSide,
         qty: f64,
     ) -> Result<Order> {
         let base_symbol = symbol.trim_end_matches(&self.quote_currency);
         if base_symbol.is_empty() || base_symbol == symbol { return Err(anyhow!("Invalid futures symbol format: {}", symbol)); }
 
-        let instrument_info = self.get_linear_instrument_info(base_symbol).await?; // Используем базовый для получения инфо
+        let instrument_info = self.get_linear_instrument_info(base_symbol).await?;
         let qty_step_str = instrument_info.lot_size_filter.qty_step.as_deref().ok_or_else(|| anyhow!("Missing qtyStep for linear symbol {}", symbol))?;
         let min_order_qty_str = &instrument_info.lot_size_filter.min_order_qty;
 
         let qty_decimals = qty_step_str.split('.').nth(1).map_or(0, |s| s.trim_end_matches('0').len()) as u32;
         let formatted_qty = match Decimal::from_f64(qty) {
             Some(qty_d) if qty_d > dec!(0.0) => {
-                let rounded_down = qty_d.trunc_with_scale(qty_decimals); // Усекаем до нужной точности
+                let rounded_down = qty_d.trunc_with_scale(qty_decimals);
                 let min_qty = Decimal::from_str(min_order_qty_str).unwrap_or(dec!(0.0));
                 if rounded_down < min_qty && qty_d >= min_qty {
                     warn!("Futures market order quantity {} rounded down below min_order_qty {}. Using min_order_qty.", qty, min_order_qty_str);
@@ -809,7 +822,6 @@ impl Exchange for Bybit {
         };
         if formatted_qty == "0" { return Err(anyhow!("Formatted quantity is zero")); }
 
-        // --- ЛОГИРОВАНИЕ ПАРАМЕТРОВ ---
         info!(
             target: "bybit_futures_order",
             symbol=%symbol,
@@ -819,7 +831,6 @@ impl Exchange for Bybit {
             category=LINEAR_CATEGORY,
             "Preparing FUTURES market order parameters"
         );
-        // --- КОНЕЦ ЛОГИРОВАНИЯ ---
 
         let body = json!({
             "category": LINEAR_CATEGORY,
@@ -829,14 +840,12 @@ impl Exchange for Bybit {
             "qty": formatted_qty
         });
 
-        // --- ЛОГИРОВАНИЕ ТЕЛА ЗАПРОСА ---
         let body_string = serde_json::to_string(&body).unwrap_or_else(|_| "Failed to serialize body".to_string());
         info!(
             target: "bybit_futures_order",
             request_body=%body_string,
             "Sending FUTURES market order request"
         );
-        // --- КОНЕЦ ЛОГИРОВАНИЯ ---
 
         let result: OrderCreateResult = self.call_api(
             Method::POST,
@@ -844,18 +853,18 @@ impl Exchange for Bybit {
             None,
             Some(body),
             true
-        ).await?; // Ошибка 10001 придет отсюда
+        ).await?;
 
         info!(
             target: "bybit_futures_order",
-            order_id = %result.id, // Передаем как именованный аргумент для structured logging
-            "FUTURES market order placed successfully: order_id={}", result.id // Используем {} в строке
+            order_id = %result.id,
+            "FUTURES market order placed successfully: order_id={}", result.id
         );
 
         Ok(Order { id: result.id, side, qty, price: None, ts: self.get_timestamp_ms().await? })
     }
 
-    // --- НОВАЯ ФУНКЦИЯ: Размещение ЛИМИТНОГО ордера (для ФЬЮЧЕРСОВ) ---
+    /// Размещение ЛИМИТНОГО ордера (для ФЬЮЧЕРСОВ)
     async fn place_futures_limit_order( &self, symbol: &str, side: OrderSide, qty: f64, price: f64 ) -> Result<Order> {
         let base_symbol = symbol.trim_end_matches(&self.quote_currency);
         if base_symbol.is_empty() || base_symbol == symbol { return Err(anyhow!("Invalid futures symbol format: {}", symbol)); }
@@ -958,7 +967,6 @@ impl Exchange for Bybit {
         let body = if side == OrderSide::Sell {
             json!({ "category": SPOT_CATEGORY, "symbol": spot_pair, "side": side.to_string(), "orderType": "Market", "qty": formatted_qty })
         } else {
-            // Покупка по рынку за USDT делается через quoteOrderQty
              error!("Spot Market Buy by base quantity not supported. Use limit order or quote quantity.");
             return Err(anyhow!("Spot Market Buy by base quantity not supported"));
         };
@@ -968,15 +976,10 @@ impl Exchange for Bybit {
         Ok(Order { id: result.id, side, qty, price: None, ts: self.get_timestamp_ms().await? })
     }
 
-    /// Отмена ордера (предполагаем СПОТ)
+    /// Отмена ордера (устаревший, используйте cancel_spot_order или cancel_futures_order)
     async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<()> {
-        let spot_pair = self.format_pair(symbol);
-        info!(symbol=%spot_pair, order_id, category=SPOT_CATEGORY, "Cancelling SPOT order");
-        let body = json!({ "category": SPOT_CATEGORY, "symbol": spot_pair, "orderId": order_id });
-        // Ошибки "не найден" или "уже исполнен/отменен" игнорируются внутри call_api
-        self.call_api::<EmptyResult>(Method::POST, "v5/order/cancel", None, Some(body), true).await?;
-        info!(order_id, "SPOT Order cancel request sent (or order was inactive)");
-        Ok(())
+        warn!("Deprecated cancel_order called. Assuming SPOT order.");
+        self.cancel_spot_order(symbol, order_id).await
     }
 
     /// Получение спотовой цены
@@ -989,57 +992,33 @@ impl Exchange for Bybit {
         ticker.price.parse::<f64>().map_err(|e| anyhow!("Failed to parse spot price for {}: {}", spot_pair, e))
     }
 
-    /// Получение статуса ордера (предполагаем СПОТ)
+    /// Получение статуса ордера (устаревший, используйте get_spot_order_status или get_futures_order_status)
     async fn get_order_status(&self, symbol: &str, order_id: &str) -> Result<OrderStatus> {
-        let spot_pair = self.format_pair(symbol);
-        debug!(symbol=%spot_pair, order_id, category=SPOT_CATEGORY, "Fetching SPOT order status");
-        let params = [("category", SPOT_CATEGORY), ("orderId", order_id)];
-        let query_result: OrderQueryResult = self.call_api(Method::GET, "v5/order/realtime", Some(&params), None, true).await?;
-
-        // Если список пуст (ордер не найден в realtime), возвращаем ошибку, чтобы hedger мог это обработать
-        let order_entry = query_result.list.into_iter().next().ok_or_else(|| {
-            warn!("Order ID {} not found in realtime query for {}", order_id, spot_pair);
-            // Используем anyhow для создания ошибки
-            anyhow!("Order not found") // Hedger будет искать эту строку
-        })?;
-
-        let filled = if order_entry.cum_exec_qty.is_empty() { 0.0 } else { order_entry.cum_exec_qty.parse::<f64>()? };
-        let remaining = if order_entry.leaves_qty.is_empty() { 0.0 } else { order_entry.leaves_qty.parse::<f64>()? };
-        info!(order_id, status=%order_entry.status, filled, remaining, "Order status received");
-        Ok(OrderStatus { filled_qty: filled, remaining_qty: remaining })
+        warn!("Deprecated get_order_status called. Assuming SPOT order.");
+        self.get_spot_order_status(symbol, order_id).await
     }
 
     /// Получение MMR для ЛИНЕЙНОГО контракта
     async fn get_mmr(&self, symbol: &str) -> Result<f64> {
-        // УБРАНО: let linear_pair = self.format_pair(symbol);
-        // Используем symbol напрямую
         debug!(symbol=%symbol, category=LINEAR_CATEGORY, "Fetching MMR via risk limit");
-        // Используем symbol напрямую
         let params = [("category", LINEAR_CATEGORY), ("symbol", symbol)];
         let risk_limit_result: RiskLimitResult = self.call_api(Method::GET, "v5/market/risk-limit", Some(&params), None, false).await?;
-        // Используем symbol напрямую в сообщении об ошибке
         let risk_level = risk_limit_result.list.into_iter().find(|level| level.id == 1 || level.is_lowest_risk == 1).ok_or_else(|| anyhow!("No risk limit level 1 found for {}", symbol))?;
 
         if risk_level.mmr.is_empty() {
-            // Используем symbol напрямую в сообщении об ошибке
             if self.base_url.contains("testnet") {
                  warn!("MMR is empty for {} on testnet, using fallback 0.005", symbol);
                  Ok(0.005)
             } else { Err(anyhow!("MMR (maintenanceMargin) is empty for {}", symbol)) }
         } else {
-            // Используем symbol напрямую в сообщении об ошибке
             risk_level.mmr.parse::<f64>().map_err(|e| anyhow!("Failed to parse MMR for {}: {}", symbol, e))
         }
     }
 
     /// Получение средней ставки финансирования
     async fn get_funding_rate(&self, symbol: &str, days: u16) -> Result<f64> {
-        // УБРАНО: let linear_pair = self.format_pair(symbol);
-        // Используем symbol напрямую
         let limit = days.min(200).to_string();
-        // Используем symbol напрямую
         debug!(symbol=%symbol, days, limit=%limit, "Fetching funding rate history");
-        // Используем symbol напрямую
         let params = [("category", LINEAR_CATEGORY), ("symbol", symbol), ("limit", limit.as_str())];
         let funding_result: FundingResult = self.call_api(Method::GET, "v5/market/funding-rate-history", Some(&params), None, false).await?;
 
@@ -1051,40 +1030,26 @@ impl Exchange for Bybit {
         if count == 0 { Ok(0.0) } else { Ok(sum / count as f64) }
     }
 
-    // --- РЕАЛИЗАЦИЯ НОВЫХ МЕТОДОВ ---
-
     /// Получить текущее кредитное плечо для символа (linear)
     async fn get_current_leverage(&self, symbol: &str) -> Result<f64> {
-        // УБРАНО: let linear_pair = self.format_pair(symbol);
-        // Используем symbol напрямую, т.к. он уже должен быть полным (e.g., "BTCUSDT")
         info!(symbol=%symbol, category=LINEAR_CATEGORY, "Fetching current leverage");
-
-        // Используем symbol напрямую
         let params = [("category", LINEAR_CATEGORY), ("symbol", symbol)];
-        // Важно: Эндпоинт v5/position/list возвращает инфо только если есть позиция или риск-лимит/плечо не дефолтные.
-        // Если плечо никогда не менялось и позиции нет, список может быть пуст.
         let position_result: PositionInfoResult = self.call_api(
             Method::GET,
             "v5/position/list",
             Some(&params),
             None,
-            true, // Требует аутентификации
+            true,
         ).await?;
 
-        // Используем symbol напрямую
         let position = match position_result.list.into_iter().find(|p| p.symbol == symbol) {
              Some(p) => p,
              None => {
-                 // Если информации нет, возможно, используется плечо по умолчанию (обычно 10x на Bybit)
-                 // Или можно попробовать получить его из другого места, например, из risk-limit (но там maxLeverage)
-                 // Безопаснее вернуть ошибку, чтобы hedger не продолжил с неверным значением.
-                 // Используем symbol напрямую в сообщении об ошибке
                  warn!("No position info found for {} to get leverage. Cannot determine current leverage.", symbol);
                  return Err(anyhow!("Current leverage info not available for {}", symbol));
              }
         };
 
-        // Используем symbol напрямую в сообщении об ошибке
         position.leverage.parse::<f64>().map_err(|e| {
             error!("Failed to parse current leverage for {}: {} (value: '{}')", symbol, e, position.leverage);
             anyhow!("Failed to parse current leverage for {}: {}", symbol, e)
@@ -1093,30 +1058,21 @@ impl Exchange for Bybit {
 
     /// Установить кредитное плечо для символа (linear)
     async fn set_leverage(&self, symbol: &str, leverage: f64) -> Result<()> {
-        // УБРАНО: let linear_pair = self.format_pair(symbol);
-        // Используем symbol напрямую
-        // Округляем до 2 знаков
         let leverage_str = format!("{:.2}", leverage);
         if leverage <= 0.0 {
             error!("Attempted to set non-positive leverage: {}", leverage);
             return Err(anyhow!("Leverage must be positive"));
         }
-        // Проверка на максимальное плечо биржи (можно получить из /v5/market/instruments-info -> leverageFilter)
-        // TODO: Добавить проверку на максимальное плечо биржи, если нужно
-
-        // Используем symbol напрямую
         info!(symbol=%symbol, leverage=%leverage_str, category=LINEAR_CATEGORY, "Setting leverage");
 
         let body = json!({
             "category": LINEAR_CATEGORY,
-            "symbol": symbol, // Используем symbol напрямую
-            "buyLeverage": leverage_str, // Устанавливаем одинаковое для лонг и шорт
+            "symbol": symbol,
+            "buyLeverage": leverage_str,
             "sellLeverage": leverage_str,
-            "tradeMode": 0, // 0=Cross Margin
+            "tradeMode": 0,
         });
 
-        // Используем call_api, игнорируем результат EmptyResult, если успешно (retCode=0)
-        // Ошибка 110043 (Leverage not modified) будет проигнорирована внутри call_api.
         self.call_api::<EmptyResult>(
             Method::POST,
             "v5/position/set-leverage",
@@ -1125,13 +1081,12 @@ impl Exchange for Bybit {
             true,
         ).await?;
 
-        // Используем symbol напрямую
         info!(symbol=%symbol, leverage=%leverage_str, "Set leverage request sent successfully (or leverage was already set to this value)");
         Ok(())
     }
 
-       /// Отмена СПОТ ордера
-       async fn cancel_spot_order(&self, symbol: &str, order_id: &str) -> Result<()> {
+    /// Отмена СПОТ ордера
+    async fn cancel_spot_order(&self, symbol: &str, order_id: &str) -> Result<()> {
         let spot_pair = self.format_pair(symbol);
         info!(symbol=%spot_pair, order_id, category=SPOT_CATEGORY, "Cancelling SPOT order");
         let body = json!({ "category": SPOT_CATEGORY, "symbol": spot_pair, "orderId": order_id });
@@ -1140,143 +1095,135 @@ impl Exchange for Bybit {
         Ok(())
     }
 
-    // --- НОВЫЙ МЕТОД: Отмена ФЬЮЧЕРСНОГО ордера ---
+    /// Отмена ФЬЮЧЕРСНОГО ордера
     async fn cancel_futures_order(&self, symbol: &str, order_id: &str) -> Result<()> {
-        // symbol здесь уже должен быть полным, например BTCUSDT
         info!(symbol=%symbol, order_id, category=LINEAR_CATEGORY, "Cancelling FUTURES order");
         let body = json!({ "category": LINEAR_CATEGORY, "symbol": symbol, "orderId": order_id });
-        // Ошибки "не найден" и т.д. игнорируются в call_api
         self.call_api::<EmptyResult>(Method::POST, "v5/order/cancel", None, Some(body), true).await?;
         info!(order_id, "FUTURES Order cancel request sent (or order was inactive)");
         Ok(())
     }
 
-        /// Получение статуса СПОТ ордера (переименовано)
-        async fn get_spot_order_status(&self, symbol: &str, order_id: &str) -> Result<OrderStatus> {
-            let spot_pair = self.format_pair(symbol);
-            debug!(symbol=%spot_pair, order_id, category=SPOT_CATEGORY, "Fetching SPOT order status");
-            let params = [("category", SPOT_CATEGORY), ("orderId", order_id)];
-            let query_result: OrderQueryResult = self.call_api(Method::GET, "v5/order/realtime", Some(&params), None, true).await?;
-    
-            let order_entry = query_result.list.into_iter().next().ok_or_else(|| {
-                warn!("Order ID {} not found in realtime query for {}", order_id, spot_pair);
-                anyhow!("Order not found")
-            })?;
-    
-            let filled = if order_entry.cum_exec_qty.is_empty() { 0.0 } else { order_entry.cum_exec_qty.parse::<f64>()? };
-            let remaining = if order_entry.leaves_qty.is_empty() { 0.0 } else { order_entry.leaves_qty.parse::<f64>()? };
-            info!(order_id, status=%order_entry.status, filled, remaining, "Order status received (SPOT)");
-            Ok(OrderStatus { filled_qty: filled, remaining_qty: remaining })
+    /// Получение статуса СПОТ ордера
+    async fn get_spot_order_status(&self, symbol: &str, order_id: &str) -> Result<OrderStatus> {
+        let spot_pair = self.format_pair(symbol);
+        debug!(symbol=%spot_pair, order_id, category=SPOT_CATEGORY, "Fetching SPOT order status");
+        let params = [("category", SPOT_CATEGORY), ("orderId", order_id)];
+        let query_result: OrderQueryResult = self.call_api(Method::GET, "v5/order/realtime", Some(&params), None, true).await?;
+
+        let order_entry = query_result.list.into_iter().next().ok_or_else(|| {
+            warn!("Order ID {} not found in realtime query for {}", order_id, spot_pair);
+            anyhow!("Order not found")
+        })?;
+
+        let filled = if order_entry.cum_exec_qty.is_empty() { 0.0 } else { order_entry.cum_exec_qty.parse::<f64>()? };
+        let remaining = if order_entry.leaves_qty.is_empty() { 0.0 } else { order_entry.leaves_qty.parse::<f64>()? };
+        info!(order_id, status=%order_entry.status, filled, remaining, "Order status received (SPOT)");
+        Ok(OrderStatus { filled_qty: filled, remaining_qty: remaining })
+    }
+
+    /// Получение статуса ФЬЮЧЕРСНОГО ордера
+    async fn get_futures_order_status(&self, symbol: &str, order_id: &str) -> Result<OrderStatus> {
+        debug!(symbol=%symbol, order_id, category=LINEAR_CATEGORY, "Fetching FUTURES order status");
+        let params = [("category", LINEAR_CATEGORY), ("orderId", order_id)];
+        let query_result: OrderQueryResult = self.call_api(Method::GET, "v5/order/realtime", Some(&params), None, true).await?;
+
+        let order_entry = query_result.list.into_iter().next().ok_or_else(|| {
+            warn!("Futures Order ID {} not found in realtime query for {}", order_id, symbol);
+            anyhow!("Order not found")
+        })?;
+
+        let filled = if order_entry.cum_exec_qty.is_empty() { 0.0 } else { order_entry.cum_exec_qty.parse::<f64>()? };
+        let remaining = if order_entry.leaves_qty.is_empty() { 0.0 } else { order_entry.leaves_qty.parse::<f64>()? };
+        info!(order_id, status=%order_entry.status, filled, remaining, "Order status received (FUTURES)");
+        Ok(OrderStatus { filled_qty: filled, remaining_qty: remaining })
+    }
+
+    /// Получение детального статуса СПОТ ордера
+    async fn get_spot_order_execution_details(&self, symbol: &str, order_id: &str) -> Result<DetailedOrderStatus> {
+        let spot_pair = self.format_pair(symbol);
+        debug!(symbol=%spot_pair, order_id, category=SPOT_CATEGORY, "Fetching SPOT order execution details");
+
+        let params = [("category", SPOT_CATEGORY), ("orderId", order_id)];
+        let query_result: OrderQueryResult = self.call_api(
+            Method::GET,
+            "v5/order/realtime",
+            Some(&params),
+            None,
+            true,
+        ).await?;
+
+        let order_entry = query_result.list.into_iter().next().ok_or_else(|| {
+            warn!("Order ID {} not found in realtime query for {}", order_id, spot_pair);
+            anyhow!("Order not found")
+        })?;
+
+        let filled_quantity = order_entry.cum_exec_qty.trim().parse::<f64>().unwrap_or_else(|error| {
+            warn!(order_id, value=%order_entry.cum_exec_qty, %error, "Failed to parse cumExecQty, using 0.0");
+            0.0
+        });
+        let remaining_quantity = order_entry.leaves_qty.trim().parse::<f64>().unwrap_or_else(|error| {
+            warn!(order_id, value=%order_entry.leaves_qty, %error, "Failed to parse leavesQty, using 0.0");
+            0.0
+        });
+        let cumulative_value = order_entry.cum_exec_value.trim().parse::<f64>().unwrap_or_else(|error| {
+            warn!(order_id, value=%order_entry.cum_exec_value, %error, "Failed to parse cumExecValue, using 0.0");
+            0.0
+        });
+        let average_price = order_entry.avg_price.trim().parse::<f64>().unwrap_or_else(|error| {
+            trace!(order_id, value=%order_entry.avg_price, %error, "Failed to parse avgPrice or it was empty/zero, using 0.0");
+            0.0
+        });
+
+        info!(
+            order_id, status=%order_entry.status,
+            filled=filled_quantity, remaining=remaining_quantity,
+            cum_value=cumulative_value, avg_price=average_price,
+            "Detailed order status received (SPOT)"
+        );
+
+        Ok(DetailedOrderStatus {
+            filled_qty: filled_quantity,
+            remaining_qty: remaining_quantity,
+            cumulative_executed_value: cumulative_value,
+            average_price: average_price,
+        })
+    }
+
+    async fn get_futures_ticker(&self, symbol: &str) -> Result<FuturesTickerInfo> {
+        debug!(symbol=%symbol, category=LINEAR_CATEGORY, "Fetching futures ticker");
+        let params = [("category", LINEAR_CATEGORY), ("symbol", symbol)];
+
+        // Сразу парсим в нужную структуру
+        let api_result: FuturesTickersApiResult = self.call_api(
+            Method::GET,
+            "v5/market/tickers",
+            Some(&params),
+            None,
+            false
+        ).await?;
+
+        // Используем api_result
+        let ticker_data = api_result.list.into_iter()
+            .find(|t| t.symbol == symbol)
+            .ok_or_else(|| anyhow!("No futures ticker info found for {}", symbol))?;
+
+        // Парсим из ticker_data
+        let bid_price = ticker_data.bid1_price.trim().parse::<f64>().map_err(|e| anyhow!("Failed to parse bid price for {}: {} (value: '{}')", symbol, e, ticker_data.bid1_price))?;
+        let ask_price = ticker_data.ask1_price.trim().parse::<f64>().map_err(|e| anyhow!("Failed to parse ask price for {}: {} (value: '{}')", symbol, e, ticker_data.ask1_price))?;
+        let last_price = ticker_data.last_price.trim().parse::<f64>().map_err(|e| anyhow!("Failed to parse last price for {}: {} (value: '{}')", symbol, e, ticker_data.last_price))?;
+
+        // Проверка на нулевые цены
+        if bid_price <= 0.0 || ask_price <= 0.0 {
+             warn!(symbol, bid=bid_price, ask=ask_price, "Received zero or non-positive bid/ask price from ticker");
+             if last_price > 0.0 {
+                 warn!(symbol, "Using last_price ({}) as fallback for zero bid/ask", last_price);
+                 Ok(FuturesTickerInfo { symbol: ticker_data.symbol, bid_price: last_price, ask_price: last_price, last_price })
+             } else {
+                 Err(anyhow!("Received invalid bid/ask prices (<= 0.0) for {}", symbol))
+             }
+        } else {
+            Ok(FuturesTickerInfo { symbol: ticker_data.symbol, bid_price, ask_price, last_price })
         }
-    
-        // --- НОВЫЙ МЕТОД: Получение статуса ФЬЮЧЕРСНОГО ордера ---
-        async fn get_futures_order_status(&self, symbol: &str, order_id: &str) -> Result<OrderStatus> {
-            // symbol здесь уже должен быть полным, например BTCUSDT
-            debug!(symbol=%symbol, order_id, category=LINEAR_CATEGORY, "Fetching FUTURES order status");
-            let params = [("category", LINEAR_CATEGORY), ("orderId", order_id)];
-            let query_result: OrderQueryResult = self.call_api(Method::GET, "v5/order/realtime", Some(&params), None, true).await?;
-    
-            let order_entry = query_result.list.into_iter().next().ok_or_else(|| {
-                warn!("Futures Order ID {} not found in realtime query for {}", order_id, symbol);
-                anyhow!("Order not found")
-            })?;
-    
-            let filled = if order_entry.cum_exec_qty.is_empty() { 0.0 } else { order_entry.cum_exec_qty.parse::<f64>()? };
-            let remaining = if order_entry.leaves_qty.is_empty() { 0.0 } else { order_entry.leaves_qty.parse::<f64>()? };
-            info!(order_id, status=%order_entry.status, filled, remaining, "Order status received (FUTURES)");
-            Ok(OrderStatus { filled_qty: filled, remaining_qty: remaining })
-        }
-        async fn get_futures_ticker(&self, symbol: &str) -> Result<FuturesTickerInfo> {
-            // symbol здесь уже должен быть полным, например BTCUSDT
-            debug!(symbol=%symbol, category=LINEAR_CATEGORY, "Fetching futures ticker");
-            let params = [("category", LINEAR_CATEGORY), ("symbol", symbol)];
-            let tickers_result: TickersResult = self.call_api(Method::GET, "v5/market/tickers", Some(&params), None, false).await?;
-    
-            // Внутренняя структура ответа Bybit (нужно добавить парсинг bid/ask)
-            #[derive(Deserialize, Debug)]
-            struct InternalTickerInfo {
-                symbol: String,
-                #[serde(rename = "lastPrice")]
-                last_price: String,
-                #[serde(rename = "bid1Price")]
-                bid1_price: String,
-                #[serde(rename = "ask1Price")]
-                ask1_price: String,
-                // Можно добавить другие поля при необходимости
-            }
-            #[derive(Deserialize, Debug, Default)]
-            struct InternalTickersResult {
-                category: String,
-                list: Vec<InternalTickerInfo>,
-            }
-    
-            // Перепарсиваем результат в новую структуру
-            let internal_tickers_result: InternalTickersResult = serde_json::from_value(
-                serde_json::to_value(tickers_result)? // Сначала обратно в Value
-            )?;
-    
-            let ticker = internal_tickers_result.list.into_iter()
-                .find(|t| t.symbol == symbol)
-                .ok_or_else(|| anyhow!("No futures ticker info found for {}", symbol))?;
-    
-            let bid_price = ticker.bid1_price.parse::<f64>().map_err(|e| anyhow!("Failed to parse bid price for {}: {}", symbol, e))?;
-            let ask_price = ticker.ask1_price.parse::<f64>().map_err(|e| anyhow!("Failed to parse ask price for {}: {}", symbol, e))?;
-            let last_price = ticker.last_price.parse::<f64>().map_err(|e| anyhow!("Failed to parse last price for {}: {}", symbol, e))?;
-    
-            Ok(FuturesTickerInfo { symbol: ticker.symbol, bid_price, ask_price, last_price })
-        }
-        async fn get_spot_order_execution_details(&self, symbol: &str, order_id: &str) -> Result<DetailedOrderStatus> {
-    let spot_pair = self.format_pair(symbol);
-    debug!(symbol=%spot_pair, order_id, category=SPOT_CATEGORY, "Fetching SPOT order execution details");
-
-    // Используем тот же эндпоинт, что и для обычного статуса
-    let params = [("category", SPOT_CATEGORY), ("orderId", order_id)];
-    let query_result: OrderQueryResult = self.call_api(
-        Method::GET,
-        "v5/order/realtime", // Используем realtime эндпоинт
-        Some(&params),
-        None,
-        true, // Требует аутентификации
-    ).await?;
-
-    // Ищем нужный ордер в ответе
-    let order_entry = query_result.list.into_iter().next().ok_or_else(|| {
-        warn!("Order ID {} not found in realtime query for {}", order_id, spot_pair);
-        // Возвращаем ошибку, совместимую с той, что ожидает hedger
-        anyhow!("Order not found")
-    })?;
-
-    // Парсим необходимые поля с обработкой ошибок
-    let filled_quantity = order_entry.cum_exec_qty.trim().parse::<f64>().unwrap_or_else(|error| {
-        warn!(order_id, value=%order_entry.cum_exec_qty, %error, "Failed to parse cumExecQty, using 0.0");
-        0.0
-    });
-    let remaining_quantity = order_entry.leaves_qty.trim().parse::<f64>().unwrap_or_else(|error| {
-        warn!(order_id, value=%order_entry.leaves_qty, %error, "Failed to parse leavesQty, using 0.0");
-        0.0
-    });
-    let cumulative_value = order_entry.cum_exec_value.trim().parse::<f64>().unwrap_or_else(|error| {
-        warn!(order_id, value=%order_entry.cum_exec_value, %error, "Failed to parse cumExecValue, using 0.0");
-        0.0
-    });
-    let average_price = order_entry.avg_price.trim().parse::<f64>().unwrap_or_else(|error| {
-        // Для avgPrice 0.0 может быть валидным значением, если ордер еще не исполнялся
-        trace!(order_id, value=%order_entry.avg_price, %error, "Failed to parse avgPrice or it was empty/zero, using 0.0");
-        0.0
-    });
-
-    info!(
-        order_id, status=%order_entry.status,
-        filled=filled_quantity, remaining=remaining_quantity,
-        cum_value=cumulative_value, avg_price=average_price,
-        "Detailed order status received (SPOT)"
-    );
-
-    Ok(DetailedOrderStatus {
-        filled_qty: filled_quantity,
-        remaining_qty: remaining_quantity,
-        cumulative_executed_value: cumulative_value,
-        average_price: average_price,
-    })
-}
+    }
 }

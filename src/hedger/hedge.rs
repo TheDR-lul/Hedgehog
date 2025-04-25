@@ -1,5 +1,5 @@
 // src/hedger/hedge.rs
-// ВЕРСИЯ С ИСПРАВЛЕНИЯМИ ОШИБОК КОМПИЛЯЦИИ (v6 - основана на v5 и ошибках)
+// ВЕРСИЯ С ИСПРАВЛЕНИЯМИ ОШИБОК КОМПИЛЯЦИИ (v7 - возврат ID из loop)
 
 use anyhow::{anyhow, Result};
 use rust_decimal::prelude::*;
@@ -9,6 +9,7 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 
+// --- ИСПРАВЛЕНО: manage_order_loop теперь возвращает Result<(f64, Option<String>)> ---
 use super::common::{calculate_limit_price, manage_order_loop, OrderLoopParams};
 use super::{
     HedgeParams, HedgeProgressCallback, HedgeProgressUpdate, HedgeStage, Hedger,
@@ -28,7 +29,7 @@ fn round_down_to_precision(value: f64, decimals: u32) -> Result<Decimal> {
         // Нормализуем (убираем лишние нули)
         .normalize();
     // Возвращаем успешный результат, обернутый в Ok
-    Ok(decimal_value) // <-- ИСПРАВЛЕНО: Просто возвращаем Ok(Decimal)
+    Ok(decimal_value)
 }
 
 // Реализация основной логики хеджирования
@@ -36,7 +37,8 @@ pub(super) async fn run_hedge_impl<ExchangeType>(
     hedger: &Hedger<ExchangeType>,
     params: HedgeParams,
     mut progress_callback: HedgeProgressCallback,
-    current_spot_order_identifier_storage: Arc<TokioMutex<Option<String>>>,
+    // --- ИСПРАВЛЕНО: Убрали current_spot_order_identifier_storage ---
+    // current_spot_order_identifier_storage: Arc<TokioMutex<Option<String>>>,
     total_filled_spot_quantity_storage: Arc<TokioMutex<f64>>,
     operation_identifier: i64,
     database: &Db,
@@ -111,21 +113,15 @@ where
         stage: HedgeStage::Spot,
         is_spot: true,
         min_order_qty_decimal: None, // Минимальный размер проверяется внутри цикла
-        current_order_id_storage: Some(Arc::clone(&current_spot_order_identifier_storage)), // Передаем хранилище ID
+        // --- ИСПРАВЛЕНО: Убрали current_order_id_storage ---
         total_filled_qty_storage: Arc::clone(&total_filled_spot_quantity_storage), // Передаем хранилище общего кол-ва
     };
 
-    // Внешняя переменная для ID последнего спот ордера
-    let mut last_spot_order_identifier: Option<String> = None;
-
-    // manage_order_loop возвращает Result<f64> (итоговое исполненное количество)
-    // ID ордера сохраняется внутри цикла в current_spot_order_identifier_storage
-    let final_spot_quantity_gross = match manage_order_loop(spot_loop_params).await {
-        Ok(filled_quantity) => {
-            // Получаем ID ордера из хранилища, которое было передано в manage_order_loop
-            let order_id_option = current_spot_order_identifier_storage.lock().await.clone();
-
-            match order_id_option {
+    // --- ИСПРАВЛЕНО: manage_order_loop возвращает Result<(f64, Option<String>)> ---
+    let (final_spot_quantity_gross, last_spot_order_id_option) = match manage_order_loop(spot_loop_params).await {
+        Ok((filled_quantity, last_order_id_opt)) => {
+            // Получаем ID ордера из результата manage_order_loop
+            match last_order_id_opt {
                  Some(id) if !id.is_empty() => {
                     info!(
                         "op_id:{}: Hedge SPOT buy stage finished. Final actual spot gross quantity: {:.8}, Last Order ID: {}",
@@ -139,28 +135,27 @@ where
                             operation_identifier, filled_quantity, initial_spot_quantity
                         );
                     }
-                     // Обновляем БД с ID последнего ордера
+                     // Обновляем БД с ID последнего ордера (это дублирует обновление внутри loop, но для надежности)
                      if let Err(e) = update_hedge_spot_order(
                          database,
                          operation_identifier,
-                         Some(&id), // Используем ID из хранилища
+                         Some(&id), // Используем ID из результата
                          filled_quantity,
                      )
                      .await
                      {
                          error!(
-                             "op_id:{}: Failed to update FINAL spot order info in DB: {}",
+                             "op_id:{}: Failed to update FINAL spot order info in DB (after loop): {}",
                              operation_identifier, e
                          );
                          // Не фатально, продолжаем, но логируем
                      }
-                     // Сохраняем ID для использования вне match
-                     last_spot_order_identifier = Some(id);
-                    filled_quantity // Возвращаем количество
-                }
+                     (filled_quantity, Some(id)) // Возвращаем количество и ID
+                 }
                 _ => {
-                    // Это критическая ситуация: цикл завершился успешно, но ID ордера не записался.
-                    let error_message = "Spot order loop succeeded but failed to retrieve order ID from storage.".to_string();
+                    // Это критическая ситуация: цикл завершился успешно, но ID ордера не вернулся.
+                    // Такого не должно быть с новым кодом loop, но оставляем проверку.
+                    let error_message = "Spot order loop succeeded but failed to return order ID.".to_string();
                     error!("op_id:{}: {}", operation_identifier, error_message);
                     // Обновляем статус в БД перед возвратом ошибки
                     let _ = update_hedge_final_status(
@@ -182,13 +177,13 @@ where
                 operation_identifier, loop_error
             );
             // Получаем последнее известное состояние перед ошибкой
+            // ID последнего ордера теперь недоступен напрямую здесь, если цикл вернул Err
             let current_filled_quantity = *total_filled_spot_quantity_storage.lock().await;
-            let last_known_order_id = current_spot_order_identifier_storage.lock().await.clone();
             let _ = update_hedge_final_status(
                 database,
                 operation_identifier,
                 "Failed",
-                last_known_order_id.as_deref(), // Используем последний известный ID, если он есть
+                None, // ID неизвестен при ошибке из цикла
                 current_filled_quantity,
                 Some(&format!("Spot stage failed: {}", loop_error)),
             )
@@ -197,8 +192,8 @@ where
         }
     };
 
-    // Проверка, что ID ордера был получен и сохранен
-    let final_spot_order_id = match last_spot_order_identifier {
+    // Проверка, что ID ордера был получен
+    let final_spot_order_id = match last_spot_order_id_option {
         Some(id) => id,
         None => {
              // Эта ветка не должна достигаться из-за проверки внутри Ok() выше, но для полноты
@@ -209,7 +204,7 @@ where
         }
     };
 
-    // --- Получение точной стоимости исполненного спота ---
+    // --- Получение точной стоимости исполненного спота (используем final_spot_order_id) ---
     info!("op_id:{}: Fetching execution details for spot order {}...", operation_identifier, final_spot_order_id);
     let detailed_spot_status: DetailedOrderStatus = match hedger.exchange.get_spot_order_execution_details(&symbol, &final_spot_order_id).await {
          Ok(details) => details,
@@ -221,15 +216,14 @@ where
          }
     };
 
-    // Проверяем, что полученное количество совпадает (в пределах допуска)
-    // Используем поле filled_qty вместо несуществующего cumulative_filled_quantity
-    if (detailed_spot_status.filled_qty - final_spot_quantity_gross).abs() > ORDER_FILL_TOLERANCE { // <-- ИСПРАВЛЕНО
+    // Проверяем, что количество из деталей совпадает с количеством из цикла (в пределах допуска)
+    if (detailed_spot_status.filled_qty - final_spot_quantity_gross).abs() > ORDER_FILL_TOLERANCE {
         warn!(
             "op_id:{}: Discrepancy between loop final quantity {:.8} and execution details quantity {:.8} for order {}. Using execution details.",
-            operation_identifier, final_spot_quantity_gross, detailed_spot_status.filled_qty, final_spot_order_id // <-- ИСПРАВЛЕНО
+            operation_identifier, final_spot_quantity_gross, detailed_spot_status.filled_qty, final_spot_order_id
         );
         // Можно переприсвоить final_spot_quantity_gross, если это важно, но для расчета фьючерса используем cumulative_executed_value
-    }
+     }
 
     let actual_spot_value = detailed_spot_status.cumulative_executed_value;
      if actual_spot_value <= ORDER_FILL_TOLERANCE / 10.0 { // Более строгая проверка для стоимости
@@ -359,14 +353,14 @@ where
         stage: HedgeStage::Futures,
         is_spot: false,
         min_order_qty_decimal: Some(min_futures_quantity_decimal), // Передаем минимальный размер для проверки внутри цикла
-        current_order_id_storage: None, // Не передаем хранилище ID для фьючерса (можно добавить при необходимости)
+        // --- ИСПРАВЛЕНО: Убрали current_order_id_storage ---
         total_filled_qty_storage: futures_filled_storage.clone(), // Передаем хранилище общего кол-ва фьючерса
     };
 
-    // manage_order_loop возвращает Result<f64>
-    let final_futures_quantity = match manage_order_loop(futures_loop_params).await {
-        Ok(filled_quantity) => {
-            // ID ордера здесь не получаем, т.к. current_order_id_storage = None
+    // --- ИСПРАВЛЕНО: manage_order_loop возвращает Result<(f64, Option<String>)> ---
+    // ID фьючерсного ордера здесь не используется далее, но получаем его
+    let (final_futures_quantity, _last_futures_order_id_option) = match manage_order_loop(futures_loop_params).await {
+        Ok((filled_quantity, last_order_id_opt)) => {
             info!(
                 "op_id:{}: Hedge FUTURES sell stage finished. Final actual futures net quantity: {:.8}", // Убрали упоминание ID
                 operation_identifier, filled_quantity
@@ -377,9 +371,8 @@ where
                     operation_identifier, filled_quantity, final_futures_target_quantity
                 );
             }
-            // Здесь можно было бы получить ID последнего фьючерсного ордера, если бы передали хранилище
-            // и обновить БД аналогично споту.
-            filled_quantity // Возвращаем количество
+            // Здесь можно было бы использовать last_order_id_opt для обновления БД, если нужно
+            (filled_quantity, last_order_id_opt) // Возвращаем количество и ID (хотя ID не используется)
         }
         Err(loop_error) => {
             error!(
@@ -392,7 +385,7 @@ where
                 operation_identifier,
                 "Failed",
                 Some(&final_spot_order_id), // ID спот ордера известен
-                final_spot_quantity_gross, // Исполненное кол-во спота
+                final_spot_quantity_gross,  // Исполненное кол-во спота
                 Some(&format!("Futures stage failed: {}", loop_error)),
                 // Можно добавить поля для сохранения состояния фьючерса при ошибке
                 // None, // futures_order_id_on_fail (неизвестен)
@@ -417,7 +410,7 @@ where
         final_spot_quantity_gross, // Финальное кол-во спота
         None, // Нет ошибки
         // TODO: Добавить поля в БД и функцию для сохранения финального ID и кол-ва фьючерса?
-        // None, // final_futures_order_id (неизвестен)
+        // _last_futures_order_id_option.as_deref(), // final_futures_order_id
         // Some(final_futures_quantity), // final_futures_filled_qty
     )
     .await;

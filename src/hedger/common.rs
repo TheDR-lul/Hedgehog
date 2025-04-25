@@ -1,4 +1,4 @@
-// src/hedger/common.rs (Первая версия)
+// src/hedger/common.rs (Версия с возвратом ID из loop)
 
 use anyhow::{anyhow, Result};
 use rust_decimal::Decimal;
@@ -11,7 +11,6 @@ use rust_decimal::prelude::FromPrimitive;
 
 
 use super::{HedgeProgressCallback, HedgeProgressUpdate, HedgeStage, Hedger, ORDER_FILL_TOLERANCE};
-// --- Здесь был импорт OrderInfo, который вызывал ошибку ---
 use crate::exchange::types::{OrderSide, OrderStatus as ExchangeOrderStatus};
 use crate::exchange::Exchange;
 use crate::storage::{update_hedge_spot_order, Db}; // Добавим Db и нужные функции
@@ -29,15 +28,14 @@ pub(super) struct OrderLoopParams<'a, E: Exchange> {
     pub stage: HedgeStage, // Spot или Futures
     pub is_spot: bool,     // Флаг для выбора API методов
     pub min_order_qty_decimal: Option<Decimal>, // Для проверки на пыль (только для unhedge spot)
-    // Хранилища состояния (специфично для hedge)
-    pub current_order_id_storage: Option<Arc<TokioMutex<Option<String>>>>,
+    // --- ИСПРАВЛЕНО: Убрали current_order_id_storage ---
     pub total_filled_qty_storage: Arc<TokioMutex<f64>>, // Общее исполненное кол-во на этом этапе
 }
 
 // Общая функция цикла управления ордером
 pub(super) async fn manage_order_loop<'a, E>(
     params: OrderLoopParams<'a, E>,
-) -> Result<f64> // Возвращает финальное исполненное количество на этом этапе
+) -> Result<(f64, Option<String>)> // Возвращает (финальное исполненное количество, ID последнего ордера)
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
@@ -53,7 +51,7 @@ where
         stage,
         is_spot,
         min_order_qty_decimal,
-        current_order_id_storage,
+        // --- ИСПРАВЛЕНО: Убрали current_order_id_storage ---
         total_filled_qty_storage,
     } = params;
 
@@ -62,39 +60,10 @@ where
     let mut qty_filled_in_current_order = 0.0;
     let mut current_order_id: Option<String> = None;
     let mut limit_price = initial_limit_price; // Цена для текущего ордера
+    let mut last_placed_order_id: Option<String> = None; // Храним ID последнего *успешно размещенного* ордера
     let mut current_market_price = initial_limit_price / (1.0 - hedger.slippage * side.sign()); // Примерная рыночная цена
 
-    // Локальная функция для обновления ID ордера в хранилище и БД (только для hedge spot)
-    let update_current_order_id_local = |id: Option<String>| async {
-        if let Some(storage) = &current_order_id_storage {
-            let storage_clone = Arc::clone(storage);
-            let filled_storage_clone = Arc::clone(&total_filled_qty_storage);
-            let db_clone = db.clone();
-            let id_clone_for_storage = id.clone();
-            let id_clone_for_db = id.clone();
-            // Эта функция вызывается только для hedge spot, так что is_spot всегда true
-            async move {
-                let filled_qty_for_db = *filled_storage_clone.lock().await;
-                *storage_clone.lock().await = id_clone_for_storage;
-                // Обновляем БД только для спот ордера хеджирования
-                if let Err(e) = update_hedge_spot_order(
-                    &db_clone,
-                    operation_id,
-                    id_clone_for_db.as_deref(),
-                    filled_qty_for_db,
-                )
-                .await
-                {
-                    error!(
-                        "op_id:{}: Failed to update spot order info in DB: {}",
-                        operation_id, e
-                    );
-                }
-            }
-            .await;
-        }
-        id // Возвращаем ID для присваивания current_order_id
-    };
+    // --- ИСПРАВЛЕНО: Убрали update_current_order_id_local ---
 
     // --- Размещение начального ордера ---
     if current_order_target_qty <= ORDER_FILL_TOLERANCE {
@@ -102,8 +71,8 @@ where
             "op_id:{}: Stage {:?} target already reached ({:.8}/{:.8}). Skipping placement.",
             operation_id, stage, cumulative_filled_qty, initial_target_qty
         );
-        return Ok(cumulative_filled_qty);
-    }
+        return Ok((cumulative_filled_qty, None)); // Возвращаем None, т.к. ордер не размещался
+     }
 
     info!(
         "op_id:{}: Placing initial {} {} order at {:.8} for qty {:.8} (Stage: {:?})",
@@ -146,10 +115,15 @@ where
         stage
     );
     current_order_id = Some(order_id.clone()); // Используем order_id
-    // Обновляем хранилище и БД, если это hedge spot
-    if is_spot && current_order_id_storage.is_some() {
-         current_order_id = update_current_order_id_local(current_order_id.clone()).await;
-    }
+    last_placed_order_id = current_order_id.clone(); // Сохраняем ID последнего размещенного
+    // Обновляем БД, если это hedge spot (передаем ID явно)
+    if is_spot {
+        // Обновляем БД с текущим ID и накопленным количеством
+        if let Err(e) = update_hedge_spot_order(db, operation_id, current_order_id.as_deref(), cumulative_filled_qty).await {
+             error!("op_id:{}: Failed update initial spot order info in DB: {}", operation_id, e);
+             // Не фатально, но логируем
+        }
+     }
 
 
     let mut start = Instant::now();
@@ -172,7 +146,7 @@ where
                         "op_id:{}: No active {} order and target reached. Exiting loop. (Stage: {:?})",
                         operation_id, if is_spot { "spot" } else { "futures" }, stage
                     );
-                    break Ok(cumulative_filled_qty);
+                    break Ok((cumulative_filled_qty, last_placed_order_id)); // Возвращаем последнее ID
                 } else {
                     // Цель не достигнута, а ордера нет - это проблема, если прошло время
                     if now.duration_since(start) > Duration::from_secs(2) { // Небольшая задержка на случай гонки состояний
@@ -221,28 +195,22 @@ where
 
                     if filled_diff.abs() > ORDER_FILL_TOLERANCE {
                          *total_filled_qty_storage.lock().await = cumulative_filled_qty;
-                         // Обновляем БД, если это hedge spot
-                         if is_spot && current_order_id_storage.is_some() {
+                         // Обновляем БД, если это hedge spot (ID теперь None)
+                         if is_spot {
                              if let Err(db_err) = update_hedge_spot_order(db, operation_id, None, cumulative_filled_qty).await {
                                  error!("op_id:{}: Failed update DB after {} order not found: {}", operation_id, if is_spot { "spot" } else { "futures" }, db_err);
                              }
                          }
                     }
-
-                    current_order_id = None;
+                    current_order_id = None; // Сбрасываем ID текущего ордера
                     qty_filled_in_current_order = 0.0; // Сбрасываем счетчик текущего ордера
-                    // Обновляем хранилище ID, если это hedge spot
-                    if is_spot && current_order_id_storage.is_some() {
-                         _ = update_current_order_id_local(None).await;
-                    }
-
 
                     if cumulative_filled_qty >= initial_target_qty - ORDER_FILL_TOLERANCE {
                         info!(
                             "op_id:{}: {} target reached after order not found assumption. Exiting loop. (Stage: {:?})",
                             operation_id, if is_spot { "spot" } else { "futures" }, stage
                         );
-                        break Ok(cumulative_filled_qty);
+                        break Ok((cumulative_filled_qty, last_placed_order_id)); // Возвращаем последнее ID
                     } else {
                         // Цель не достигнута, нужно переставлять
                         warn!(
@@ -285,7 +253,7 @@ where
                     operation_id, if is_spot { "spot" } else { "futures" }, qty_filled_in_current_order, cumulative_filled_qty, initial_target_qty, stage
                 );
                 // Обновляем БД, если это hedge spot
-                if is_spot && current_order_id_storage.is_some() {
+                if is_spot {
                     if let Err(e) = update_hedge_spot_order(
                         db,
                         operation_id,
@@ -317,22 +285,20 @@ where
                  );
                  cumulative_filled_qty = initial_target_qty;
                  *total_filled_qty_storage.lock().await = cumulative_filled_qty;
-                 // Обновляем БД, если это hedge spot
-                 if is_spot && current_order_id_storage.is_some() {
-                     let _ = update_hedge_spot_order(db, operation_id, current_order_id.as_deref(), cumulative_filled_qty).await;
+                 // Обновляем БД, если это hedge spot (ID теперь None)
+                 if is_spot {
+                     if let Err(e) = update_hedge_spot_order(db, operation_id, current_order_id.as_deref(), cumulative_filled_qty).await {
+                         error!("op_id:{}: Failed update DB after final fill correction: {}", operation_id, e);
+                     }
                  }
             }
-            current_order_id = None;
-            qty_filled_in_current_order = 0.0;
-            // Обновляем хранилище ID, если это hedge spot
-            if is_spot && current_order_id_storage.is_some() {
-                 _ = update_current_order_id_local(None).await;
-            }
+            current_order_id = None; // Сбрасываем ID текущего ордера
+            qty_filled_in_current_order = 0.0; // Сбрасываем счетчик текущего ордера
 
             // Проверяем, достигнута ли общая цель этапа
             if cumulative_filled_qty >= initial_target_qty - ORDER_FILL_TOLERANCE {
                  info!("op_id:{}: Target reached after order fill. Exiting loop. (Stage: {:?})", operation_id, stage);
-                 break Ok(cumulative_filled_qty);
+                 break Ok((cumulative_filled_qty, last_placed_order_id)); // Возвращаем последнее ID
             } else {
                  // Ордер исполнился, но цель не достигнута? Странно, но возможно. Форсируем замену.
                  warn!("op_id:{}: Order filled but target not reached? Triggering replacement check. (Stage: {:?})", operation_id, stage);
@@ -352,7 +318,6 @@ where
             );
 
             let remaining_total_qty = initial_target_qty - cumulative_filled_qty;
-            // --- Здесь была ошибка: from_f64 не в области видимости ---
             let remaining_total_qty_decimal = Decimal::from_f64(remaining_total_qty).unwrap_or_default();
 
             // --- Проверка на пыль (только для unhedge spot) ---
@@ -371,12 +336,9 @@ where
                         info!("op_id:{}: Cancel request sent for dust {} order {}", operation_id, if is_spot { "spot" } else { "futures" }, order_id_to_check);
                         sleep(Duration::from_millis(500)).await; // Даем время на отмену
                     }
-                    current_order_id = None;
-                    qty_filled_in_current_order = 0.0;
-                    // Обновляем хранилище ID, если это hedge spot
-                    if is_spot && current_order_id_storage.is_some() {
-                         _ = update_current_order_id_local(None).await;
-                    }
+                    current_order_id = None; // Сбрасываем ID
+                    qty_filled_in_current_order = 0.0; // Сбрасываем счетчик
+
                     // Перепроверяем исполнение после отмены на всякий случай
                     match get_order_status(hedger.exchange.clone(), symbol, &order_id_to_check, is_spot).await {
                         Ok(fs) => {
@@ -387,9 +349,11 @@ where
                                 cumulative_filled_qty = cumulative_filled_qty.max(0.0).min(initial_target_qty * 1.00001);
                                 if (cumulative_filled_qty - filled_before).abs() > ORDER_FILL_TOLERANCE {
                                     *total_filled_qty_storage.lock().await = cumulative_filled_qty;
-                                    // Обновляем БД, если это hedge spot
-                                    if is_spot && current_order_id_storage.is_some() {
-                                         let _ = update_hedge_spot_order(db, operation_id, None, cumulative_filled_qty).await;
+                                    // Обновляем БД, если это hedge spot (ID None)
+                                    if is_spot {
+                                         if let Err(e) = update_hedge_spot_order(db, operation_id, None, cumulative_filled_qty).await {
+                                             error!("op_id:{}: Failed update DB after dust cancel fill: {}", operation_id, e);
+                                         }
                                     }
                                 }
                             }
@@ -398,7 +362,7 @@ where
                             warn!("op_id:{}: Failed get final status after dust cancel: {}", operation_id, e);
                         }
                     }
-                    break Ok(cumulative_filled_qty); // Выходим, игнорируя пыль
+                    break Ok((cumulative_filled_qty, last_placed_order_id)); // Выходим, игнорируя пыль
                 }
             }
             // --- Конец проверки на пыль ---
@@ -420,11 +384,6 @@ where
             }
             let previous_order_id = current_order_id.take(); // Запоминаем старый ID для финальной проверки
             qty_filled_in_current_order = 0.0; // Сбрасываем счетчик текущего ордера
-            // Обновляем хранилище ID, если это hedge spot
-            if is_spot && current_order_id_storage.is_some() {
-                 _ = update_current_order_id_local(None).await;
-            }
-
 
             // --- Перепроверка статуса после отмены ---
             if let Some(prev_id) = previous_order_id {
@@ -441,9 +400,11 @@ where
                             cumulative_filled_qty = cumulative_filled_qty.max(0.0).min(initial_target_qty * 1.00001);
                              if (cumulative_filled_qty - filled_before).abs() > ORDER_FILL_TOLERANCE {
                                 *total_filled_qty_storage.lock().await = cumulative_filled_qty;
-                                // Обновляем БД, если это hedge spot
-                                if is_spot && current_order_id_storage.is_some() {
-                                     let _ = update_hedge_spot_order(db, operation_id, None, cumulative_filled_qty).await;
+                                // Обновляем БД, если это hedge spot (ID None)
+                                if is_spot {
+                                     if let Err(e) = update_hedge_spot_order(db, operation_id, None, cumulative_filled_qty).await {
+                                         error!("op_id:{}: Failed update DB after cancel fill: {}", operation_id, e);
+                                     }
                                 }
                             }
                         }
@@ -458,12 +419,14 @@ where
                              // Финальная коррекция до цели, если нужно
                              if (cumulative_filled_qty - initial_target_qty).abs() > ORDER_FILL_TOLERANCE && cumulative_filled_qty < initial_target_qty {
                                  cumulative_filled_qty = initial_target_qty;
-                                 *total_filled_qty_storage.lock().await = cumulative_filled_qty;
-                                 if is_spot && current_order_id_storage.is_some() {
-                                     let _ = update_hedge_spot_order(db, operation_id, None, cumulative_filled_qty).await;
+                                 *total_filled_qty_storage.lock().await = cumulative_filled_qty; // Обновляем хранилище
+                                 if is_spot {
+                                     if let Err(e) = update_hedge_spot_order(db, operation_id, None, cumulative_filled_qty).await {
+                                         error!("op_id:{}: Failed update DB after final cancel correction: {}", operation_id, e);
+                                     }
                                  }
                              }
-                            break Ok(cumulative_filled_qty);
+                            break Ok((cumulative_filled_qty, last_placed_order_id)); // Возвращаем последнее ID
                         } else {
                             info!(
                                 "op_id:{}: Order {} still has remaining {:.8} after cancel. Proceeding with replacement. (Stage: {:?})",
@@ -484,7 +447,7 @@ where
                          // Проверяем цель на всякий случай
                          if cumulative_filled_qty >= initial_target_qty - ORDER_FILL_TOLERANCE {
                              info!("op_id:{}: Target reached after order cancel/not found. Exiting loop. (Stage: {:?})", operation_id, stage);
-                             break Ok(cumulative_filled_qty);
+                             break Ok((cumulative_filled_qty, last_placed_order_id)); // Возвращаем последнее ID
                          }
                     }
                 }
@@ -495,7 +458,7 @@ where
             let remaining_total_qty = initial_target_qty - cumulative_filled_qty;
             if remaining_total_qty <= ORDER_FILL_TOLERANCE {
                 info!("op_id:{}: Remaining qty {:.8} is negligible after cancel/recheck. Exiting loop. (Stage: {:?})", operation_id, remaining_total_qty, stage);
-                break Ok(cumulative_filled_qty);
+                break Ok((cumulative_filled_qty, last_placed_order_id)); // Возвращаем последнее ID
             }
 
             // Получаем новую цену
@@ -544,11 +507,14 @@ where
             );
             // --- Assign the String ID ---
             current_order_id = Some(new_order_id.clone()); // Clone the ID string
-            // Обновляем хранилище и БД, если это hedge spot
-            if is_spot && current_order_id_storage.is_some() {
-                 // Pass the Option<String> directly
-                 current_order_id = update_current_order_id_local(current_order_id.clone()).await;
-            }
+            last_placed_order_id = current_order_id.clone(); // Обновляем ID последнего размещенного
+            // Обновляем БД, если это hedge spot
+            if is_spot {
+                // Обновляем БД с новым ID и текущим накопленным количеством
+                if let Err(e) = update_hedge_spot_order(db, operation_id, current_order_id.as_deref(), cumulative_filled_qty).await {
+                    error!("op_id:{}: Failed update DB after replacement order placement: {}", operation_id, e);
+                }
+             }
 
             start = now; // Сбрасываем таймер для нового ордера
             is_replacement = true; // Устанавливаем флаг для колбэка
@@ -559,8 +525,6 @@ where
         if is_replacement || elapsed_since_update > update_interval {
             // Получаем актуальную цену для колбэка (стараемся не делать лишний запрос)
             let price_for_cb = if !is_replacement {
-                // --- Avoid cloning exchange repeatedly, clone once at the start of loop? ---
-                // --- Or pass exchange by reference if possible ---
                 match get_market_price(hedger.exchange.clone(), symbol, is_spot).await {
                     Ok(p) => p,
                     Err(_) => current_market_price, // Используем старую, если не удалось получить новую
@@ -608,8 +572,6 @@ async fn place_order<E: Exchange>(
     price: f64,
     is_spot: bool,
 ) -> Result<String> { // --- Возвращаем String (ID ордера) ---
-    // --- Предполагаем, что методы биржи возвращают Result<String> ---
-    // --- Если они возвращают Result<OrderInfo>, код будет другим ---
     if is_spot {
         let order_info = exchange.place_limit_order(symbol, side, qty, price).await?;
         Ok(order_info.id)
@@ -656,15 +618,12 @@ async fn get_market_price<E: Exchange>(
     } else {
         // Для фьючерса берем среднюю цену между бидом и аском или последнюю цену
         match exchange.get_futures_ticker(symbol).await {
-            // --- Ensure bid_price and ask_price are valid before averaging ---
             Ok(ticker) if ticker.bid_price > 0.0 && ticker.ask_price > 0.0 => (ticker.bid_price + ticker.ask_price) / 2.0,
             Ok(ticker) => {
                  warn!("Invalid ticker prices bid={}, ask={}. Using last_price if available.", ticker.bid_price, ticker.ask_price);
-                 // Fallback to last_price if averaging is not possible
                  if ticker.last_price > 0.0 {
                      ticker.last_price
                  } else {
-                     // If last_price is also invalid, fallback to spot
                      warn!("Falling back to spot price due to invalid futures ticker data.");
                      get_spot_price_fallback(&exchange, symbol).await?
                  }
@@ -685,7 +644,6 @@ async fn get_market_price<E: Exchange>(
 // --- Helper for spot price fallback in get_market_price ---
 async fn get_spot_price_fallback<E: Exchange>(exchange: &E, futures_symbol: &str) -> Result<f64> {
     // TODO: Implement a robust way to get base symbol from futures symbol
-    // This is a placeholder and might not work for all symbols (e.g., PERP)
     let base_symbol = futures_symbol.trim_end_matches("USDT").trim_end_matches("PERP");
     if base_symbol == futures_symbol {
         return Err(anyhow!("Could not determine base symbol from futures symbol '{}' for fallback", futures_symbol));
@@ -696,14 +654,11 @@ async fn get_spot_price_fallback<E: Exchange>(exchange: &E, futures_symbol: &str
 
 // --- Вспомогательные синхронные функции ---
 
-// --- Make calculate_limit_price public within the crate if needed by other modules ---
-// --- Or keep it pub(super) if only used within hedger module ---
 pub(super) fn calculate_limit_price(market_price: f64, side: OrderSide, slippage: f64) -> f64 {
     market_price * (1.0 - slippage * side.sign()) // Buy: ниже рынка, Sell: выше рынка
 }
 
 // Расширяем OrderSide для получения знака
-// --- Keep trait private if only used here, or pub(super)/pub if needed elsewhere ---
 trait SideSign {
     fn sign(&self) -> f64;
     fn opposite(&self) -> Self; // Added opposite helper
@@ -722,4 +677,3 @@ impl SideSign for OrderSide {
         }
     }
 }
-

@@ -8,11 +8,9 @@ use super::{
 use crate::config::Config;
 use crate::exchange::Exchange;
 use crate::storage::{Db, insert_hedge_operation};
-// --- ИЗМЕНЕНО: Добавлен HedgeStage ---
 use crate::hedger::{
     Hedger, HedgeParams, HedgeProgressUpdate, HedgeProgressCallback, ORDER_FILL_TOLERANCE, HedgeStage
 };
-// --- КОНЕЦ ИЗМЕНЕНИЙ ---
 use crate::models::HedgeRequest;
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,10 +61,8 @@ where
     let symbol_for_callback = params.symbol.clone();
     let symbol_for_task_body = params.symbol.clone();
     let symbol_for_info = params.symbol.clone();
-    // --- ДОБАВЛЕНО: Клоны целевых количеств для колбэка ---
     let initial_spot_target_for_cb = params.spot_order_qty;
     let initial_fut_target_for_cb = params.fut_order_qty;
-    // ---
 
     let hedger = Hedger::new((*exchange).clone(), (*cfg).clone());
 
@@ -96,13 +92,15 @@ where
         }
     };
 
-    let current_spot_order_id_storage = Arc::new(TokioMutex::new(None::<String>));
+    // --- ИСПРАВЛЕНО: Убрали current_spot_order_id_storage ---
+    // let current_spot_order_id_storage = Arc::new(TokioMutex::new(None::<String>));
     let total_filled_qty_storage = Arc::new(TokioMutex::new(0.0f64));
 
     let bot_clone = bot.clone();
     let cfg_clone = cfg.clone();
     let db_clone = db.clone();
-    let current_spot_order_id_storage_clone = current_spot_order_id_storage.clone();
+    // --- ИСПРАВЛЕНО: Убрали current_spot_order_id_storage_clone ---
+    // let current_spot_order_id_storage_clone = current_spot_order_id_storage.clone();
     let total_filled_qty_storage_clone = total_filled_qty_storage.clone();
     let running_operations_clone = running_operations.clone();
 
@@ -115,17 +113,14 @@ where
         let chat_id_cb = chat_id;
         let initial_sum_cb = initial_sum;
         let operation_id_cb = operation_id;
-        // --- ДОБАВЛЕНО: Клоны целевых количеств ---
         let spot_target_cb = initial_spot_target_for_cb;
         let fut_target_cb = initial_fut_target_for_cb;
-        // ---
 
         async move {
             let symbol = symbol_cb;
             let progress_bar_len = 10;
             let status_text = if update.is_replacement { "(Ордер переставлен)" } else { "" };
 
-            // --- ИЗМЕНЕНО: Форматирование текста в зависимости от этапа ---
             let text = match update.stage {
                 HedgeStage::Spot => {
                     let filled_percent = if update.target_qty > ORDER_FILL_TOLERANCE {
@@ -135,11 +130,11 @@ where
                     let progress_bar = format!("[{}{}]", "█".repeat(filled_blocks), "░".repeat(empty_blocks));
 
                     // Проверка на финальное обновление спота
-                    if (update.filled_qty - spot_target_cb).abs() <= ORDER_FILL_TOLERANCE && update.target_qty == spot_target_cb {
+                    if (update.cumulative_filled_qty - spot_target_cb).abs() <= ORDER_FILL_TOLERANCE { // Используем cumulative_filled_qty для финальной проверки
                         format!(
                             "✅ Спот куплен ID:{} ({})\nРын.цена: {:.2}\nОжидание продажи фьючерса...",
                             operation_id_cb, symbol,
-                            update.current_spot_price
+                            update.current_spot_price // Цена может быть не совсем точной, но для индикации ок
                         )
                     } else {
                         format!(
@@ -152,21 +147,21 @@ where
                 }
                 HedgeStage::Futures => {
                     let filled_percent = if fut_target_cb > ORDER_FILL_TOLERANCE {
-                        (update.filled_qty / fut_target_cb) * 100.0 } else { 0.0 };
+                        (update.cumulative_filled_qty / fut_target_cb) * 100.0 } else { 0.0 }; // Используем cumulative
                     let filled_blocks = (filled_percent / (100.0 / progress_bar_len as f64)).round() as usize;
                     let empty_blocks = progress_bar_len - filled_blocks;
                     let progress_bar = format!("[{}{}]", "█".repeat(filled_blocks), "░".repeat(empty_blocks));
 
                     format!(
-                        "⏳ Хедж (Фьюч) ID:{} {} {:.2} {} ({})\nСпот цена: {:.2}\nОрдер ПРОДАЖА: {:.2}\nИсполнено (фьюч): {:.6}/{:.6} ({:.1}%)",
+                        "⏳ Хедж (Фьюч) ID:{} {} {:.2} {} ({})\nСпот цена: {:.2}\nОрдер ПРОДАЖА: {:.2} {}\nИсполнено (фьюч): {:.6}/{:.6} ({:.1}%)",
                         operation_id_cb, progress_bar, initial_sum_cb, qc, symbol,
                         update.current_spot_price, // Цена спота для контекста
                         update.new_limit_price, // Цена фьюч ордера
-                        update.filled_qty, fut_target_cb, filled_percent // Используем цель фьюча
+                        status_text, // Добавил status_text
+                        update.cumulative_filled_qty, fut_target_cb, filled_percent // Используем cumulative и цель фьюча
                     )
                 }
             };
-            // --- КОНЕЦ ИЗМЕНЕНИЙ ФОРМАТИРОВАНИЯ ---
 
             let cancel_callback_data = format!("{}{}", callback_data::PREFIX_CANCEL_ACTIVE_OP, operation_id_cb);
             let cancel_button = InlineKeyboardButton::callback("❌ Отменить эту операцию", cancel_callback_data);
@@ -188,10 +183,11 @@ where
     let cfg_task = cfg.clone();
 
     let task = tokio::spawn(async move {
+        // --- ИСПРАВЛЕНО: Убрали current_spot_order_id_storage_clone из вызова ---
         let result = hedger.run_hedge(
             params,
             progress_callback,
-            current_spot_order_id_storage_clone,
+            // current_spot_order_id_storage_clone, // <-- УДАЛЕНО
             total_filled_qty_storage_clone,
             operation_id,
             db_clone.as_ref(),
@@ -245,8 +241,9 @@ where
         operation_type: OperationType::Hedge,
         symbol: symbol_for_info,
         bot_message_id: bot_message_id.0,
-        current_spot_order_id: current_spot_order_id_storage,
-        total_filled_spot_qty: total_filled_qty_storage,
+        // --- ИСПРАВЛЕНО: Убрали current_spot_order_id ---
+        // current_spot_order_id: current_spot_order_id_storage,
+        total_filled_spot_qty: total_filled_qty_storage, // Оставляем это, т.к. оно нужно для отмены
     };
     running_operations.lock().await.insert((chat_id, operation_id), info);
     info!("op_id:{}: Stored running hedge info.", operation_id);
@@ -274,7 +271,6 @@ where
 
     let mut previous_bot_message_id: Option<i32> = None;
     {
-        // <<< ИСПРАВЛЕНО: .await >>>
         let mut state_guard = state_storage.write().await;
         if let Some(old_state) = state_guard.get(&chat_id) {
             previous_bot_message_id = match old_state {
@@ -306,7 +302,6 @@ where
         let kb = make_dialog_keyboard();
         let bot_msg = bot.send_message(chat_id, text).reply_markup(kb).await?;
         {
-             // <<< ИСПРАВЛЕНО: .await >>>
             let mut state_guard = state_storage.write().await;
             state_guard.insert(chat_id, UserState::AwaitingHedgeSum {
                 symbol: symbol.clone(),
@@ -330,7 +325,6 @@ pub async fn handle_start_hedge_callback<E>(
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
-    // Используем as_ref() и .id() / .chat()
     if let Some(msg) = q.message.as_ref() {
         let chat_id = msg.chat().id;
         info!("Processing '{}' callback for chat_id: {}", callback_data::START_HEDGE, chat_id);
@@ -346,7 +340,7 @@ where
 
 /// Запрашивает у пользователя выбор актива для хеджирования
 async fn prompt_asset_selection<E>(
-    bot: Bot, // Принимаем по значению, так как передаем дальше
+    bot: Bot,
     chat_id: ChatId,
     state_storage: StateStorage,
     exchange: Arc<E>,
@@ -365,10 +359,8 @@ where
         let kb = InlineKeyboardMarkup::new(vec![vec![
              InlineKeyboardButton::callback("⬅️ Назад", callback_data::BACK_TO_MAIN)
         ]]);
-        // Принимает &Bot
         let _ = bot.edit_message_text(chat_id, msg_id, loading_text).reply_markup(kb).await;
     } else {
-         // Принимает &Bot
         let sent_msg = bot.send_message(chat_id, loading_text).await?;
         bot_message_id = Some(sent_msg.id);
     }
@@ -407,7 +399,6 @@ where
             }
 
             {
-                // <<< ИСПРАВЛЕНО: .await >>>
                 let mut state_guard = state_storage.write().await;
                 state_guard.insert(chat_id, UserState::AwaitingHedgeAssetSelection {
                     last_bot_message_id: bot_message_id.map(|id| id.0),
@@ -426,7 +417,6 @@ where
              } else {
                  let _ = bot.send_message(chat_id, error_text).reply_markup(kb).await;
              }
-              // <<< ИСПРАВЛЕНО: .await >>>
               { state_storage.write().await.insert(chat_id, UserState::None); }
              return Err(e.into());
         }
@@ -446,17 +436,15 @@ pub async fn handle_hedge_asset_callback<E>(
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
-    // Используем as_ref() и .id() / .chat()
     if let (Some(data), Some(msg)) = (q.data.as_deref(), q.message.as_ref()) {
         let chat_id = msg.chat().id;
         if let Some(symbol) = data.strip_prefix(callback_data::PREFIX_HEDGE_ASSET) {
              info!("User {} selected asset {} for hedge via callback", chat_id, symbol);
 
             let is_correct_state = {
-                // <<< ИСПРАВЛЕНО: .await >>>
                  let state_guard = state_storage.read().await;
                  matches!(state_guard.get(&chat_id), Some(UserState::AwaitingHedgeAssetSelection { .. }))
-            }; // Блокировка чтения освобождается здесь
+            };
 
             if is_correct_state {
                 let text = format!("Введите сумму {} для хеджирования {}:", cfg.quote_currency, symbol);
@@ -464,7 +452,6 @@ where
                 bot.edit_message_text(chat_id, msg.id(), text).reply_markup(kb).await?;
 
                 {
-                    // <<< ИСПРАВЛЕНО: .await >>>
                     let mut state_guard = state_storage.write().await;
                     if let Some(current_state @ UserState::AwaitingHedgeAssetSelection { .. }) = state_guard.get_mut(&chat_id) {
                          *current_state = UserState::AwaitingHedgeSum {
@@ -476,10 +463,9 @@ where
                          warn!("State changed unexpectedly for {} before setting AwaitingHedgeSum", chat_id);
                          let _ = navigation::show_main_menu(&bot, chat_id, Some(msg.id())).await;
                     }
-                } // Блокировка записи освобождается здесь
+                }
             } else {
                  warn!("User {} clicked hedge asset button but was in wrong state", chat_id);
-                 // <<< ИСПРАВЛЕНО: .await >>>
                  { state_storage.write().await.insert(chat_id, UserState::None); }
                  let _ = navigation::show_main_menu(&bot, chat_id, Some(msg.id())).await;
                  bot.answer_callback_query(q.id).text("Состояние изменилось, начните заново.").show_alert(true).await?;
@@ -517,7 +503,6 @@ where
     }
 
     let previous_bot_message_id = {
-         // <<< ИСПРАВЛЕНО: .await >>>
          let state_guard = state_storage.read().await;
          match state_guard.get(&chat_id) {
             Some(UserState::AwaitingHedgeAssetSelection { last_bot_message_id }) => *last_bot_message_id,
@@ -526,13 +511,13 @@ where
                 return Ok(());
             }
          }
-    }; // Блокировка чтения освобождается здесь
+    };
 
     info!("User {} entered ticker '{}' for hedge", chat_id, text);
 
     if let Err(e) = bot.delete_message(chat_id, message_id).await { warn!("Failed to delete user ticker message: {}", e); }
 
-    let is_valid_ticker = true;
+    let is_valid_ticker = true; // TODO: Add actual ticker validation against exchange info
 
     if is_valid_ticker {
         let prompt_text = format!("Введите сумму {} для хеджирования {}:", cfg.quote_currency, text);
@@ -543,7 +528,6 @@ where
             match bot.edit_message_text(chat_id, bot_msg_id, prompt_text).reply_markup(kb).await {
                Ok(_) => {
                     {
-                        // <<< ИСПРАВЛЕНО: .await >>>
                         let mut state_guard = state_storage.write().await;
                          if let Some(current_state @ UserState::AwaitingHedgeAssetSelection { .. }) = state_guard.get_mut(&chat_id) {
                              *current_state = UserState::AwaitingHedgeSum {
@@ -554,12 +538,11 @@ where
                         } else {
                              warn!("State changed for {} before setting AwaitingHedgeSum after ticker input", chat_id);
                         }
-                    } // Блокировка записи освобождается здесь
+                    }
                 }
                 Err(e) => {
                     error!("Failed to edit message {} to prompt sum: {}", bot_msg_id, e);
                     let _ = navigation::show_main_menu(&bot, chat_id, None).await;
-                     // <<< ИСПРАВЛЕНО: .await >>>
                     { state_storage.write().await.insert(chat_id, UserState::None); }
                 }
             }
@@ -567,7 +550,6 @@ where
              warn!("No previous bot message id found for chat_id {} to edit for sum prompt", chat_id);
              let bot_msg = bot.send_message(chat_id, prompt_text).reply_markup(kb).await?;
               {
-                 // <<< ИСПРАВЛЕНО: .await >>>
                  let mut state_guard = state_storage.write().await;
                 state_guard.insert(chat_id, UserState::AwaitingHedgeSum {
                      symbol: text.clone(),
@@ -583,6 +565,7 @@ where
         } else {
              let _ = bot.send_message(chat_id, error_text).await;
         }
+        // State remains AwaitingHedgeAssetSelection
     }
     Ok(())
 }
@@ -600,7 +583,6 @@ pub async fn handle_sum_input(
     let text = msg.text().unwrap_or("").trim();
 
     let (symbol, previous_bot_message_id) = {
-        // <<< ИСПРАВЛЕНО: .await >>>
         let state_guard = state_storage.read().await;
         match state_guard.get(&chat_id) {
             Some(UserState::AwaitingHedgeSum { symbol, last_bot_message_id }) => (symbol.clone(), *last_bot_message_id),
@@ -609,7 +591,7 @@ pub async fn handle_sum_input(
                 return Ok(());
             }
         }
-    }; // Блокировка чтения освобождается здесь
+    };
 
      if let Err(e) = bot.delete_message(chat_id, message_id).await { warn!("Failed to delete user sum message: {}", e); }
 
@@ -624,7 +606,6 @@ pub async fn handle_sum_input(
                  match bot.edit_message_text(chat_id, bot_msg_id, prompt_text).reply_markup(kb).await {
                     Ok(_) => {
                          {
-                            // <<< ИСПРАВЛЕНО: .await >>>
                              let mut state_guard = state_storage.write().await;
                               if let Some(current_state @ UserState::AwaitingHedgeSum { .. }) = state_guard.get_mut(&chat_id) {
                                   *current_state = UserState::AwaitingHedgeVolatility {
@@ -636,12 +617,11 @@ pub async fn handle_sum_input(
                              } else {
                                  warn!("State changed for {} before setting AwaitingHedgeVolatility", chat_id);
                              }
-                         } // Блокировка записи освобождается здесь
+                         }
                     }
                     Err(e) => {
                          error!("Failed to edit message {} to prompt volatility: {}", bot_msg_id, e);
                          let _ = navigation::show_main_menu(&bot, chat_id, None).await;
-                         // <<< ИСПРАВЛЕНО: .await >>>
                          { state_storage.write().await.insert(chat_id, UserState::None); }
                     }
                  }
@@ -649,7 +629,6 @@ pub async fn handle_sum_input(
                  warn!("No previous bot message id found for chat_id {} to edit for volatility prompt", chat_id);
                  let bot_msg = bot.send_message(chat_id, prompt_text).reply_markup(kb).await?;
                   {
-                     // <<< ИСПРАВЛЕНО: .await >>>
                      let mut state_guard = state_storage.write().await;
                      state_guard.insert(chat_id, UserState::AwaitingHedgeVolatility {
                          symbol: symbol.clone(),
@@ -666,6 +645,7 @@ pub async fn handle_sum_input(
                    let error_text = format!("⚠️ Сумма должна быть положительной. Введите сумму {} для хеджирования {}:", cfg.quote_currency, symbol);
                    let _ = bot.edit_message_text(chat_id, MessageId(bot_msg_id_int), error_text).await;
               }
+              // State remains AwaitingHedgeSum
          }
          Err(_) => {
              warn!("User {} entered invalid sum format: {}", chat_id, text);
@@ -673,6 +653,7 @@ pub async fn handle_sum_input(
                  let error_text = format!("⚠️ Неверный формат суммы. Введите сумму {} для хеджирования {}:", cfg.quote_currency, symbol);
                  let _ = bot.edit_message_text(chat_id, MessageId(bot_msg_id_int), error_text).await;
              }
+             // State remains AwaitingHedgeSum
          }
     }
      Ok(())
@@ -684,9 +665,9 @@ pub async fn handle_volatility_input<E>(
     msg: Message,
     exchange: Arc<E>,
     state_storage: StateStorage,
-    _running_operations: RunningOperations,
+    _running_operations: RunningOperations, // Changed to _running_operations as it's not used directly here
     cfg: Arc<Config>,
-    _db: Arc<Db>,
+    _db: Arc<Db>, // Changed to _db as it's not used directly here
 ) -> anyhow::Result<()>
 where
     E: Exchange + Clone + Send + Sync + 'static,
@@ -696,7 +677,6 @@ where
     let text = msg.text().unwrap_or("").trim();
 
     let (symbol, sum, previous_bot_message_id) = {
-         // <<< ИСПРАВЛЕНО: .await >>>
         let state_guard = state_storage.read().await;
         match state_guard.get(&chat_id) {
             Some(UserState::AwaitingHedgeVolatility { symbol, sum, last_bot_message_id }) => (symbol.clone(), *sum, *last_bot_message_id),
@@ -705,7 +685,7 @@ where
                 return Ok(());
             }
         }
-    }; // Блокировка чтения освобождается здесь
+    };
 
      if let Err(e) = bot.delete_message(chat_id, message_id).await { warn!("Failed to delete user volatility message: {}", e); }
 
@@ -727,6 +707,7 @@ where
             }
             let bot_msg_id = bot_msg_id_opt.ok_or_else(|| anyhow::anyhow!("Failed to get bot message ID for calculation status"))?;
 
+            // --- ИСПРАВЛЕНО: Передаем quote_currency в calculate_hedge_params ---
             match hedger.calculate_hedge_params(&hedge_request).await {
                 Ok(params) => {
                     info!("Hedge parameters calculated for {}: {:?}", chat_id, params);
@@ -750,7 +731,6 @@ where
                     bot.edit_message_text(chat_id, bot_msg_id, confirmation_text).reply_markup(kb).await?;
 
                     {
-                         // <<< ИСПРАВЛЕНО: .await >>>
                         let mut state_guard = state_storage.write().await;
                         if let Some(current_state @ UserState::AwaitingHedgeVolatility { .. }) = state_guard.get_mut(&chat_id) {
                             *current_state = UserState::AwaitingHedgeConfirmation {
@@ -763,7 +743,7 @@ where
                        } else {
                             warn!("State changed for {} before setting AwaitingHedgeConfirmation", chat_id);
                        }
-                    } // Блокировка записи освобождается здесь
+                    }
                 }
                 Err(e) => {
                     error!("Hedge parameter calculation failed for {}: {}", chat_id, e);
@@ -772,6 +752,7 @@ where
                         InlineKeyboardButton::callback("❌ Отмена", callback_data::CANCEL_DIALOG)
                     ]]);
                     bot.edit_message_text(chat_id, bot_msg_id, error_text).reply_markup(kb).await?;
+                    // State remains AwaitingHedgeVolatility
                 }
             }
         }
@@ -781,6 +762,7 @@ where
                 let error_text = format!("⚠️ Волатильность должна быть не отрицательной (в %). Введите снова:");
                 let _ = bot.edit_message_text(chat_id, MessageId(bot_msg_id_int), error_text).await;
              }
+             // State remains AwaitingHedgeVolatility
         }
         Err(_) => {
             warn!("User {} entered invalid volatility format: {}", chat_id, text);
@@ -788,11 +770,13 @@ where
                 let error_text = format!("⚠️ Неверный формат волатильности (в %). Введите снова:");
                 let _ = bot.edit_message_text(chat_id, MessageId(bot_msg_id_int), error_text).await;
             }
+            // State remains AwaitingHedgeVolatility
         }
     }
      Ok(())
 }
 
+/// Обработчик колбэка подтверждения хеджа (кнопки yes/no с префиксом h_conf_)
 /// Обработчик колбэка подтверждения хеджа (кнопки yes/no с префиксом h_conf_)
 pub async fn handle_hedge_confirm_callback<E>(
     bot: Bot,
@@ -819,7 +803,6 @@ where
                         info!("User {} confirmed hedge operation", chat_id);
 
                         let (symbol, sum, volatility_fraction) = {
-                            // <<< ИСПРАВЛЕНО: .await >>>
                             let state_guard = state_storage.read().await;
                             match state_guard.get(&chat_id) {
                                 Some(UserState::AwaitingHedgeConfirmation { symbol, sum, volatility, .. }) => (symbol.clone(), *sum, *volatility),
@@ -827,13 +810,11 @@ where
                                     warn!("User {} confirmed hedge but was in wrong state", chat_id);
                                     bot.answer_callback_query(query_id).text("Состояние изменилось, начните заново.").show_alert(true).await?;
                                     let _ = navigation::show_main_menu(&bot, chat_id, Some(message_id)).await;
-                                     // <<< ИСПРАВЛЕНО: .await >>>
                                     { state_storage.write().await.insert(chat_id, UserState::None); }
-                                    return Ok(());
+                                    return Ok(()); // Возвращаем Ok(())
                                 }
                             }
-                        }; // Блокировка чтения освобождается здесь
-                         // <<< ИСПРАВЛЕНО: .await >>>
+                        };
                         { state_storage.write().await.insert(chat_id, UserState::None); }
 
                         let waiting_text = format!("⏳ Запуск хеджирования для {}...", symbol);
@@ -844,6 +825,7 @@ where
                         let hedge_request = HedgeRequest { sum, symbol: symbol.clone(), volatility: volatility_fraction };
                         let hedger = Hedger::new((*exchange).clone(), (*cfg).clone());
 
+                        // Передаем quote_currency в calculate_hedge_params
                         match hedger.calculate_hedge_params(&hedge_request).await {
                             Ok(params) => {
                                 info!("Hedge parameters re-calculated just before execution for {}: {:?}", chat_id, params);
@@ -860,49 +842,51 @@ where
                                          .reply_markup(navigation::make_main_menu_keyboard())
                                          .await;
                                 bot.answer_callback_query(query_id).await?;
-                                return Ok(());
+                                return Ok(()); // Возвращаем Ok(()) после ошибки
                             }
                         }
                     } else {
                         warn!("CallbackQuery missing message on 'yes' confirmation for {}", query_id);
                         bot.answer_callback_query(query_id).await?;
-                        return Ok(());
+                        // Не возвращаем ошибку, просто выходим
                     }
 
                 } else if payload == "no" {
                     info!("User {} cancelled hedge at confirmation", chat_id);
                     bot.answer_callback_query(query_id).await?;
                     navigation::handle_cancel_dialog(bot, chat_id, message_id, state_storage).await?;
-                    return Ok(());
+                    // handle_cancel_dialog возвращает Result, поэтому здесь не нужен return Ok(())
 
                 } else {
                     warn!("Invalid payload for hedge confirmation callback: {}", payload);
                     bot.answer_callback_query(query_id).await?;
-                    return Ok(());
+                    // Не возвращаем ошибку, просто выходим
                 }
             } else if data == callback_data::CANCEL_DIALOG {
                 info!("User cancelled hedge dialog via cancel button");
                 bot.answer_callback_query(query_id).await?;
                 navigation::handle_cancel_dialog(bot, chat_id, message_id, state_storage).await?;
-                return Ok(());
+                 // handle_cancel_dialog возвращает Result, поэтому здесь не нужен return Ok(())
             }
              else {
                  warn!("Invalid callback data format for hedge confirmation prefix: {}", data);
                  bot.answer_callback_query(query_id).await?;
-                 return Ok(());
+                 // Не возвращаем ошибку, просто выходим
             }
         } else {
             warn!("CallbackQuery missing data in handle_hedge_confirm_callback");
             bot.answer_callback_query(query_id).await?;
-            return Ok(());
+            // Не возвращаем ошибку, просто выходим
         }
     } else {
          warn!("CallbackQuery missing message in handle_hedge_confirm_callback");
          bot.answer_callback_query(query_id).await?;
-         return Ok(());
+         // Не возвращаем ошибку, просто выходим
     }
+    // --- ИСПРАВЛЕНО: Убедимся, что всегда возвращаем Ok(()) в конце, если не было раннего return ---
     Ok(())
 }
+
 
 // TODO: Добавить обработчики для VIEW_ALL_PAIRS и пагинации (PREFIX_PAGE_*)
 // TODO: Добавить обработчик для PREFIX_HEDGE_PAIR

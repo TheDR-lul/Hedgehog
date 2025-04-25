@@ -167,23 +167,24 @@ where
         stage: HedgeStage::Spot,
         is_spot: true,
         min_order_qty_decimal: Some(min_spot_qty_decimal), // Передаем для проверки на пыль
-        current_order_id_storage: None, // Не нужно внешнее хранилище ID
+        // --- ИСПРАВЛЕНО: Убрали current_order_id_storage ---
         total_filled_qty_storage: spot_filled_storage.clone(), // Свой счетчик
     };
 
+    // --- ИСПРАВЛЕНО: Обрабатываем результат (f64, Option<String>) ---
     let final_spot_sold_qty = match manage_order_loop(spot_loop_params).await {
-        Ok(filled_qty) => {
+        Ok((filled_qty, _last_order_id_opt)) => { // Деструктурируем кортеж
             info!(
                 "op_id={}: Unhedge SPOT sell stage finished. Final actual spot sold quantity: {:.8}",
-                original_hedge_op_id, filled_qty
+                original_hedge_op_id, filled_qty // Используем filled_qty (f64)
             );
             if (filled_qty - actual_spot_sell_qty).abs() > ORDER_FILL_TOLERANCE * 10.0 {
                 warn!(
                     "op_id={}: Final spot sold qty {:.8} significantly differs from target {:.8}.",
-                    original_hedge_op_id, filled_qty, actual_spot_sell_qty
+                    original_hedge_op_id, filled_qty, actual_spot_sell_qty // Используем filled_qty (f64)
                 );
             }
-            filled_qty
+            filled_qty // Возвращаем только f64
         }
         Err(loop_err) => {
             error!(
@@ -198,7 +199,7 @@ where
     // --- Отправляем финальный колбэк для спота (100%) ---
     let spot_price_for_cb = match hedger.exchange.get_spot_price(&symbol).await {
          Ok(p) => p, Err(_) => current_spot_price // Fallback
-    };
+     };
     let spot_done_update = HedgeProgressUpdate {
         stage: HedgeStage::Spot,
         current_spot_price: spot_price_for_cb,
@@ -257,23 +258,24 @@ where
         stage: HedgeStage::Futures,
         is_spot: false,
         min_order_qty_decimal: None, // Не нужно
-        current_order_id_storage: None, // Не нужно
+        // --- ИСПРАВЛЕНО: Убрали current_order_id_storage ---
         total_filled_qty_storage: futures_filled_storage.clone(), // Свой счетчик
     };
 
+    // --- ИСПРАВЛЕНО: Обрабатываем результат (f64, Option<String>) ---
     let final_fut_bought_qty = match manage_order_loop(futures_loop_params).await {
-        Ok(filled_qty) => {
+        Ok((filled_qty, _last_order_id_opt)) => { // Деструктурируем кортеж
             info!(
                 "op_id:{}: Unhedge FUTURES buy stage finished. Final actual futures bought quantity: {:.8}",
-                original_hedge_op_id, filled_qty
+                original_hedge_op_id, filled_qty // Используем filled_qty (f64)
             );
              if (filled_qty - futures_buy_qty).abs() > ORDER_FILL_TOLERANCE * 10.0 {
                 warn!(
                     "op_id:{}: Final futures bought qty {:.8} significantly differs from target {:.8}.",
-                    original_hedge_op_id, filled_qty, futures_buy_qty
+                    original_hedge_op_id, filled_qty, futures_buy_qty // Используем filled_qty (f64)
                 );
             }
-            filled_qty
+            filled_qty // Возвращаем только f64
         }
         Err(loop_err) => {
             error!(
@@ -305,7 +307,7 @@ where
     // --- Отправляем финальный колбэк для фьючерса (100%) ---
     let fut_price_for_cb = match hedger.exchange.get_futures_ticker(&futures_symbol).await {
          Ok(t) => (t.bid_price + t.ask_price) / 2.0, Err(_) => futures_market_price
-     };
+      };
     let fut_done_update = HedgeProgressUpdate {
         stage: HedgeStage::Futures,
         current_spot_price: fut_price_for_cb, // Цена фьючерса
