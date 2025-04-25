@@ -52,3 +52,11 @@ pub struct OrderStatus {
     pub filled_qty:    f64,
     pub remaining_qty: f64,
 }
+
+#[derive(Debug, Clone)]
+pub struct FuturesTickerInfo {
+    pub symbol: String,
+    pub bid_price: f64,
+    pub ask_price: f64,
+    pub last_price: f64,
+}

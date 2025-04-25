@@ -1,16 +1,14 @@
 // src/exchange/bybit.rs
 
 // --- Используемые типажи и структуры ---
-// --- ИСПРАВЛЕНО: Убран импорт локально определенных структур ---
 use super::{Exchange, OrderStatus, FeeRate};
-// --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 use crate::exchange::types::{Balance, Order, OrderSide};
 // --- Стандартные и внешние зависимости ---
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
 use reqwest::{Client, Method};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::Sha256;
 use std::str::FromStr;
@@ -20,6 +18,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, trace, warn};
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
+use crate::exchange::FuturesTickerInfo;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -202,13 +201,13 @@ struct OrderQueryEntry {
 }
 
 /// Ответ по тикерам
-#[derive(Deserialize, Debug, Default)]
+#[derive(Deserialize,Serialize ,Debug, Default)]
 struct TickersResult {
     category: String,
     list: Vec<TickerInfo>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize,Serialize, Debug)]
 struct TickerInfo {
     symbol: String,
     #[serde(rename = "lastPrice")]
@@ -857,23 +856,15 @@ impl Exchange for Bybit {
     }
 
     // --- НОВАЯ ФУНКЦИЯ: Размещение ЛИМИТНОГО ордера (для ФЬЮЧЕРСОВ) ---
-    async fn place_futures_limit_order(
-        &self,
-        symbol: &str, // Полный символ: BTCUSDT
-        side: OrderSide,
-        qty: f64,
-        price: f64, // Добавлен параметр цены
-    ) -> Result<Order> {
+    async fn place_futures_limit_order( &self, symbol: &str, side: OrderSide, qty: f64, price: f64 ) -> Result<Order> {
         let base_symbol = symbol.trim_end_matches(&self.quote_currency);
         if base_symbol.is_empty() || base_symbol == symbol { return Err(anyhow!("Invalid futures symbol format: {}", symbol)); }
 
         let instrument_info = self.get_linear_instrument_info(base_symbol).await?;
-        let qty_step_str = instrument_info.lot_size_filter.qty_step.as_deref()
-            .ok_or_else(|| anyhow!("Missing qtyStep for linear symbol {}", symbol))?;
+        let qty_step_str = instrument_info.lot_size_filter.qty_step.as_deref().ok_or_else(|| anyhow!("Missing qtyStep for linear symbol {}", symbol))?;
         let min_order_qty_str = &instrument_info.lot_size_filter.min_order_qty;
-        let tick_size_str = &instrument_info.price_filter.tick_size; // Нужен tick_size для форматирования цены
+        let tick_size_str = &instrument_info.price_filter.tick_size;
 
-        // Форматируем количество
         let qty_decimals = qty_step_str.split('.').nth(1).map_or(0, |s| s.trim_end_matches('0').len()) as u32;
         let formatted_qty = match Decimal::from_f64(qty) {
              Some(qty_d) if qty_d > dec!(0.0) => {
@@ -893,63 +884,42 @@ impl Exchange for Bybit {
         };
         if formatted_qty == "0" { return Err(anyhow!("Formatted quantity is zero")); }
 
-        // Форматируем цену
         let price_decimals = tick_size_str.split('.').nth(1).map_or(0, |s| s.trim_end_matches('0').len()) as u32;
         let formatted_price = match Decimal::from_f64(price) {
-            Some(d) => d.round_dp(price_decimals).to_string(), // Округляем до нужной точности
+            Some(d) => d.round_dp(price_decimals).to_string(),
             None => return Err(anyhow!("Invalid price value {}", price)),
         };
 
-        // --- ЛОГИРОВАНИЕ ---
         info!(
-            target: "bybit_futures_order",
-            symbol=%symbol,
-            side=%side,
-            order_type="Limit", // Изменено
-            original_qty=qty,
-            formatted_qty=%formatted_qty,
-            original_price=price,
-            formatted_price=%formatted_price,
-            category=LINEAR_CATEGORY,
+            target: "bybit_futures_order", symbol=%symbol, side=%side, order_type="Limit",
+            original_qty=qty, formatted_qty=%formatted_qty, original_price=price,
+            formatted_price=%formatted_price, category=LINEAR_CATEGORY,
             "Preparing FUTURES limit order parameters"
         );
-        // --- КОНЕЦ ЛОГИРОВАНИЯ ---
 
         let body = json!({
-            "category": LINEAR_CATEGORY,
-            "symbol": symbol,
-            "side": side.to_string(),
-            "orderType": "Limit", // Изменено
-            "qty": formatted_qty,
-            "price": formatted_price, // Добавлено
-            "timeInForce": "GTC" // Для лимитных ордеров обычно нужен TimeInForce
+            "category": LINEAR_CATEGORY, "symbol": symbol, "side": side.to_string(),
+            "orderType": "Limit", "qty": formatted_qty, "price": formatted_price,
+            "timeInForce": "GTC"
         });
 
-        // --- ЛОГИРОВАНИЕ ---
         let body_string = serde_json::to_string(&body).unwrap_or_else(|_| "Failed to serialize body".to_string());
         info!(
-            target: "bybit_futures_order",
-            request_body=%body_string,
+            target: "bybit_futures_order", request_body=%body_string,
             "Sending FUTURES limit order request"
         );
-        // --- КОНЕЦ ЛОГИРОВАНИЯ ---
 
         let result: OrderCreateResult = self.call_api(
-            Method::POST,
-            "v5/order/create",
-            None,
-            Some(body),
-            true
+            Method::POST, "v5/order/create", None, Some(body), true
         ).await?;
 
         info!(
-            target: "bybit_futures_order",
-            order_id = %result.id,
+            target: "bybit_futures_order", order_id = %result.id,
             "FUTURES limit order placed successfully: order_id={}", result.id
         );
-        // Возвращаем цену, по которой размещен лимитный ордер
         Ok(Order { id: result.id, side, qty, price: Some(price), ts: self.get_timestamp_ms().await? })
     }
+
 
     /// Размещение рыночного ордера (для СПОТА)
     async fn place_spot_market_order(
@@ -1145,4 +1115,100 @@ impl Exchange for Bybit {
         info!(symbol=%linear_pair, leverage=%leverage_str, "Set leverage request sent successfully (or leverage was already set to this value)");
         Ok(())
     }
+
+       /// Отмена СПОТ ордера
+       async fn cancel_spot_order(&self, symbol: &str, order_id: &str) -> Result<()> {
+        let spot_pair = self.format_pair(symbol);
+        info!(symbol=%spot_pair, order_id, category=SPOT_CATEGORY, "Cancelling SPOT order");
+        let body = json!({ "category": SPOT_CATEGORY, "symbol": spot_pair, "orderId": order_id });
+        self.call_api::<EmptyResult>(Method::POST, "v5/order/cancel", None, Some(body), true).await?;
+        info!(order_id, "SPOT Order cancel request sent (or order was inactive)");
+        Ok(())
+    }
+
+    // --- НОВЫЙ МЕТОД: Отмена ФЬЮЧЕРСНОГО ордера ---
+    async fn cancel_futures_order(&self, symbol: &str, order_id: &str) -> Result<()> {
+        // symbol здесь уже должен быть полным, например BTCUSDT
+        info!(symbol=%symbol, order_id, category=LINEAR_CATEGORY, "Cancelling FUTURES order");
+        let body = json!({ "category": LINEAR_CATEGORY, "symbol": symbol, "orderId": order_id });
+        // Ошибки "не найден" и т.д. игнорируются в call_api
+        self.call_api::<EmptyResult>(Method::POST, "v5/order/cancel", None, Some(body), true).await?;
+        info!(order_id, "FUTURES Order cancel request sent (or order was inactive)");
+        Ok(())
+    }
+
+        /// Получение статуса СПОТ ордера (переименовано)
+        async fn get_spot_order_status(&self, symbol: &str, order_id: &str) -> Result<OrderStatus> {
+            let spot_pair = self.format_pair(symbol);
+            debug!(symbol=%spot_pair, order_id, category=SPOT_CATEGORY, "Fetching SPOT order status");
+            let params = [("category", SPOT_CATEGORY), ("orderId", order_id)];
+            let query_result: OrderQueryResult = self.call_api(Method::GET, "v5/order/realtime", Some(&params), None, true).await?;
+    
+            let order_entry = query_result.list.into_iter().next().ok_or_else(|| {
+                warn!("Order ID {} not found in realtime query for {}", order_id, spot_pair);
+                anyhow!("Order not found")
+            })?;
+    
+            let filled = if order_entry.cum_exec_qty.is_empty() { 0.0 } else { order_entry.cum_exec_qty.parse::<f64>()? };
+            let remaining = if order_entry.leaves_qty.is_empty() { 0.0 } else { order_entry.leaves_qty.parse::<f64>()? };
+            info!(order_id, status=%order_entry.status, filled, remaining, "Order status received (SPOT)");
+            Ok(OrderStatus { filled_qty: filled, remaining_qty: remaining })
+        }
+    
+        // --- НОВЫЙ МЕТОД: Получение статуса ФЬЮЧЕРСНОГО ордера ---
+        async fn get_futures_order_status(&self, symbol: &str, order_id: &str) -> Result<OrderStatus> {
+            // symbol здесь уже должен быть полным, например BTCUSDT
+            debug!(symbol=%symbol, order_id, category=LINEAR_CATEGORY, "Fetching FUTURES order status");
+            let params = [("category", LINEAR_CATEGORY), ("orderId", order_id)];
+            let query_result: OrderQueryResult = self.call_api(Method::GET, "v5/order/realtime", Some(&params), None, true).await?;
+    
+            let order_entry = query_result.list.into_iter().next().ok_or_else(|| {
+                warn!("Futures Order ID {} not found in realtime query for {}", order_id, symbol);
+                anyhow!("Order not found")
+            })?;
+    
+            let filled = if order_entry.cum_exec_qty.is_empty() { 0.0 } else { order_entry.cum_exec_qty.parse::<f64>()? };
+            let remaining = if order_entry.leaves_qty.is_empty() { 0.0 } else { order_entry.leaves_qty.parse::<f64>()? };
+            info!(order_id, status=%order_entry.status, filled, remaining, "Order status received (FUTURES)");
+            Ok(OrderStatus { filled_qty: filled, remaining_qty: remaining })
+        }
+        async fn get_futures_ticker(&self, symbol: &str) -> Result<FuturesTickerInfo> {
+            // symbol здесь уже должен быть полным, например BTCUSDT
+            debug!(symbol=%symbol, category=LINEAR_CATEGORY, "Fetching futures ticker");
+            let params = [("category", LINEAR_CATEGORY), ("symbol", symbol)];
+            let tickers_result: TickersResult = self.call_api(Method::GET, "v5/market/tickers", Some(&params), None, false).await?;
+    
+            // Внутренняя структура ответа Bybit (нужно добавить парсинг bid/ask)
+            #[derive(Deserialize, Debug)]
+            struct InternalTickerInfo {
+                symbol: String,
+                #[serde(rename = "lastPrice")]
+                last_price: String,
+                #[serde(rename = "bid1Price")]
+                bid1_price: String,
+                #[serde(rename = "ask1Price")]
+                ask1_price: String,
+                // Можно добавить другие поля при необходимости
+            }
+            #[derive(Deserialize, Debug, Default)]
+            struct InternalTickersResult {
+                category: String,
+                list: Vec<InternalTickerInfo>,
+            }
+    
+            // Перепарсиваем результат в новую структуру
+            let internal_tickers_result: InternalTickersResult = serde_json::from_value(
+                serde_json::to_value(tickers_result)? // Сначала обратно в Value
+            )?;
+    
+            let ticker = internal_tickers_result.list.into_iter()
+                .find(|t| t.symbol == symbol)
+                .ok_or_else(|| anyhow!("No futures ticker info found for {}", symbol))?;
+    
+            let bid_price = ticker.bid1_price.parse::<f64>().map_err(|e| anyhow!("Failed to parse bid price for {}: {}", symbol, e))?;
+            let ask_price = ticker.ask1_price.parse::<f64>().map_err(|e| anyhow!("Failed to parse ask price for {}: {}", symbol, e))?;
+            let last_price = ticker.last_price.parse::<f64>().map_err(|e| anyhow!("Failed to parse last price for {}: {}", symbol, e))?;
+    
+            Ok(FuturesTickerInfo { symbol: ticker.symbol, bid_price, ask_price, last_price })
+        }
 }

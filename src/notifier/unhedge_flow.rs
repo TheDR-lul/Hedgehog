@@ -1,5 +1,4 @@
 // src/notifier/unhedge_flow.rs
-
 use super::{
     StateStorage, UserState, RunningOperations, callback_data, navigation,
 };
@@ -9,9 +8,14 @@ use crate::storage::{
     Db, HedgeOperation, get_completed_unhedged_ops_for_symbol,
     get_all_completed_unhedged_ops, get_hedge_operation_by_id,
 };
-use crate::hedger::Hedger;
+// --- ДОБАВЛЕНЫ НУЖНЫЕ ИМПОРТЫ ---
+use crate::hedger::{
+    Hedger, HedgeProgressCallback, HedgeProgressUpdate, ORDER_FILL_TOLERANCE
+};
 use std::{collections::HashMap, sync::Arc};
 use chrono::{Utc, TimeZone, LocalResult};
+use futures::future::FutureExt; // Для .boxed()
+// --- КОНЕЦ ДОБАВЛЕННЫХ ИМПОРТОВ ---
 // use tokio::sync::Mutex as TokioMutex;
 use teloxide::prelude::*;
 use teloxide::types::{
@@ -65,13 +69,12 @@ fn make_unhedge_confirmation_keyboard(_operation_id: i64) -> InlineKeyboardMarku
     ])
 }
 
-/// Показывает пользователю список операций для расхеджирования для КОНКРЕТНОГО символа
 async fn prompt_operation_selection(
     bot: &Bot,
     chat_id: ChatId,
     symbol: &str,
     operations: Vec<HedgeOperation>,
-    state_storage: StateStorage, // Тип StateStorage уже Arc<TokioRwLock<...>>
+    state_storage: StateStorage,
     message_id_to_edit: Option<MessageId>,
 ) -> anyhow::Result<()> {
 
@@ -86,7 +89,6 @@ async fn prompt_operation_selection(
       };
 
       {
-          // <<< ИСПРАВЛЕНО: .await >>>
           let mut state_guard = state_storage.write().await;
           state_guard.insert(chat_id, UserState::AwaitingUnhedgeOperationSelection {
               symbol: symbol.to_string(),
@@ -94,7 +96,7 @@ async fn prompt_operation_selection(
               last_bot_message_id: Some(bot_msg_id.0),
           });
           info!("User state for {} set to AwaitingUnhedgeOperationSelection for symbol {}", chat_id, symbol);
-      } // Блокировка записи освобождается здесь
+      }
       Ok(())
 }
 
@@ -104,9 +106,9 @@ async fn spawn_unhedge_task<E>(
     exchange: Arc<E>,
     cfg: Arc<Config>,
     db: Arc<Db>,
-    _running_operations: RunningOperations,
+    _running_operations: RunningOperations, // Пока не используется для отслеживания unhedge
     chat_id: ChatId,
-    op_to_unhedge: HedgeOperation,
+    op_to_unhedge: HedgeOperation, // Принимаем всю операцию
     message_id_to_edit: MessageId,
 )
 where
@@ -114,18 +116,75 @@ where
 {
     let hedger = Hedger::new((*exchange).clone(), (*cfg).clone());
     let original_op_id = op_to_unhedge.id;
-    let symbol = op_to_unhedge.base_symbol.clone();
-    let bot_clone = bot.clone();
-    let db_clone = db.clone();
+    let symbol = op_to_unhedge.base_symbol.clone(); // Клон символа для задачи
+    let bot_clone = bot.clone(); // Клон бота для задачи и колбэка
+    let db_clone = db.clone(); // Клон пула БД для задачи
+    let cfg_clone = cfg.clone(); // Клон конфига для колбэка
+    let original_op_clone = op_to_unhedge.clone(); // Клон данных операции для колбэка
+
+    // --- Создание колбэка прогресса для расхеджирования ---
+    let progress_callback: HedgeProgressCallback = Box::new(move |update: HedgeProgressUpdate| {
+        let bot_for_callback = bot_clone.clone();
+        let qc = cfg_clone.quote_currency.clone(); // Используем клон cfg
+        let symbol_cb = symbol.clone(); // Используем клон symbol
+        let msg_id_cb = message_id_to_edit; // Копируем ID сообщения
+        let chat_id_cb = chat_id; // Копируем ID чата
+        let operation_id_cb = original_op_id; // Копируем ID операции
+        // Используем целевое количество спота из оригинальной операции для расчета общего %
+        // (Хотя сам прогрессбар пока показывает прогресс текущего ордера)
+        let _overall_target_qty = original_op_clone.spot_filled_qty;
+
+        async move {
+            // Прогресс текущего ордера
+            let current_order_filled_percent = if update.target_qty > ORDER_FILL_TOLERANCE {
+                (update.filled_qty / update.target_qty) * 100.0 } else { 0.0 };
+
+            let progress_bar_len = 10;
+            let filled_blocks = (current_order_filled_percent / (100.0 / progress_bar_len as f64)).round() as usize;
+            let empty_blocks = progress_bar_len - filled_blocks;
+            let progress_bar = format!("[{}{}]", "█".repeat(filled_blocks), "░".repeat(empty_blocks));
+            let status_text = if update.is_replacement { "(Ордер переставлен)" } else { "" };
+
+            // --- Адаптированный текст для Расхеджирования ---
+            let text = format!(
+                 "⏳ Расхеджирование ID:{} {} ({}) в процессе...\nРын.цена: {:.2}\nОрдер на ПРОДАЖУ: {:.2} {}\nИсполнено (тек.ордер): {:.6}/{:.6} ({:.1}%)",
+                 operation_id_cb, progress_bar, symbol_cb,
+                 update.current_spot_price, update.new_limit_price, status_text,
+                 update.filled_qty, update.target_qty, current_order_filled_percent
+                 // Можно добавить общий прогресс, если передавать cumulative_filled_qty в update
+                 // / {:.6} (Общий: {:.1}%)", ..., _overall_target_qty, overall_filled_percent
+            );
+            // --- Конец адаптации текста ---
+
+            // Кнопка отмены (пока не работает для unhedge, так как нет отслеживания в RunningOperations)
+            // let cancel_callback_data = format!("{}{}", callback_data::PREFIX_CANCEL_ACTIVE_OP, operation_id_cb);
+            // let cancel_button = InlineKeyboardButton::callback("❌ Отменить эту операцию", cancel_callback_data);
+            // let kb = InlineKeyboardMarkup::new(vec![vec![cancel_button]]);
+            let kb = InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new()); // Пока без кнопки отмены
+
+            if let Err(e) = bot_for_callback.edit_message_text(chat_id_cb, msg_id_cb, text)
+                .reply_markup(kb)
+                .await {
+                // Игнорируем ошибку "message is not modified"
+                if !e.to_string().contains("message is not modified") {
+                    warn!("op_id:{}: Unhedge Progress callback failed: {}", operation_id_cb, e);
+                }
+            }
+            Ok(())
+        }.boxed() // Используем .boxed() для преобразования в BoxFuture
+    });
+    // --- Конец колбэка прогресса ---
 
     tokio::spawn(async move {
-        match hedger.run_unhedge(op_to_unhedge, db_clone.as_ref()).await {
+        // --- Передаем колбэк в run_unhedge ---
+        match hedger.run_unhedge(op_to_unhedge, db_clone.as_ref(), progress_callback).await { // <-- Передан колбэк
             Ok((sold_spot_qty, bought_fut_qty)) => {
                 info!("Unhedge OK for original op_id: {}", original_op_id);
                 let text = format!(
                     "✅ Расхеджирование {} (из операции ID:{}) завершено:\n\n🟢 Спот продано: {:.8}\n🔴 Фьюч куплено: {:.8}",
                     symbol, original_op_id, sold_spot_qty, bought_fut_qty
                 );
+                // Редактируем исходное сообщение с результатом
                 let _ = bot_clone.edit_message_text(chat_id, message_id_to_edit, text)
                              .reply_markup(navigation::make_main_menu_keyboard())
                              .await
@@ -134,14 +193,17 @@ where
             Err(e) => {
                 error!("Unhedge FAILED for original op_id: {}: {}", original_op_id, e);
                 let error_text = format!("❌ Ошибка расхеджирования операции ID:{}: {}", original_op_id, e);
+                // Редактируем исходное сообщение с ошибкой
                 let _ = bot_clone.edit_message_text(chat_id, message_id_to_edit, error_text)
                              .reply_markup(navigation::make_main_menu_keyboard())
                              .await
                              .map_err(|e| warn!("op_id:{}: Failed edit error unhedge message: {}", original_op_id, e));
             }
         }
+        // TODO: Удалить информацию об операции из running_operations, если она туда добавлялась для unhedge
+        // (Пока не добавлялась, т.к. нет отмены для unhedge)
     });
-}
+} // Конец spawn_unhedge_task
 
 /// Определяет, нужно ли выбирать актив или можно сразу показать операции
 async fn start_unhedge_asset_or_op_selection(

@@ -7,6 +7,7 @@ pub use bybit::Bybit;
 // Импортируем типы из types и структуры информации об инструментах из bybit
 pub use types::{Balance, OrderSide, Order, OrderStatus};
 pub use bybit::{SpotInstrumentInfo, LinearInstrumentInfo}; // Добавили импорт для Info
+use crate::exchange::types::FuturesTickerInfo;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -91,4 +92,21 @@ pub trait Exchange {
 
     /// Установить кредитное плечо для символа (фьючерсы linear)
     async fn set_leverage(&self, symbol: &str, leverage: f64) -> Result<()>;
+
+        /// Получить статус ФЬЮЧЕРСНОГО ордера
+    async fn get_futures_order_status(&self, symbol: &str, order_id: &str) -> Result<OrderStatus>;
+
+        /// Получить тикер ФЬЮЧЕРСОВ (bid/ask/last)
+    async fn get_futures_ticker(&self, symbol: &str) -> Result<FuturesTickerInfo>;
+        // --- КОНЕЦ ДОБАВЛЕНИЯ ---
+    
+         /// Получить статус ордера СПОТ (переименовано для ясности)
+    async fn get_spot_order_status(&self, symbol: &str, order_id: &str) -> Result<OrderStatus>; // Было get_order_status
+    
+        /// Отменить СПОТ ордер (переименовано для ясности)
+    async fn cancel_spot_order(&self, symbol: &str, order_id: &str) -> Result<()>; // Было cancel_order
+    
+        /// Отменить ФЬЮЧЕРСНЫЙ ордер
+    async fn cancel_futures_order(&self, symbol: &str, order_id: &str) -> Result<()>; // Новый метод
+    
 }
