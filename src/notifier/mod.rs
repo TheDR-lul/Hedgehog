@@ -12,25 +12,28 @@ pub mod active_ops;
 //pub mod utils;         // TODO: Реализовать
 
 // --- Импорт Зависимостей и Типов ---
-use std::sync::{Arc, RwLock};
-use teloxide::types::{ChatId, Message, MessageId, CallbackQuery};
+use std::sync::Arc;
+// <<< ИЗМЕНЕНО: Убираем RwLock из std::sync >>>
+// use std::sync::RwLock;
+// <<< ДОБАВЛЕНО: Импортируем RwLock из tokio >>>
+use tokio::sync::RwLock as TokioRwLock;
+use teloxide::types::{ChatId, Message, CallbackQuery}; // Убран MessageId
 use std::collections::HashMap;
 use teloxide::utils::command::BotCommands;
 use tokio::task::AbortHandle;
-use tokio::sync::Mutex as TokioMutex;
-use crate::storage::{Db, HedgeOperation}; // HedgeOperation используется в UserState
+use tokio::sync::Mutex as TokioMutex; // Tokio Mutex для RunningOperations - OK
+use crate::storage::{Db, HedgeOperation};
 use crate::config::Config;
 use crate::exchange::Exchange;
 use teloxide::Bot;
 use teloxide::prelude::Requester;
 use teloxide::payloads::AnswerCallbackQuerySetters;
-use tracing::{info, warn};
+use tracing::{info, warn}; // Убран error
 
 // --- Общие Типы Данных Модуля Notifier ---
 
 #[derive(Debug, Clone)]
 pub enum UserState {
-    // ... (остальные состояния без изменений) ...
     AwaitingHedgeAssetSelection { last_bot_message_id: Option<i32> },
     AwaitingHedgeSum { symbol: String, last_bot_message_id: Option<i32> },
     AwaitingHedgeVolatility { symbol: String, sum: f64, last_bot_message_id: Option<i32> },
@@ -40,32 +43,29 @@ pub enum UserState {
         volatility: f64,
         last_bot_message_id: Option<i32>,
     },
-    // Состояния для расхеджирования
     AwaitingUnhedgeAssetSelection { last_bot_message_id: Option<i32> },
     AwaitingUnhedgeOperationSelection {
         symbol: String,
-        operations: Vec<HedgeOperation>, // Вектор операций хранится в состоянии
+        operations: Vec<HedgeOperation>,
         last_bot_message_id: Option<i32>
     },
     AwaitingUnhedgeConfirmation {
-        operation_id: i64, // Храним только ID операции для подтверждения
+        operation_id: i64,
         last_bot_message_id: Option<i32>,
     },
-
-    // Состояния для пагинации/поиска (Все Пары)
     ViewingAllPairs {
         current_page: usize,
         filter: Option<String>,
         pairs: Vec<String>,
         last_bot_message_id: Option<i32>
     },
-
-    // Состояния для других диалогов
     AwaitingFundingSymbolInput { last_bot_message_id: Option<i32> },
     None,
 }
 
-pub type StateStorage = Arc<RwLock<HashMap<ChatId, UserState>>>;
+// <<< ИЗМЕНЕНО: Используем TokioRwLock >>>
+pub type StateStorage = Arc<TokioRwLock<HashMap<ChatId, UserState>>>;
+// ---
 
 #[derive(Debug)]
 pub struct RunningOperationInfo {
@@ -114,7 +114,7 @@ pub async fn dispatch_command<E>(
     msg: Message,
     cmd: Command,
     exchange: Arc<E>,
-    state_storage: StateStorage,
+    state_storage: StateStorage, // Теперь это Arc<TokioRwLock<...>>
     running_operations: RunningOperations,
     cfg: Arc<Config>,
     db: Arc<Db>,
@@ -125,15 +125,10 @@ where E: Exchange + Clone + Send + Sync + 'static,
         Command::Start => navigation::handle_start(bot, msg, exchange, state_storage, cfg, db).await?,
         Command::Hedge(symbol) => hedge_flow::handle_hedge_command(bot, msg, symbol, exchange, state_storage, running_operations, cfg, db).await?,
         Command::Unhedge(symbol) => unhedge_flow::handle_unhedge_command(bot, msg, symbol, exchange, state_storage, running_operations, cfg, db).await?,
-        // <<< ИСПРАВЛЕНО: Добавлен state_storage >>>
         Command::Wallet => wallet_info::handle_wallet_command(bot, msg, exchange, state_storage, cfg, db).await?,
-        // <<< ИСПРАВЛЕНО: Добавлен state_storage >>>
         Command::Balance(symbol) => wallet_info::handle_balance_command(bot, msg, symbol, exchange, state_storage, cfg, db).await?,
-        // <<< ИСПРАВЛЕНО: Добавлен state_storage >>>
         Command::Status => market_info::handle_status_command(bot, msg, exchange, state_storage, cfg, db).await?,
-        // <<< ИСПРАВЛЕНО: Добавлены exchange, cfg, db в правильном порядке >>>
         Command::Funding(params) => market_info::handle_funding_command(bot, msg, params, exchange, state_storage, cfg, db).await?,
-        // <<< ИСПРАВЛЕНО: Добавлены exchange, cfg, db и изменен порядок state_storage/running_operations >>>
         Command::Active => active_ops::handle_active_command(bot, msg, exchange, state_storage, running_operations, cfg, db).await?,
     }
     Ok(())
@@ -144,7 +139,7 @@ pub async fn dispatch_callback<E>(
     bot: Bot,
     q: CallbackQuery,
     exchange: Arc<E>,
-    state_storage: StateStorage,
+    state_storage: StateStorage, // Теперь это Arc<TokioRwLock<...>>
     running_operations: RunningOperations,
     cfg: Arc<Config>,
     db: Arc<Db>,
@@ -152,20 +147,18 @@ pub async fn dispatch_callback<E>(
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
-    let query_id = q.id.clone(); // Клонируем ID для ответа
+    let query_id = q.id.clone();
 
-    if let Some(data) = q.data.as_deref() { // Заимствуем данные колбэка
+    if let Some(data) = q.data.as_deref() {
         info!("Dispatching callback: {}", data);
 
-        // Маршрутизация ...
         if data == callback_data::BACK_TO_MAIN {
             navigation::handle_back_to_main(bot, q, state_storage).await?;
         } else if data == callback_data::CANCEL_DIALOG {
-            // <<< ИСПРАВЛЕНО: Вызов handle_cancel_dialog с новыми параметрами >>>
             if let Some(msg) = q.message.as_ref() {
                 let chat_id = msg.chat().id;
                 let message_id = msg.id();
-                bot.answer_callback_query(query_id).await?; // Отвечаем ДО вызова
+                bot.answer_callback_query(query_id).await?;
                 navigation::handle_cancel_dialog(bot, chat_id, message_id, state_storage).await?;
             } else {
                 warn!("CallbackQuery missing message for CANCEL_DIALOG");
@@ -186,13 +179,11 @@ where
         } else if data.starts_with(callback_data::PREFIX_HEDGE_ASSET) {
               hedge_flow::handle_hedge_asset_callback(bot, q, exchange, state_storage, cfg, db).await?;
         } else if data.starts_with(callback_data::PREFIX_HEDGE_PAIR) {
-              // <<< ИСПРАВЛЕНО: Заглушка >>>
               warn!("Handler for PREFIX_HEDGE_PAIR not implemented yet.");
               bot.answer_callback_query(query_id).text("Функция пока не реализована.").show_alert(false).await?;
         } else if data.starts_with(callback_data::PREFIX_HEDGE_CONFIRM) {
               hedge_flow::handle_hedge_confirm_callback(bot, q, exchange, state_storage, running_operations, cfg, db).await?;
         } else if data == callback_data::VIEW_ALL_PAIRS {
-              // <<< ИСПРАВЛЕНО: Заглушка >>>
               warn!("Handler for VIEW_ALL_PAIRS not implemented yet.");
               bot.answer_callback_query(query_id).text("Функция пока не реализована.").show_alert(false).await?;
         } else if data.starts_with(callback_data::PREFIX_UNHEDGE_ASSET) {
@@ -206,17 +197,15 @@ where
         } else if data == callback_data::SHOW_FUNDING {
               market_info::handle_show_funding_callback(bot, q, state_storage).await?;
         } else if data.starts_with(callback_data::PREFIX_PAGE_NEXT) || data.starts_with(callback_data::PREFIX_PAGE_PREV) {
-             // <<< ИСПРАВЛЕНО: Заглушка >>>
               warn!("Pagination callback '{}' not implemented yet.", data);
               bot.answer_callback_query(query_id).text("Навигация по страницам пока не работает").show_alert(false).await?;
         } else {
-             // <<< ИСПРАВЛЕНО: Заглушка для неизвестных колбэков >>>
               warn!("Unhandled callback data: {}", data);
               bot.answer_callback_query(query_id).text("Неизвестное действие.").show_alert(false).await?;
         }
     } else {
         warn!("CallbackQuery received without data");
-        bot.answer_callback_query(query_id).await?; // Просто отвечаем
+        bot.answer_callback_query(query_id).await?;
     }
 
     Ok(())
@@ -227,7 +216,7 @@ pub async fn dispatch_message<E>(
     bot: Bot,
     msg: Message,
     exchange: Arc<E>,
-    state_storage: StateStorage,
+    state_storage: StateStorage, // Теперь это Arc<TokioRwLock<...>>
     running_operations: RunningOperations,
     cfg: Arc<Config>,
     db: Arc<Db>,
@@ -235,26 +224,17 @@ pub async fn dispatch_message<E>(
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
-    // Получаем копию состояния или None
-    let state = { state_storage.read().expect("Lock failed").get(&msg.chat.id).cloned().unwrap_or(UserState::None) };
-    // Используем msg.chat.id для лога
+    // <<< ИЗМЕНЕНО: Асинхронное чтение состояния >>>
+    let state = { state_storage.read().await.get(&msg.chat.id).cloned().unwrap_or(UserState::None) };
     info!("Dispatching message for chat {} in state: {:?}", msg.chat.id, state);
 
-    // Маршрутизируем сообщение в зависимости от состояния
     match state {
-        // Ввод тикера для хеджа или фильтрация списка всех пар
         UserState::AwaitingHedgeAssetSelection { .. } | UserState::ViewingAllPairs { .. } =>
             hedge_flow::handle_asset_ticker_input(bot, msg, exchange, state_storage, cfg, db).await?,
-
-        // Диалог хеджирования
         UserState::AwaitingHedgeSum { .. } => hedge_flow::handle_sum_input(bot, msg, state_storage, cfg).await?,
         UserState::AwaitingHedgeVolatility { .. } => hedge_flow::handle_volatility_input(bot, msg, exchange, state_storage, running_operations, cfg, db).await?,
-
-        // Ввод символа для фандинга
         UserState::AwaitingFundingSymbolInput { .. } =>
             market_info::handle_funding_symbol_input(bot, msg, exchange, state_storage, cfg, db).await?,
-
-        // Заглушки для нереализованных текстовых вводов (например, для unhedge, если понадобится)
         UserState::AwaitingUnhedgeAssetSelection { .. } |
         UserState::AwaitingUnhedgeOperationSelection { .. } |
         UserState::AwaitingUnhedgeConfirmation { .. } => {
@@ -263,21 +243,15 @@ where
                  tracing::warn!("Failed to delete unhandled message: {}", e);
             }
         },
-
-
-        // Если состояние не предполагает ввод текста
         _ => {
             if msg.text().map_or(false, |t| t.starts_with('/')) {
                 warn!("Received command message '{}' in dispatch_message. Should have been handled by dispatch_command.", msg.text().unwrap_or(""));
-                // Команды уже должны быть обработаны dispatch_command
             } else if msg.text().is_some() {
-                 // Удаляем обычное текстовое сообщение, если оно не ожидается
                 warn!("Received unexpected text message in state {:?}. Deleting.", state);
                 if let Err(e) = bot.delete_message(msg.chat.id, msg.id).await {
                     tracing::warn!("Failed to delete unexpected message: {}", e);
                 }
             }
-            // Игнорируем другие типы сообщений (фото и т.д.)
         }
     }
 
