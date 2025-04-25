@@ -1,11 +1,10 @@
 // src/notifier/navigation.rs
 
-// ИСПРАВЛЕНО: Убраны неиспользуемые Command, BotCommands
-use super::{StateStorage, UserState, callback_data, RunningOperations};
-use crate::config::Config;
-use crate::exchange::Exchange;
-use crate::storage::Db;
-use std::sync::Arc;
+use super::{StateStorage, UserState, callback_data,RunningOperations}; // Убраны RunningOperations, т.к. не используется здесь
+use crate::config::Config; // Используется в заглушках
+use crate::exchange::Exchange; // Используется в заглушках
+use crate::storage::Db; // Используется в заглушках
+use std::sync::Arc; // Используется в заглушках
 use teloxide::prelude::*;
 use teloxide::types::{
     InlineKeyboardButton, InlineKeyboardMarkup, Message, MessageId, CallbackQuery, ChatId,
@@ -36,26 +35,25 @@ pub fn make_main_menu_keyboard() -> InlineKeyboardMarkup {
 }
 
 /// Показывает или редактирует сообщение с главным меню
-// ИСПРАВЛЕНО: Тип возвращаемого значения и логика возврата
 pub async fn show_main_menu(bot: &Bot, chat_id: ChatId, message_to_edit: Option<MessageId>)
     -> Result<(), teloxide::RequestError>
 {
     let text = WELCOME_MESSAGE;
-    let kb = make_main_menu_keyboard(); // Создаем клавиатуру один раз
+    let kb = make_main_menu_keyboard();
 
     if let Some(message_id) = message_to_edit {
-        match bot.edit_message_text(chat_id, message_id, text).reply_markup(kb.clone()).await { // Клонируем kb здесь
+        match bot.edit_message_text(chat_id, message_id, text).reply_markup(kb.clone()).await {
             Ok(_) => Ok(()),
             Err(e) => {
                 warn!("Failed to edit message {} to main menu: {}. Sending new one.", message_id, e);
                  // Отправляем новое, если редактирование не удалось
-                bot.send_message(chat_id, text).reply_markup(kb).await?; // Используем оригинал kb здесь
+                bot.send_message(chat_id, text).reply_markup(kb).await?;
                 Ok(())
             }
         }
     } else {
         // Отправляем новое сообщение
-        bot.send_message(chat_id, text).reply_markup(kb).await?; // Используем оригинал kb здесь
+        bot.send_message(chat_id, text).reply_markup(kb).await?;
         Ok(())
     }
 }
@@ -75,7 +73,7 @@ pub async fn handle_start<E>(
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
-    let chat_id = msg.chat.id; // Используем поле
+    let chat_id = msg.chat.id;
     info!("Processing /start command for chat_id: {}", chat_id);
 
     {
@@ -84,10 +82,12 @@ where
         info!("User state for {} reset to None.", chat_id);
     }
 
-    if let Err(e) = bot.delete_message(chat_id, msg.id).await { // Используем поле
+    // Пытаемся удалить сообщение пользователя с командой /start
+    if let Err(e) = bot.delete_message(chat_id, msg.id).await {
         warn!("Failed to delete /start command message: {}", e);
     }
 
+    // Показываем главное меню (отправляем новое сообщение)
     let _ = show_main_menu(&bot, chat_id, None).await;
 
     Ok(())
@@ -99,8 +99,9 @@ pub async fn handle_back_to_main(
     q: CallbackQuery,
     state_storage: StateStorage,
 ) -> anyhow::Result<()> {
-    if let Some(msg) = q.message {
-        let chat_id = msg.chat().id;
+    // <<< ИСПРАВЛЕНО: Используем as_ref() и методы .chat()/.id() >>>
+    if let Some(msg) = q.message.as_ref() {
+        let chat_id = msg.chat().id; // Используем метод
         info!("Processing '{}' callback for chat_id: {}", callback_data::BACK_TO_MAIN, chat_id);
 
         {
@@ -109,48 +110,45 @@ pub async fn handle_back_to_main(
             info!("User state for {} reset to None.", chat_id);
         }
 
-        // ИСПРАВЛЕНО: Используем поле id
-        let _ = show_main_menu(&bot, chat_id, Some(msg.id())).await;
+        // Показываем главное меню, редактируя существующее сообщение
+        let _ = show_main_menu(&bot, chat_id, Some(msg.id())).await; // Используем метод
     } else {
         warn!("CallbackQuery missing message in handle_back_to_main");
     }
+    // Отвечаем на колбэк ПОСЛЕ попытки показать меню
     bot.answer_callback_query(q.id).await?;
     Ok(())
 }
 
 /// Обработчик колбэка кнопки "Отмена" в диалоге
+// <<< ИСПРАВЛЕНО: Изменена сигнатура функции >>>
 pub async fn handle_cancel_dialog(
-    bot: Bot,
-    q: CallbackQuery,
+    bot: Bot, // Принимаем по значению, т.к. можем передать в show_main_menu
+    chat_id: ChatId,
+    message_id: MessageId, // ID сообщения для редактирования
     state_storage: StateStorage,
 ) -> anyhow::Result<()> {
-     if let Some(msg) = q.message {
-        // ИСПРАВЛЕНО: Используем поля chat.id и id для сообщения из CallbackQuery
-        let chat_id = msg.chat().id;
-        info!("Processing '{}' callback for chat_id: {}", callback_data::CANCEL_DIALOG, chat_id);
+    info!("Processing cancel dialog for chat_id: {}", chat_id);
 
-        {
-            let mut state_guard = state_storage.write().expect("Failed to lock state storage for write");
-            state_guard.insert(chat_id, UserState::None);
-             info!("User state for {} reset to None.", chat_id);
-        }
+    // Сбрасываем состояние пользователя
+    {
+        let mut state_guard = state_storage.write().expect("Failed to lock state storage for write");
+        state_guard.insert(chat_id, UserState::None);
+         info!("User state for {} reset to None.", chat_id);
+    }
 
-        let text = "Действие отменено.";
-        let kb = InlineKeyboardMarkup::new(vec![vec![
-            InlineKeyboardButton::callback("⬅️ Назад в главное меню", callback_data::BACK_TO_MAIN)
-        ]]);
-        // ИСПРАВЛЕНО: Используем поле id
-        let _ = bot.edit_message_text(chat_id, msg.id(), text).reply_markup(kb).await;
+    // Показываем главное меню, редактируя сообщение, из которого была отмена
+    // Примечание: show_main_menu сама обработает случай, если редактирование не удастся
+    let _ = show_main_menu(&bot, chat_id, Some(message_id)).await;
 
-     } else {
-         warn!("CallbackQuery missing message in handle_cancel_dialog");
-     }
-     bot.answer_callback_query(q.id).await?;
-     Ok(())
+    // <<< ИСПРАВЛЕНО: Ответ на колбэк теперь ДОЛЖЕН быть в вызывающей функции >>>
+    // bot.answer_callback_query(query_id).await?; // Убираем ответ отсюда
+
+    Ok(())
 }
 
+
 // --- Заглушки для обработчиков кнопок главного меню ---
-// ИСПРАВЛЕНО: Добавлены префиксы '_' к неиспользуемым аргументам
 
 pub async fn handle_menu_wallet_callback<E>(
     bot: Bot, q: CallbackQuery, _exchange: Arc<E>, _cfg: Arc<Config>, _db: Arc<Db>
@@ -165,15 +163,15 @@ pub async fn handle_menu_wallet_callback<E>(
 pub async fn handle_menu_info_callback<E>(
     bot: Bot, q: CallbackQuery, _exchange: Arc<E>, _cfg: Arc<Config>, _db: Arc<Db>
 ) -> anyhow::Result<()> where E: Exchange + Clone + Send + Sync + 'static {
-     info!("Callback '{}' triggered. Calling market_info handler...", callback_data::MENU_INFO);
-     // TODO: Вызвать функцию из market_info.rs для показа меню информации
-     // market_info::show_info_menu(bot, q).await?;
-     bot.answer_callback_query(q.id).text("Раздел Информация (не реализовано)").await?;
+      info!("Callback '{}' triggered. Calling market_info handler...", callback_data::MENU_INFO);
+      // TODO: Вызвать функцию из market_info.rs для показа меню информации
+      // market_info::show_info_menu(bot, q).await?;
+      bot.answer_callback_query(q.id).text("Раздел Информация (не реализовано)").await?;
     Ok(())
 }
 
 pub async fn handle_menu_active_ops_callback(
-    bot: Bot, q: CallbackQuery, _running_operations: RunningOperations, _state_storage: StateStorage
+    bot: Bot, q: CallbackQuery, _running_operations: RunningOperations, _state_storage: StateStorage // Добавлен state_storage, если нужен
 ) -> anyhow::Result<()> {
     info!("Callback '{}' triggered. Calling active_ops handler...", callback_data::MENU_ACTIVE_OPS);
     // TODO: Вызвать функцию из active_ops.rs для показа активных операций
