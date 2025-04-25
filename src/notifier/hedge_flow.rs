@@ -4,13 +4,15 @@ use super::{
     StateStorage, UserState, RunningOperations, RunningOperationInfo, OperationType, callback_data,
     navigation,
     wallet_info,
-    // progress,
-    // utils,
 };
 use crate::config::Config;
 use crate::exchange::Exchange;
 use crate::storage::{Db, insert_hedge_operation};
-use crate::hedger::{Hedger, HedgeParams, HedgeProgressUpdate, HedgeProgressCallback, ORDER_FILL_TOLERANCE};
+// --- ИЗМЕНЕНО: Добавлен HedgeStage ---
+use crate::hedger::{
+    Hedger, HedgeParams, HedgeProgressUpdate, HedgeProgressCallback, ORDER_FILL_TOLERANCE, HedgeStage
+};
+// --- КОНЕЦ ИЗМЕНЕНИЙ ---
 use crate::models::HedgeRequest;
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,6 +63,10 @@ where
     let symbol_for_callback = params.symbol.clone();
     let symbol_for_task_body = params.symbol.clone();
     let symbol_for_info = params.symbol.clone();
+    // --- ДОБАВЛЕНО: Клоны целевых количеств для колбэка ---
+    let initial_spot_target_for_cb = params.spot_order_qty;
+    let initial_fut_target_for_cb = params.fut_order_qty;
+    // ---
 
     let hedger = Hedger::new((*exchange).clone(), (*cfg).clone());
 
@@ -109,23 +115,58 @@ where
         let chat_id_cb = chat_id;
         let initial_sum_cb = initial_sum;
         let operation_id_cb = operation_id;
+        // --- ДОБАВЛЕНО: Клоны целевых количеств ---
+        let spot_target_cb = initial_spot_target_for_cb;
+        let fut_target_cb = initial_fut_target_for_cb;
+        // ---
 
         async move {
             let symbol = symbol_cb;
-            let filled_percent = if update.target_qty > ORDER_FILL_TOLERANCE {
-                (update.filled_qty / update.target_qty) * 100.0 } else { 0.0 };
             let progress_bar_len = 10;
-            let filled_blocks = (filled_percent / (100.0 / progress_bar_len as f64)).round() as usize;
-            let empty_blocks = progress_bar_len - filled_blocks;
-            let progress_bar = format!("[{}{}]", "█".repeat(filled_blocks), "░".repeat(empty_blocks));
             let status_text = if update.is_replacement { "(Ордер переставлен)" } else { "" };
 
-            let text = format!(
-                "⏳ Хеджирование ID:{} {} {:.2} {} ({}) в процессе...\nРын.цена: {:.2}\nОрдер на покупку: {:.2} {}\nИсполнено: {:.6}/{:.6} ({:.1}%)",
-                operation_id_cb, progress_bar, initial_sum_cb, qc, symbol,
-                update.current_spot_price, update.new_limit_price, status_text,
-                update.filled_qty, update.target_qty, filled_percent
-            );
+            // --- ИЗМЕНЕНО: Форматирование текста в зависимости от этапа ---
+            let text = match update.stage {
+                HedgeStage::Spot => {
+                    let filled_percent = if update.target_qty > ORDER_FILL_TOLERANCE {
+                        (update.filled_qty / update.target_qty) * 100.0 } else { 0.0 };
+                    let filled_blocks = (filled_percent / (100.0 / progress_bar_len as f64)).round() as usize;
+                    let empty_blocks = progress_bar_len - filled_blocks;
+                    let progress_bar = format!("[{}{}]", "█".repeat(filled_blocks), "░".repeat(empty_blocks));
+
+                    // Проверка на финальное обновление спота
+                    if (update.filled_qty - spot_target_cb).abs() <= ORDER_FILL_TOLERANCE && update.target_qty == spot_target_cb {
+                        format!(
+                            "✅ Спот куплен ID:{} ({})\nРын.цена: {:.2}\nОжидание продажи фьючерса...",
+                            operation_id_cb, symbol,
+                            update.current_spot_price
+                        )
+                    } else {
+                        format!(
+                            "⏳ Хедж (Спот) ID:{} {} {:.2} {} ({})\nРын.цена: {:.2}\nОрдер ПОКУПКА: {:.2} {}\nИсполнено (тек.ордер): {:.6}/{:.6} ({:.1}%)",
+                            operation_id_cb, progress_bar, initial_sum_cb, qc, symbol,
+                            update.current_spot_price, update.new_limit_price, status_text,
+                            update.filled_qty, update.target_qty, filled_percent
+                        )
+                    }
+                }
+                HedgeStage::Futures => {
+                    let filled_percent = if fut_target_cb > ORDER_FILL_TOLERANCE {
+                        (update.filled_qty / fut_target_cb) * 100.0 } else { 0.0 };
+                    let filled_blocks = (filled_percent / (100.0 / progress_bar_len as f64)).round() as usize;
+                    let empty_blocks = progress_bar_len - filled_blocks;
+                    let progress_bar = format!("[{}{}]", "█".repeat(filled_blocks), "░".repeat(empty_blocks));
+
+                    format!(
+                        "⏳ Хедж (Фьюч) ID:{} {} {:.2} {} ({})\nСпот цена: {:.2}\nОрдер ПРОДАЖА: {:.2}\nИсполнено (фьюч): {:.6}/{:.6} ({:.1}%)",
+                        operation_id_cb, progress_bar, initial_sum_cb, qc, symbol,
+                        update.current_spot_price, // Цена спота для контекста
+                        update.new_limit_price, // Цена фьюч ордера
+                        update.filled_qty, fut_target_cb, filled_percent // Используем цель фьюча
+                    )
+                }
+            };
+            // --- КОНЕЦ ИЗМЕНЕНИЙ ФОРМАТИРОВАНИЯ ---
 
             let cancel_callback_data = format!("{}{}", callback_data::PREFIX_CANCEL_ACTIVE_OP, operation_id_cb);
             let cancel_button = InlineKeyboardButton::callback("❌ Отменить эту операцию", cancel_callback_data);
@@ -212,7 +253,7 @@ where
 }
 
 
-// --- Обработчики команд и колбэков ---
+// --- Обработчики команд и колбэков --- (без изменений)
 
 /// Обработчик команды /hedge [SYMBOL]
 pub async fn handle_hedge_command<E>(

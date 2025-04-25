@@ -41,14 +41,23 @@ pub struct HedgeParams {
     pub available_collateral: f64,
 }
 
+// --- ДОБАВЛЕН ЭТАП ---
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HedgeStage {
+    Spot,
+    Futures,
+}
+
 #[derive(Debug, Clone)]
 pub struct HedgeProgressUpdate {
-    pub current_spot_price: f64,
+    pub stage: HedgeStage, // <-- Новый флаг этапа
+    pub current_spot_price: f64, // Оставляем для контекста
     pub new_limit_price: f64,
     pub is_replacement: bool,
     pub filled_qty: f64,
     pub target_qty: f64,
 }
+// --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 pub type HedgeProgressCallback =
     Box<dyn FnMut(HedgeProgressUpdate) -> futures::future::BoxFuture<'static, Result<()>> + Send + Sync>;
@@ -272,7 +281,7 @@ where
             operation_id, symbol, initial_spot_qty, initial_fut_qty
         );
 
-        // --- Проверка и установка плеча ---
+        // --- Проверка и установка плеча --- (без изменений)
         let futures_position_value = initial_fut_qty * current_spot_price;
         if _available_collateral <= 0.0 {
             error!("op_id:{}: Available collateral is non-positive. Aborting.", operation_id);
@@ -313,7 +322,7 @@ where
         }
         // ---
 
-        // --- Цикл управления СПОТ-ордером ---
+        // --- Цикл управления СПОТ-ордером --- (без изменений)
         let mut cumulative_filled_qty = 0.0;
         let mut current_order_target_qty = initial_spot_qty;
         let mut qty_filled_in_current_order = 0.0;
@@ -335,7 +344,7 @@ where
             }
         };
 
-        // Размещение начального СПОТ-ордера
+        // Размещение начального СПОТ-ордера (без изменений)
         info!("op_id:{}: Placing initial spot limit buy at {} for qty {}", operation_id, limit_price, current_order_target_qty);
         let spot_order = match self.exchange.place_limit_order(&symbol, OrderSide::Buy, current_order_target_qty, limit_price).await {
             Ok(o) => o,
@@ -377,7 +386,7 @@ where
                     }
                 };
 
-                // --- Используем ПРАВИЛЬНЫЙ метод для статуса СПОТА ---
+                // --- Используем ПРАВИЛЬНЫЙ метод для статуса СПОТА --- (без изменений)
                 let status_result = self.exchange.get_spot_order_status(&symbol, &order_id_to_check).await;
                 let status: OrderStatus = match status_result {
                     Ok(s) => s,
@@ -411,7 +420,7 @@ where
                 };
 
 
-                // Обновление cumulative_filled_qty
+                // Обновление cumulative_filled_qty (без изменений)
                  let previously_filled_in_current = qty_filled_in_current_order;
                  qty_filled_in_current_order = status.filled_qty;
                  let filled_since_last_check = qty_filled_in_current_order - previously_filled_in_current;
@@ -424,7 +433,7 @@ where
                      }
                  }
 
-                // Проверка полного исполнения СПОТ ордера
+                // Проверка полного исполнения СПОТ ордера (без изменений)
                 if status.remaining_qty <= ORDER_FILL_TOLERANCE {
                      info!("op_id:{}: Spot order {} considered filled. Exiting loop.", operation_id, order_id_to_check);
                      if (cumulative_filled_qty - initial_spot_qty).abs() > ORDER_FILL_TOLERANCE {
@@ -437,7 +446,7 @@ where
                      break Ok(());
                 }
 
-                // --- Логика перестановки СПОТ-ордера ---
+                // --- Логика перестановки СПОТ-ордера --- (без изменений)
                 let elapsed_since_start = now.duration_since(start);
                 let mut is_replacement = false; // Флаг для колбэка
                  if elapsed_since_start > self.max_wait && status.remaining_qty > ORDER_FILL_TOLERANCE {
@@ -486,7 +495,16 @@ where
                 let elapsed_since_update = now.duration_since(last_update_sent);
                  if is_replacement || elapsed_since_update > update_interval {
                      let price_for_cb = if !is_replacement { match self.exchange.get_spot_price(&symbol).await { Ok(p) => p, Err(_) => current_spot_price } } else { current_spot_price };
-                     let update = HedgeProgressUpdate { current_spot_price: price_for_cb, new_limit_price: limit_price, is_replacement, filled_qty: qty_filled_in_current_order, target_qty: current_order_target_qty };
+                     // --- УСТАНАВЛИВАЕМ ЭТАП СПОТ ---
+                     let update = HedgeProgressUpdate {
+                         stage: HedgeStage::Spot, // <-- Установлен этап
+                         current_spot_price: price_for_cb,
+                         new_limit_price: limit_price,
+                         is_replacement,
+                         filled_qty: qty_filled_in_current_order,
+                         target_qty: current_order_target_qty
+                     };
+                     // --- КОНЕЦ УСТАНОВКИ ЭТАПА ---
                      tokio::task::yield_now().await; // Даем шанс другим задачам
                      if let Err(e) = progress_callback(update).await {
                          if !e.to_string().contains("message is not modified") {
@@ -501,7 +519,7 @@ where
         }.await; // --- Конец async блока hedge_loop_result ---
 
 
-        // --- Обработка результата цикла СПОТА ---
+        // --- Обработка результата цикла СПОТА --- (без изменений)
         if let Err(loop_err) = hedge_loop_result {
             error!("op_id:{}: Hedge spot buy loop failed: {}", operation_id, loop_err);
             let current_filled = *total_filled_qty_storage.lock().await;
@@ -517,13 +535,16 @@ where
         }
 
         // Вызываем колбэк, чтобы показать 100% спота
+        // --- УСТАНАВЛИВАЕМ ЭТАП СПОТ ---
         let spot_done_update = HedgeProgressUpdate {
+            stage: HedgeStage::Spot, // <-- Установлен этап
             current_spot_price, // Последняя известная цена
             new_limit_price: limit_price, // Последняя лимитная цена спота
             is_replacement: false, // Это не замена
             filled_qty: final_spot_qty_gross, // Исполнено 100%
             target_qty: initial_spot_qty, // Цель была initial_spot_qty
         };
+        // --- КОНЕЦ УСТАНОВКИ ЭТАПА ---
         if let Err(e) = progress_callback(spot_done_update).await {
              if !e.to_string().contains("message is not modified") {
                  warn!("op_id:{}: Progress callback failed after spot fill: {}", operation_id, e);
@@ -534,7 +555,7 @@ where
         let final_spot_value_gross = final_spot_qty_gross * current_spot_price;
 
 
-        // --- Размещение ФЬЮЧЕРСНОГО ЛИМИТНОГО ордера ---
+        // --- Размещение ФЬЮЧЕРСНОГО ЛИМИТНОГО ордера --- (без изменений)
         let futures_symbol = format!("{}{}", symbol, self.quote_currency);
 
         // --- Получаем актуальную цену фьючерса (Bid для Sell ордера) ---
@@ -576,6 +597,9 @@ where
         let futures_check_interval = Duration::from_secs(2);
         let futures_start_time = Instant::now();
         let mut last_futures_filled_qty = 0.0; // Отслеживаем исполненное кол-во фьюча для записи в БД
+        // --- ДОБАВЛЕН ТАЙМЕР ДЛЯ КОЛБЭКА ФЬЮЧЕРСА ---
+        let mut last_futures_update_sent = Instant::now();
+        // ---
 
         loop {
             if futures_start_time.elapsed() > futures_timeout_duration {
@@ -593,6 +617,9 @@ where
             }
 
             sleep(futures_check_interval).await;
+            // --- ДОБАВЛЕНО: Получаем текущее время для колбэка ---
+            let futures_now = Instant::now();
+            // ---
 
             // --- Используем ПРАВИЛЬНЫЙ метод для статуса ФЬЮЧЕРСА ---
             match self.exchange.get_futures_order_status(&futures_symbol, &fut_order.id).await {
@@ -601,12 +628,47 @@ where
                     info!("op_id:{}: Futures order {} status: filled={:.8}, remaining={:.8}",
                           operation_id, fut_order.id, status.filled_qty, status.remaining_qty);
 
+                    // --- ДОБАВЛЕНО: Вызов колбэка для фьючерса ---
+                    let elapsed_since_futures_update = futures_now.duration_since(last_futures_update_sent);
+                    // Отправляем сразу или по интервалу
+                    if elapsed_since_futures_update > update_interval || last_futures_update_sent == futures_start_time {
+                        let futures_update = HedgeProgressUpdate {
+                            stage: HedgeStage::Futures, // <-- Установлен этап
+                            current_spot_price, // Последняя цена спота для контекста
+                            new_limit_price: futures_limit_price, // Цена фьюч ордера
+                            is_replacement: false, // Замена фьюча не реализована
+                            filled_qty: status.filled_qty, // Исполнено фьюча
+                            target_qty: initial_fut_qty,   // Цель фьюча
+                        };
+                        tokio::task::yield_now().await;
+                        if let Err(e) = progress_callback(futures_update).await {
+                            if !e.to_string().contains("message is not modified") {
+                                warn!("op_id:{}: Futures progress callback failed: {}", operation_id, e);
+                            }
+                        }
+                        last_futures_update_sent = futures_now;
+                    }
+                    // --- КОНЕЦ ДОБАВЛЕННОГО КОЛБЭКА ---
+
                     if status.remaining_qty <= ORDER_FILL_TOLERANCE {
                         info!("op_id:{}: Futures order {} considered filled.", operation_id, fut_order.id);
                         // Успех! Обновляем БД и выходим
                         let final_fut_qty = status.filled_qty; // Фактически исполненное кол-во фьюча
                         let _ = update_hedge_final_status(db, operation_id, "Completed", Some(&fut_order.id), final_fut_qty, None).await;
                         info!("op_id:{}: Hedge completed successfully. Spot Gross: {}, Fut Net: {}", operation_id, final_spot_qty_gross, final_fut_qty);
+
+                        // --- ДОБАВЛЕНО: Финальный колбэк 100% фьюча ---
+                        let final_futures_update = HedgeProgressUpdate {
+                            stage: HedgeStage::Futures,
+                            current_spot_price,
+                            new_limit_price: futures_limit_price,
+                            is_replacement: false,
+                            filled_qty: status.filled_qty,
+                            target_qty: initial_fut_qty,
+                        };
+                        let _ = progress_callback(final_futures_update).await; // Игнорируем ошибку
+                        // --- КОНЕЦ ФИНАЛЬНОГО КОЛБЭКА ---
+
                         return Ok((final_spot_qty_gross, final_fut_qty, final_spot_value_gross)); // Возвращаем факт. кол-во фьюча
                     }
                     // Если не исполнен, продолжаем цикл
@@ -618,6 +680,19 @@ where
                          let assumed_filled = initial_fut_qty; // Считаем исполненным целевое количество
                           let _ = update_hedge_final_status(db, operation_id, "Completed", Some(&fut_order.id), assumed_filled, None).await;
                           info!("op_id:{}: Hedge completed (futures order assumed filled). Spot Gross: {}, Fut Net: {}", operation_id, final_spot_qty_gross, assumed_filled);
+
+                          // --- ДОБАВЛЕНО: Финальный колбэк 100% фьюча (при assumption) ---
+                          let final_futures_update = HedgeProgressUpdate {
+                              stage: HedgeStage::Futures,
+                              current_spot_price,
+                              new_limit_price: futures_limit_price,
+                              is_replacement: false,
+                              filled_qty: assumed_filled, // Используем предполагаемое кол-во
+                              target_qty: initial_fut_qty,
+                          };
+                          let _ = progress_callback(final_futures_update).await;
+                          // --- КОНЕЦ ФИНАЛЬНОГО КОЛБЭКА ---
+
                           return Ok((final_spot_qty_gross, assumed_filled, final_spot_value_gross));
                     } else {
                         // Другая ошибка при проверке статуса фьючерса
@@ -658,7 +733,7 @@ where
             original_hedge_op_id, symbol, target_spot_sell_qty, futures_buy_qty
         );
 
-        // Проверяем, что целевое количество для продажи > 0
+        // Проверяем, что целевое количество для продажи > 0 (без изменений)
         if target_spot_sell_qty <= ORDER_FILL_TOLERANCE {
             error!("op_id={}: Target spot sell quantity ({:.8}) based on original operation is too low. Cannot unhedge.", original_hedge_op_id, target_spot_sell_qty);
             return Err(anyhow!("Target spot sell quantity based on original operation is too low ({:.8})", target_spot_sell_qty));
@@ -668,7 +743,7 @@ where
         let mut qty_filled_in_current_order = 0.0;
         let mut current_spot_order_id: Option<String> = None;
 
-        // --- Проверка баланса и определение реального кол-ва для продажи ---
+        // --- Проверка баланса и определение реального кол-ва для продажи --- (без изменений)
         let available_balance = match self.exchange.get_balance(&symbol).await {
             Ok(balance) => {
                 info!("op_id={}: Checked available balance {} for {}", original_hedge_op_id, balance.free, symbol);
@@ -690,7 +765,7 @@ where
             );
         }
 
-        // --- Получаем Min Order Qty и проверяем РЕАЛЬНОЕ количество для продажи ---
+        // --- Получаем Min Order Qty и проверяем РЕАЛЬНОЕ количество для продажи --- (без изменений)
         let spot_info = self.exchange.get_spot_instrument_info(&symbol).await
             .map_err(|e| anyhow!("op_id={}: Failed to get SPOT instrument info for {}: {}", original_hedge_op_id, symbol, e))?;
         let min_spot_qty_decimal = Decimal::from_str(&spot_info.lot_size_filter.min_order_qty)
@@ -716,7 +791,7 @@ where
         info!("op_id={}: Proceeding unhedge with actual spot sell quantity target: {:.8}", original_hedge_op_id, initial_order_target_qty);
 
 
-        // --- Получение начальной цены ---
+        // --- Получение начальной цены --- (без изменений)
         let mut current_spot_price = match self.exchange.get_spot_price(&symbol).await {
             Ok(p) if p > 0.0 => p,
             Ok(p) => {
@@ -732,7 +807,7 @@ where
         let mut limit_price = current_spot_price * (1.0 + self.slippage); // Цена ВЫШЕ для продажи
         info!("op_id={}: Initial spot price: {}, placing limit sell at {} for qty {:.8}", original_hedge_op_id, current_spot_price, limit_price, initial_order_target_qty);
 
-        // --- Размещение ПЕРВОГО спот-ордера ---
+        // --- Размещение ПЕРВОГО спот-ордера --- (без изменений)
         let spot_order = match self
             .exchange
             .place_limit_order(&symbol, OrderSide::Sell, initial_order_target_qty, limit_price)
@@ -767,7 +842,7 @@ where
                 let id_to_check_opt = current_spot_order_id.clone();
                 let order_id_to_check = match id_to_check_opt { Some(id)=>id, None=>{ if cumulative_filled_qty >= actual_spot_sell_qty - ORDER_FILL_TOLERANCE { break Ok(()) } else if now.duration_since(start) > Duration::from_secs(2) { return Err(anyhow!("No active spot order")); } continue } };
 
-                // --- Используем get_spot_order_status ---
+                // --- Используем get_spot_order_status --- (без изменений)
                 let status_result = self.exchange.get_spot_order_status(&symbol, &order_id_to_check).await;
                 let status: OrderStatus = match status_result {
                     Ok(s) => s,
@@ -785,7 +860,7 @@ where
                     }
                 };
 
-                // Обновление cumulative_filled_qty
+                // Обновление cumulative_filled_qty (без изменений)
                 let previously_filled_in_current = qty_filled_in_current_order;
                 qty_filled_in_current_order = status.filled_qty;
                 let filled_since_last_check = qty_filled_in_current_order - previously_filled_in_current;
@@ -795,7 +870,7 @@ where
                     debug!("op_id={}: Unhedge spot fill update. Filled: {:.8}, Cum: {:.8}", original_hedge_op_id, qty_filled_in_current_order, cumulative_filled_qty);
                 }
 
-                // Проверка полного исполнения СПОТ ордера
+                // Проверка полного исполнения СПОТ ордера (без изменений)
                 if status.remaining_qty <= ORDER_FILL_TOLERANCE {
                     info!("op_id:{}: Unhedge spot order {} considered filled. Exiting loop.", original_hedge_op_id, order_id_to_check);
                     if (cumulative_filled_qty - actual_spot_sell_qty).abs() > ORDER_FILL_TOLERANCE {
@@ -806,7 +881,7 @@ where
                     break Ok(());
                 }
 
-                // --- Логика перестановки СПОТ-ордера на ПРОДАЖУ ---
+                // --- Логика перестановки СПОТ-ордера на ПРОДАЖУ --- (без изменений)
                 let elapsed_since_start = now.duration_since(start);
                 let mut is_replacement = false; // Флаг для колбэка
                 if elapsed_since_start > self.max_wait && status.remaining_qty > ORDER_FILL_TOLERANCE {
@@ -855,13 +930,16 @@ where
                     } else {
                         current_spot_price // Используем цену, по которой разместили замену
                     };
-                    let update = HedgeProgressUpdate { // Используем ту же структуру
+                    // --- УСТАНАВЛИВАЕМ ЭТАП СПОТ ---
+                    let update = HedgeProgressUpdate {
+                        stage: HedgeStage::Spot, // <-- Установлен этап
                         current_spot_price: price_for_cb,
                         new_limit_price: limit_price, // Текущая лимитная цена активного ордера
                         is_replacement,
                         filled_qty: qty_filled_in_current_order, // Сколько исполнено в ТЕКУЩЕМ ордере
                         target_qty: current_order_target_qty,   // Цель ТЕКУЩЕГО ордера
                     };
+                    // --- КОНЕЦ УСТАНОВКИ ЭТАПА ---
                     tokio::task::yield_now().await; // Даем шанс другим задачам
                     if let Err(e) = progress_callback(update).await {
                         if !e.to_string().contains("message is not modified") {
@@ -875,7 +953,7 @@ where
             } // --- Конец цикла loop для СПОТА ---
         }.await; // --- Конец async блока unhedge_loop_result ---
 
-        // --- Обработка результата цикла продажи СПОТА ---
+        // --- Обработка результата цикла продажи СПОТА --- (без изменений)
         if let Err(loop_err) = unhedge_loop_result {
             error!("op_id={}: Unhedge spot sell loop failed: {}", original_hedge_op_id, loop_err);
             return Err(loop_err);
@@ -889,13 +967,16 @@ where
         }
 
         // Вызываем колбэк, чтобы показать 100% спота
+        // --- УСТАНАВЛИВАЕМ ЭТАП СПОТ ---
         let spot_done_update = HedgeProgressUpdate {
+            stage: HedgeStage::Spot, // <-- Установлен этап
             current_spot_price, // Последняя известная цена
             new_limit_price: limit_price, // Последняя лимитная цена спота
             is_replacement: false,
             filled_qty: final_spot_sold_qty, // Исполнено 100% (от actual_spot_sell_qty)
             target_qty: actual_spot_sell_qty, // Целью был actual_spot_sell_qty
         };
+        // --- КОНЕЦ УСТАНОВКИ ЭТАПА ---
          if let Err(e) = progress_callback(spot_done_update).await {
               if !e.to_string().contains("message is not modified") {
                   warn!("op_id:{}: Unhedge progress callback failed after spot fill: {}", original_hedge_op_id, e);
@@ -904,7 +985,7 @@ where
         // --- КОНЕЦ ОБНОВЛЕНИЯ СТАТУСА ---
 
 
-        // --- Спот продан, переходим к ФЬЮЧЕРСУ (с ожиданием исполнения) ---
+        // --- Спот продан, переходим к ФЬЮЧЕРСУ (с ожиданием исполнения) --- (без изменений)
         let futures_symbol = format!("{}{}", symbol, self.quote_currency);
 
         // --- Получаем актуальную цену фьючерса (Ask для Buy ордера) ---
@@ -945,6 +1026,9 @@ where
         let futures_check_interval = Duration::from_secs(2);
         let futures_start_time = Instant::now();
         let mut last_futures_filled_qty = 0.0;
+        // --- ДОБАВЛЕН ТАЙМЕР ДЛЯ КОЛБЭКА ФЬЮЧЕРСА ---
+        let mut last_futures_update_sent = Instant::now();
+        // ---
 
         loop {
             if futures_start_time.elapsed() > futures_timeout_duration {
@@ -954,16 +1038,54 @@ where
             }
 
             sleep(futures_check_interval).await;
+            // --- ДОБАВЛЕНО: Получаем текущее время для колбэка ---
+            let futures_now = Instant::now();
+            // ---
 
             // --- Используем get_futures_order_status ---
             match self.exchange.get_futures_order_status(&futures_symbol, &fut_order.id).await {
                 Ok(status) => {
                     last_futures_filled_qty = status.filled_qty;
                     info!("op_id:{}: Futures buy order {} status: filled={:.8}, remaining={:.8}", original_hedge_op_id, fut_order.id, status.filled_qty, status.remaining_qty);
+
+                    // --- ДОБАВЛЕНО: Вызов колбэка для фьючерса ---
+                    let elapsed_since_futures_update = futures_now.duration_since(last_futures_update_sent);
+                    if elapsed_since_futures_update > update_interval || last_futures_update_sent == futures_start_time {
+                        let futures_update = HedgeProgressUpdate {
+                            stage: HedgeStage::Futures, // <-- Установлен этап
+                            current_spot_price, // Последняя цена спота
+                            new_limit_price: futures_limit_price, // Цена фьюч ордера
+                            is_replacement: false,
+                            filled_qty: status.filled_qty, // Исполнено фьюча
+                            target_qty: futures_buy_qty,   // Цель фьюча
+                        };
+                        tokio::task::yield_now().await;
+                        if let Err(e) = progress_callback(futures_update).await {
+                            if !e.to_string().contains("message is not modified") {
+                                warn!("op_id:{}: Unhedge futures progress callback failed: {}", original_hedge_op_id, e);
+                            }
+                        }
+                        last_futures_update_sent = futures_now;
+                    }
+                    // --- КОНЕЦ ДОБАВЛЕННОГО КОЛБЭКА ---
+
                     if status.remaining_qty <= ORDER_FILL_TOLERANCE {
                         info!("op_id:{}: Futures buy order {} considered filled.", original_hedge_op_id, fut_order.id);
                         if let Err(e) = mark_hedge_as_unhedged(db, original_hedge_op_id).await { error!("op_id:{}: Failed mark hedge {} unhedged: {}", original_hedge_op_id, original_hedge_op_id, e); }
                         info!("op_id:{}: Unhedge completed successfully for original op_id={}. Spot Sold: {:.8}, Fut Bought: {:.8}", original_hedge_op_id, original_hedge_op_id, final_spot_sold_qty, status.filled_qty);
+
+                        // --- ДОБАВЛЕНО: Финальный колбэк 100% фьюча ---
+                        let final_futures_update = HedgeProgressUpdate {
+                            stage: HedgeStage::Futures,
+                            current_spot_price,
+                            new_limit_price: futures_limit_price,
+                            is_replacement: false,
+                            filled_qty: status.filled_qty,
+                            target_qty: futures_buy_qty,
+                        };
+                        let _ = progress_callback(final_futures_update).await;
+                        // --- КОНЕЦ ФИНАЛЬНОГО КОЛБЭКА ---
+
                         return Ok((final_spot_sold_qty, status.filled_qty)); // Успех
                     }
                 }
@@ -973,6 +1095,19 @@ where
                         let assumed_filled = futures_buy_qty;
                         if let Err(e_db) = mark_hedge_as_unhedged(db, original_hedge_op_id).await { error!("op_id:{}: Failed mark hedge {} unhedged: {}", original_hedge_op_id, original_hedge_op_id, e_db); }
                         info!("op_id:{}: Unhedge completed (futures assumed filled). Spot Sold: {:.8}, Fut Bought: {:.8}", original_hedge_op_id, final_spot_sold_qty, assumed_filled);
+
+                        // --- ДОБАВЛЕНО: Финальный колбэк 100% фьюча (при assumption) ---
+                        let final_futures_update = HedgeProgressUpdate {
+                            stage: HedgeStage::Futures,
+                            current_spot_price,
+                            new_limit_price: futures_limit_price,
+                            is_replacement: false,
+                            filled_qty: assumed_filled,
+                            target_qty: futures_buy_qty,
+                        };
+                        let _ = progress_callback(final_futures_update).await;
+                        // --- КОНЕЦ ФИНАЛЬНОГО КОЛБЭКА ---
+
                         return Ok((final_spot_sold_qty, assumed_filled));
                     } else {
                         error!("op_id:{}: Failed get futures buy order {} status: {}. Aborting.", original_hedge_op_id, fut_order.id, e);
