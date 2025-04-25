@@ -1,9 +1,7 @@
 // src/notifier/unhedge_flow.rs
 
 use super::{
-    StateStorage, UserState, RunningOperations, callback_data, navigation, // Убраны OperationType, wallet_info
-    // progress,
-    // utils,
+    StateStorage, UserState, RunningOperations, callback_data, navigation,
 };
 use crate::config::Config;
 use crate::exchange::Exchange;
@@ -11,64 +9,45 @@ use crate::storage::{
     Db, HedgeOperation, get_completed_unhedged_ops_for_symbol,
     get_all_completed_unhedged_ops, get_hedge_operation_by_id,
 };
-use crate::hedger::Hedger; // Убраны {}
+use crate::hedger::Hedger;
 use std::{collections::HashMap, sync::Arc};
 use chrono::{Utc, TimeZone, LocalResult};
 // use tokio::sync::Mutex as TokioMutex;
 use teloxide::prelude::*;
 use teloxide::types::{
     InlineKeyboardButton, InlineKeyboardMarkup, Message, MessageId, CallbackQuery, ChatId,
-    // MaybeInaccessibleMessage // <<<--- УБРАН НЕИСПОЛЬЗУЕМЫЙ ИМПОРТ
 };
-// use teloxide::utils::command::BotCommands;
 use tracing::{info, warn, error};
 
 
 // --- Вспомогательные функции --- (без изменений)
 
-/// Создает клавиатуру для выбора актива для расхеджирования
 fn make_unhedge_asset_selection_keyboard(available_symbols: &[String]) -> InlineKeyboardMarkup {
     let mut sorted_symbols = available_symbols.to_vec();
     sorted_symbols.sort();
-
     let mut buttons: Vec<Vec<InlineKeyboardButton>> = sorted_symbols
         .iter()
         .map(|symbol| {
             let callback_data_asset = format!("{}{}", callback_data::PREFIX_UNHEDGE_ASSET, symbol);
-            vec![InlineKeyboardButton::callback(
-                format!("🪙 {}", symbol),
-                callback_data_asset,
-            )]
+            vec![InlineKeyboardButton::callback(format!("🪙 {}", symbol), callback_data_asset)]
         })
         .collect();
-
-    buttons.push(vec![InlineKeyboardButton::callback(
-        "⬅️ Назад",
-        callback_data::BACK_TO_MAIN,
-    )]);
-    buttons.push(vec![InlineKeyboardButton::callback(
-        "❌ Отмена",
-        callback_data::CANCEL_DIALOG,
-    )]);
+    buttons.push(vec![InlineKeyboardButton::callback("⬅️ Назад", callback_data::BACK_TO_MAIN)]);
+    buttons.push(vec![InlineKeyboardButton::callback("❌ Отмена", callback_data::CANCEL_DIALOG)]);
     InlineKeyboardMarkup::new(buttons)
 }
 
-/// Создает клавиатуру для выбора операции расхеджирования
 fn make_unhedge_selection_keyboard(operations: &[HedgeOperation]) -> InlineKeyboardMarkup {
     let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
     let mut sorted_ops = operations.to_vec();
     sorted_ops.sort_by_key(|op| std::cmp::Reverse(op.id));
-
     for op in &sorted_ops {
         let timestamp_dt = match Utc.timestamp_opt(op.start_timestamp, 0) {
             LocalResult::Single(dt) => dt,
             _ => Utc::now(),
         };
         let date_str = timestamp_dt.format("%y-%m-%d %H:%M").to_string();
-        let label = format!(
-            "ID:{} {:.4} {} ({})",
-            op.id, op.target_futures_qty, op.base_symbol, date_str
-        );
+        let label = format!("ID:{} {:.4} {} ({})", op.id, op.target_futures_qty, op.base_symbol, date_str);
         let callback_data_op = format!("{}{}", callback_data::PREFIX_UNHEDGE_OP_SELECT, op.id);
         buttons.push(vec![InlineKeyboardButton::callback(label, callback_data_op)]);
     }
@@ -77,7 +56,6 @@ fn make_unhedge_selection_keyboard(operations: &[HedgeOperation]) -> InlineKeybo
     InlineKeyboardMarkup::new(buttons)
 }
 
-/// Создает клавиатуру для подтверждения расхеджирования
 fn make_unhedge_confirmation_keyboard(_operation_id: i64) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![
@@ -93,14 +71,11 @@ async fn prompt_operation_selection(
     chat_id: ChatId,
     symbol: &str,
     operations: Vec<HedgeOperation>,
-    state_storage: StateStorage,
+    state_storage: StateStorage, // Тип StateStorage уже Arc<TokioRwLock<...>>
     message_id_to_edit: Option<MessageId>,
 ) -> anyhow::Result<()> {
 
-      let text = format!(
-          "Найдено {} завершенных операций для {}. Выберите одну для расхеджирования:",
-          operations.len(), symbol
-      );
+      let text = format!("Найдено {} завершенных операций для {}. Выберите одну для расхеджирования:", operations.len(), symbol);
       let keyboard = make_unhedge_selection_keyboard(&operations);
 
       let bot_msg_id = if let Some(msg_id) = message_id_to_edit {
@@ -111,18 +86,19 @@ async fn prompt_operation_selection(
       };
 
       {
-          let mut state_guard = state_storage.write().expect("Lock failed");
+          // <<< ИСПРАВЛЕНО: .await >>>
+          let mut state_guard = state_storage.write().await;
           state_guard.insert(chat_id, UserState::AwaitingUnhedgeOperationSelection {
               symbol: symbol.to_string(),
               operations,
               last_bot_message_id: Some(bot_msg_id.0),
           });
           info!("User state for {} set to AwaitingUnhedgeOperationSelection for symbol {}", chat_id, symbol);
-      }
+      } // Блокировка записи освобождается здесь
       Ok(())
 }
 
-/// Запускает фоновую задачу расхеджирования
+/// Запускает фоновую задачу расхеджирования (без изменений)
 async fn spawn_unhedge_task<E>(
     bot: Bot,
     exchange: Arc<E>,
@@ -164,16 +140,14 @@ where
                              .map_err(|e| warn!("op_id:{}: Failed edit error unhedge message: {}", original_op_id, e));
             }
         }
-        // TODO: Удалить из running_operations
     });
 }
 
 /// Определяет, нужно ли выбирать актив или можно сразу показать операции
-/// Вызывается при /unhedge без символа или кнопке "Расхеджировать"
 async fn start_unhedge_asset_or_op_selection(
-    bot: Bot, // <<<--- Принимаем по значению, так как передаем дальше
+    bot: Bot,
     chat_id: ChatId,
-    state_storage: StateStorage,
+    state_storage: StateStorage, // Тип StateStorage уже Arc<TokioRwLock<...>>
     db: Arc<Db>,
     message_id_to_edit: Option<MessageId>,
 ) -> anyhow::Result<()>
@@ -200,7 +174,8 @@ async fn start_unhedge_asset_or_op_selection(
                     InlineKeyboardButton::callback("⬅️ Назад", callback_data::BACK_TO_MAIN)
                 ]]);
                 bot.edit_message_text(chat_id, bot_msg_id, text).reply_markup(keyboard).await?;
-                { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); }
+                // <<< ИСПРАВЛЕНО: .await >>>
+                { state_storage.write().await.insert(chat_id, UserState::None); }
                 return Ok(());
             }
 
@@ -219,10 +194,8 @@ async fn start_unhedge_asset_or_op_selection(
 
                 if symbol_operations.len() == 1 {
                     let op_to_confirm = symbol_operations.into_iter().next().unwrap();
-                    // prompt_unhedge_confirmation принимает bot по ссылке, поэтому clone не нужен
                     prompt_unhedge_confirmation(&bot, chat_id, op_to_confirm, state_storage, Some(bot_msg_id)).await?;
                 } else {
-                     // prompt_operation_selection принимает bot по ссылке
                     prompt_operation_selection(&bot, chat_id, &symbol, symbol_operations, state_storage, Some(bot_msg_id)).await?;
                 }
 
@@ -233,12 +206,13 @@ async fn start_unhedge_asset_or_op_selection(
                 bot.edit_message_text(chat_id, bot_msg_id, text).reply_markup(keyboard).await?;
 
                 {
-                    let mut state_guard = state_storage.write().expect("Lock failed");
+                    // <<< ИСПРАВЛЕНО: .await >>>
+                    let mut state_guard = state_storage.write().await;
                     state_guard.insert(chat_id, UserState::AwaitingUnhedgeAssetSelection {
                         last_bot_message_id: Some(bot_msg_id.0),
                     });
                     info!("User state for {} set to AwaitingUnhedgeAssetSelection", chat_id);
-                }
+                } // Блокировка записи освобождается здесь
             }
         }
         Err(e) => {
@@ -248,7 +222,8 @@ async fn start_unhedge_asset_or_op_selection(
                  InlineKeyboardButton::callback("⬅️ Назад", callback_data::BACK_TO_MAIN)
              ]]);
              bot.edit_message_text(chat_id, bot_msg_id, error_text).reply_markup(keyboard).await?;
-             { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); }
+              // <<< ИСПРАВЛЕНО: .await >>>
+             { state_storage.write().await.insert(chat_id, UserState::None); }
              return Err(e.into());
         }
     }
@@ -257,12 +232,11 @@ async fn start_unhedge_asset_or_op_selection(
 
 
 /// Ищет операции для КОНКРЕТНОГО символа и либо запускает одну, либо предлагает выбор
-/// Вызывается после выбора актива или при команде /unhedge <SYMBOL>
 async fn find_and_process_symbol_operations(
-    bot: Bot, // <<<--- Принимаем по значению, так как передаем дальше
+    bot: Bot,
     chat_id: ChatId,
     symbol: String,
-    state_storage: StateStorage,
+    state_storage: StateStorage, // Тип StateStorage уже Arc<TokioRwLock<...>>
     db: Arc<Db>,
     message_id_to_edit: Option<MessageId>,
 ) -> anyhow::Result<()>
@@ -288,13 +262,12 @@ async fn find_and_process_symbol_operations(
                      InlineKeyboardButton::callback("⬅️ Назад (в гл. меню)", callback_data::BACK_TO_MAIN)
                  ]]);
                 bot.edit_message_text(chat_id, bot_msg_id, text).reply_markup(keyboard).await?;
-                { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); }
+                 // <<< ИСПРАВЛЕНО: .await >>>
+                { state_storage.write().await.insert(chat_id, UserState::None); }
             } else if operations.len() == 1 {
                  let op_to_unhedge = operations.into_iter().next().unwrap();
-                 // prompt_unhedge_confirmation принимает bot по ссылке
                  prompt_unhedge_confirmation(&bot, chat_id, op_to_unhedge, state_storage, Some(bot_msg_id)).await?;
             } else {
-                 // prompt_operation_selection принимает bot по ссылке
                  prompt_operation_selection(&bot, chat_id, &symbol, operations, state_storage, Some(bot_msg_id)).await?;
             }
         }
@@ -305,7 +278,8 @@ async fn find_and_process_symbol_operations(
                 InlineKeyboardButton::callback("⬅️ Назад", callback_data::BACK_TO_MAIN)
             ]]);
             bot.edit_message_text(chat_id, bot_msg_id, error_text).reply_markup(keyboard).await?;
-            { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); }
+             // <<< ИСПРАВЛЕНО: .await >>>
+            { state_storage.write().await.insert(chat_id, UserState::None); }
             return Err(e.into());
         }
     }
@@ -320,7 +294,7 @@ pub async fn handle_unhedge_command<E>(
     msg: Message,
     symbol_arg: String,
     _exchange: Arc<E>,
-    state_storage: StateStorage,
+    state_storage: StateStorage, // Тип StateStorage уже Arc<TokioRwLock<...>>
     _running_operations: RunningOperations,
     _cfg: Arc<Config>,
     db: Arc<Db>,
@@ -331,10 +305,10 @@ where
     let chat_id = msg.chat.id;
     let symbol = symbol_arg.trim().to_uppercase();
 
-    // Сброс состояния и чистка чата
     let mut previous_bot_message_id: Option<i32> = None;
       {
-         let mut state_guard = state_storage.write().expect("Lock failed");
+         // <<< ИСПРАВЛЕНО: .await >>>
+         let mut state_guard = state_storage.write().await;
          if let Some(old_state) = state_guard.get(&chat_id) {
               previous_bot_message_id = match old_state {
                    UserState::AwaitingUnhedgeAssetSelection { last_bot_message_id, .. } => *last_bot_message_id,
@@ -347,7 +321,7 @@ where
              info!("Resetting state for {} due to /unhedge command", chat_id);
              state_guard.insert(chat_id, UserState::None);
          }
-    }
+    } // Блокировка записи освобождается здесь
     if let Some(bot_msg_id) = previous_bot_message_id {
         if let Err(e) = bot.delete_message(chat_id, MessageId(bot_msg_id)).await { warn!("Failed delete prev bot msg: {}", e); }
     }
@@ -357,18 +331,16 @@ where
 
     if symbol.is_empty() {
         info!("Processing /unhedge command without symbol for chat_id: {}", chat_id);
-        // bot перемещается сюда
         start_unhedge_asset_or_op_selection(bot, chat_id, state_storage, db, None).await?;
     } else {
         info!("Processing /unhedge command for chat_id: {}, symbol: {}", chat_id, symbol);
-         // bot перемещается сюда
         find_and_process_symbol_operations(bot, chat_id, symbol, state_storage, db, None).await?;
     }
 
     Ok(())
 }
 
-/// Обработчик колбэка кнопки "Расхеджировать" из главного меню
+/// Обработчик колбэка кнопки "Расхеджировать" из главного меню (без изменений)
 pub async fn handle_start_unhedge_callback<E>(
     bot: Bot,
     query: CallbackQuery,
@@ -380,18 +352,15 @@ pub async fn handle_start_unhedge_callback<E>(
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
-      // <<< ИСПРАВЛЕНО: Отвечаем на колбэк ДО вызова следующей функции >>>
       if let Some(msg) = query.message.as_ref() {
           let chat_id = msg.chat().id;
           info!("Processing '{}' callback for chat_id: {}", callback_data::START_UNHEDGE, chat_id);
-          bot.answer_callback_query(query.id).await?; // Отвечаем здесь
-           // bot перемещается сюда
+          bot.answer_callback_query(query.id).await?;
           start_unhedge_asset_or_op_selection(bot, chat_id, state_storage, db, Some(msg.id())).await?;
       } else {
           warn!("CallbackQuery missing message in handle_start_unhedge_callback");
-          bot.answer_callback_query(query.id).await?; // Все равно отвечаем
+          bot.answer_callback_query(query.id).await?;
       }
-    // Ответ уже был отправлен
     Ok(())
 }
 
@@ -400,35 +369,36 @@ pub async fn handle_unhedge_asset_callback<E>(
     bot: Bot,
     query: CallbackQuery,
     _exchange: Arc<E>,
-    state_storage: StateStorage,
+    state_storage: StateStorage, // Тип StateStorage уже Arc<TokioRwLock<...>>
     _cfg: Arc<Config>,
     db: Arc<Db>,
 ) -> anyhow::Result<()>
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
-    let query_id = query.id; // Сохраняем ID для ответа
+    let query_id = query.id;
     if let (Some(data), Some(msg)) = (query.data.as_deref(), query.message.as_ref()) {
         let chat_id = msg.chat().id;
         if let Some(symbol) = data.strip_prefix(callback_data::PREFIX_UNHEDGE_ASSET) {
              info!("User {} selected asset {} for unhedge via callback", chat_id, symbol);
 
             let is_correct_state = {
-                 let state_read_guard = state_storage.read().expect("Lock failed");
+                 // <<< ИСПРАВЛЕНО: .await >>>
+                 let state_read_guard = state_storage.read().await;
                  matches!(state_read_guard.get(&chat_id), Some(UserState::AwaitingUnhedgeAssetSelection { .. }))
-            };
+            }; // Блокировка чтения освобождается здесь
 
             if is_correct_state {
-                 bot.answer_callback_query(query_id).await?; // <<< Отвечаем ДО вызова >>>
-                  // bot перемещается сюда
+                 bot.answer_callback_query(query_id).await?;
                  find_and_process_symbol_operations(bot, chat_id, symbol.to_string(), state_storage, db, Some(msg.id())).await?;
-                 return Ok(()); // Выходим, т.к. ответ уже отправлен
+                 return Ok(());
             } else {
                  warn!("User {} clicked unhedge asset button but was in wrong state", chat_id);
-                  { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); }
+                  // <<< ИСПРАВЛЕНО: .await >>>
+                  { state_storage.write().await.insert(chat_id, UserState::None); }
                   let _ = navigation::show_main_menu(&bot, chat_id, Some(msg.id())).await;
                   bot.answer_callback_query(query_id).text("Состояние изменилось, начните заново.").show_alert(true).await?;
-                  return Ok(()); // Выходим, т.к. ответ уже отправлен
+                  return Ok(());
             }
 
         } else {
@@ -437,17 +407,17 @@ where
     } else {
          warn!("CallbackQuery missing data or message in handle_unhedge_asset_callback");
     }
-      bot.answer_callback_query(query_id).await?; // Отвечаем на колбэк в конце, если не вышли раньше
+      bot.answer_callback_query(query_id).await?;
       Ok(())
 }
 
 
 /// Обработчик колбэка выбора операции для расхеджа (префикс u_opsel_)
 pub async fn handle_unhedge_select_op_callback<E>(
-    bot: Bot, // <<< Принимаем по значению, т.к. можем передать в show_main_menu
+    bot: Bot,
     query: CallbackQuery,
     _exchange: Arc<E>,
-    state_storage: StateStorage,
+    state_storage: StateStorage, // Тип StateStorage уже Arc<TokioRwLock<...>>
     _running_operations: RunningOperations,
     _cfg: Arc<Config>,
     _db: Arc<Db>,
@@ -463,29 +433,29 @@ where
                  info!("User {} selected operation ID {} to unhedge", chat_id, operation_id);
 
                 let op_to_confirm_opt: Option<HedgeOperation> = {
-                    let state_guard = state_storage.read().expect("Lock failed");
+                     // <<< ИСПРАВЛЕНО: .await >>>
+                    let state_guard = state_storage.read().await;
                     if let Some(UserState::AwaitingUnhedgeOperationSelection { operations, .. }) = state_guard.get(&chat_id) {
                         operations.iter().find(|op| op.id == operation_id).cloned()
                     } else {
                         warn!("User {} clicked unhedge operation selection but was in wrong state", chat_id);
                         drop(state_guard);
-                         { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); }
-                        // bot ПЕРЕМЕЩАЕТСЯ сюда
+                         // <<< ИСПРАВЛЕНО: .await >>>
+                         { state_storage.write().await.insert(chat_id, UserState::None); }
                         let _ = navigation::show_main_menu(&bot, chat_id, Some(msg.id())).await;
                         bot.answer_callback_query(query_id).text("Состояние изменилось, начните заново.").show_alert(true).await?;
                         return Ok(());
                     }
-                };
+                }; // Блокировка чтения освобождается здесь
 
                 if let Some(op) = op_to_confirm_opt {
-                    // prompt_unhedge_confirmation принимает bot по ссылке (&Bot)
                     prompt_unhedge_confirmation(&bot, chat_id, op, state_storage, Some(msg.id())).await?;
                     bot.answer_callback_query(query_id).await?;
                     return Ok(());
                 } else {
                     error!("Operation ID {} not found in state for chat_id {}", operation_id, chat_id);
-                    { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); }
-                     // bot не перемещается, т.к. edit_message_text принимает по ссылке
+                     // <<< ИСПРАВЛЕНО: .await >>>
+                    { state_storage.write().await.insert(chat_id, UserState::None); }
                     let _ = bot.edit_message_text(chat_id, msg.id(), "❌ Ошибка: Выбранная операция не найдена. Попробуйте снова.")
                              .reply_markup(navigation::make_main_menu_keyboard())
                              .await;
@@ -495,11 +465,11 @@ where
 
             } else {
                  error!("Failed to parse operation_id from callback data: {}", data);
-                 // bot не перемещается
                  let _ = bot.edit_message_text(chat_id, msg.id(), "❌ Ошибка: Неверный ID операции в кнопке.")
                           .reply_markup(navigation::make_main_menu_keyboard())
                           .await;
-                   { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); }
+                    // <<< ИСПРАВЛЕНО: .await >>>
+                   { state_storage.write().await.insert(chat_id, UserState::None); }
                  bot.answer_callback_query(query_id).await?;
                  return Ok(());
             }
@@ -515,10 +485,10 @@ where
 
 /// Запрашивает подтверждение перед расхеджированием
 async fn prompt_unhedge_confirmation(
-    bot: &Bot, // <<< Принимаем по ссылке
+    bot: &Bot,
     chat_id: ChatId,
     operation_to_unhedge: HedgeOperation,
-    state_storage: StateStorage,
+    state_storage: StateStorage, // Тип StateStorage уже Arc<TokioRwLock<...>>
     message_id_to_edit: Option<MessageId>,
 ) -> anyhow::Result<()> {
     let operation_id = operation_to_unhedge.id;
@@ -544,13 +514,14 @@ async fn prompt_unhedge_confirmation(
     };
 
     {
-        let mut state_guard = state_storage.write().expect("Lock failed");
+         // <<< ИСПРАВЛЕНО: .await >>>
+        let mut state_guard = state_storage.write().await;
         state_guard.insert(chat_id, UserState::AwaitingUnhedgeConfirmation {
             operation_id,
             last_bot_message_id: Some(bot_msg_id.0),
         });
         info!("User state for {} set to AwaitingUnhedgeConfirmation for op_id {}", chat_id, operation_id);
-    }
+    } // Блокировка записи освобождается здесь
     Ok(())
 }
 
@@ -560,7 +531,7 @@ pub async fn handle_unhedge_confirm_callback<E>(
     bot: Bot,
     query: CallbackQuery,
     exchange: Arc<E>,
-    state_storage: StateStorage,
+    state_storage: StateStorage, // Тип StateStorage уже Arc<TokioRwLock<...>>
     running_operations: RunningOperations,
     cfg: Arc<Config>,
     db: Arc<Db>,
@@ -568,7 +539,7 @@ pub async fn handle_unhedge_confirm_callback<E>(
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
-    let query_id = query.id.clone(); // <<< Клонируем ID, если он String
+    let query_id = query.id.clone();
 
     if let (Some(data), Some(msg)) = (query.data.as_deref(), query.message.as_ref()) {
         let chat_id = msg.chat().id;
@@ -577,48 +548,45 @@ where
                 info!("User {} confirmed unhedge operation", chat_id);
 
                 let operation_id_to_unhedge = {
-                     let state_guard = state_storage.read().expect("Lock failed");
+                     // <<< ИСПРАВЛЕНО: .await >>>
+                     let state_guard = state_storage.read().await;
                       match state_guard.get(&chat_id) {
                          Some(UserState::AwaitingUnhedgeConfirmation { operation_id, .. }) => *operation_id,
                          _ => {
                              warn!("User {} confirmed unhedge but was in wrong state", chat_id);
                              drop(state_guard);
-                              { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); }
-                             // bot ПЕРЕМЕЩАЕТСЯ сюда
+                              // <<< ИСПРАВЛЕНО: .await >>>
+                              { state_storage.write().await.insert(chat_id, UserState::None); }
                              let _ = navigation::show_main_menu(&bot, chat_id, Some(msg.id())).await;
                               bot.answer_callback_query(query_id).text("Состояние изменилось, начните заново.").show_alert(true).await?;
                              return Ok(());
                          }
                      }
-                };
-                 { state_storage.write().expect("Lock failed").insert(chat_id, UserState::None); }
+                }; // Блокировка чтения освобождается здесь
+                 // <<< ИСПРАВЛЕНО: .await >>>
+                 { state_storage.write().await.insert(chat_id, UserState::None); }
 
                 match get_hedge_operation_by_id(db.as_ref(), operation_id_to_unhedge).await {
                      Ok(Some(original_op)) => {
                          if original_op.status != "Completed" || original_op.unhedged_op_id.is_some() {
                              error!("Attempted to unhedge already unhedged or invalid op_id: {}", operation_id_to_unhedge);
-                             // bot не перемещается
                              let _ = bot.edit_message_text(chat_id, msg.id(), "❌ Операция уже расхеджирована или недействительна.")
                                       .reply_markup(navigation::make_main_menu_keyboard())
                                       .await;
                              bot.answer_callback_query(query_id).await?;
                              return Ok(());
                          } else {
-                             // bot не перемещается
                              let _ = bot.edit_message_text(chat_id, msg.id(), format!("⏳ Запуск расхеджирования операции ID:{}...", operation_id_to_unhedge))
                                 .reply_markup(InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new()))
                                 .await?;
-                             // bot КЛОНИРУЕТСЯ и передается в задачу
                              spawn_unhedge_task(
                                  bot.clone(), exchange.clone(), cfg.clone(), db.clone(),
                                  running_operations.clone(), chat_id, original_op, msg.id(),
                              ).await;
-                              // Не отвечаем здесь на query_id
                          }
                      }
                      Ok(None) => {
                          error!("Hedge operation ID {} not found in DB for unhedge confirmation", operation_id_to_unhedge);
-                         // bot не перемещается
                          let _ = bot.edit_message_text(chat_id, msg.id(), "❌ Ошибка: Операция не найдена в БД.")
                                   .reply_markup(navigation::make_main_menu_keyboard())
                                   .await;
@@ -627,7 +595,6 @@ where
                      }
                      Err(e) => {
                           error!("DB error getting hedge operation {} for unhedge: {}", operation_id_to_unhedge, e);
-                          // bot не перемещается
                           let _ = bot.edit_message_text(chat_id, msg.id(), "❌ Ошибка БД при получении деталей операции.")
                                    .reply_markup(navigation::make_main_menu_keyboard())
                                    .await;
@@ -635,14 +602,10 @@ where
                          return Ok(());
                      }
                 }
-                // Не отвечаем на query_id здесь, если успешно запустили задачу
 
             } else if payload == "no" {
-                // <<< ИСПРАВЛЕНО: Отвечаем ДО вызова handle_cancel_dialog >>>
                 info!("User {} cancelled unhedge at confirmation", chat_id);
-                bot.answer_callback_query(query_id).await?; // Отвечаем здесь
-                // ПРЕДПОЛОЖЕНИЕ: handle_cancel_dialog принимает (Bot, ChatId, MessageId, StateStorage)
-                // bot ПЕРЕМЕЩАЕТСЯ сюда
+                bot.answer_callback_query(query_id).await?;
                 navigation::handle_cancel_dialog(bot, chat_id, msg.id(), state_storage).await?;
                 return Ok(());
 
@@ -652,11 +615,8 @@ where
                  return Ok(());
             }
         } else if data == callback_data::CANCEL_DIALOG {
-             // <<< ИСПРАВЛЕНО: Отвечаем ДО вызова handle_cancel_dialog >>>
             info!("User cancelled unhedge dialog via cancel button");
-            bot.answer_callback_query(query_id).await?; // Отвечаем здесь
-            // ПРЕДПОЛОЖЕНИЕ: handle_cancel_dialog принимает (Bot, ChatId, MessageId, StateStorage)
-             // bot ПЕРЕМЕЩАЕТСЯ сюда
+            bot.answer_callback_query(query_id).await?;
             navigation::handle_cancel_dialog(bot, chat_id, msg.id(), state_storage).await?;
             return Ok(());
         }
@@ -670,6 +630,5 @@ where
          bot.answer_callback_query(query_id).await?;
          return Ok(());
     }
-     // Сюда не должны доходить, если все ветки обработаны
     Ok(())
 }

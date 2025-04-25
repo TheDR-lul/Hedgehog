@@ -1,6 +1,6 @@
 // src/notifier/market_info.rs
 
-use super::{Command, StateStorage, UserState, callback_data, navigation};
+use super::{Command, StateStorage, UserState, callback_data, navigation}; // Command здесь нужен для BotCommands
 use crate::config::Config;
 use crate::exchange::Exchange;
 use crate::storage::Db;
@@ -9,7 +9,7 @@ use teloxide::prelude::*;
 use teloxide::types::{
     InlineKeyboardButton, InlineKeyboardMarkup, Message, MessageId, CallbackQuery, ChatId,
 };
-use teloxide::utils::command::BotCommands;
+use teloxide::utils::command::BotCommands; // Нужен для Command::descriptions()
 use tracing::{info, warn, error};
 
 
@@ -19,30 +19,27 @@ use tracing::{info, warn, error};
 pub async fn handle_status_command<E>(
     bot: Bot,
     msg: Message,
-    exchange: Arc<E>, // Убрали mut
-    _state_storage: StateStorage,
+    exchange: Arc<E>,
+    _state_storage: StateStorage, // Тип StateStorage уже Arc<TokioRwLock<...>>
     _cfg: Arc<Config>,
     _db: Arc<Db>,
 ) -> anyhow::Result<()>
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
-    let chat_id = msg.chat.id; // ИСПРАВЛЕНО: Назад на поле
+    let chat_id = msg.chat.id;
     info!("Processing /status command for chat_id: {}", chat_id);
     let indicator_msg = bot.send_message(chat_id, "⏳ Проверка соединения с биржей...").await?;
 
-    // --- Логика проверки соединения ---
     let mut exchange_clone = (*exchange).clone();
     let status_text = match exchange_clone.check_connection().await {
          Ok(_) => "✅ Бот запущен и успешно подключен к бирже.".to_string(),
          Err(e) => format!("⚠️ Бот запущен, но есть проблема с подключением к бирже: {}", e),
     };
-    // --- Конец логики ---
 
     bot.edit_message_text(chat_id, indicator_msg.id, status_text).await?;
 
-    // Удаляем исходное сообщение /status
-    if let Err(e) = bot.delete_message(chat_id, msg.id).await { // ИСПРАВЛЕНО: Назад на поле
+    if let Err(e) = bot.delete_message(chat_id, msg.id).await {
         warn!("Failed to delete /status command message: {}", e);
     }
 
@@ -55,20 +52,19 @@ pub async fn handle_funding_command<E>(
     msg: Message,
     args: String,
     exchange: Arc<E>,
-    _state_storage: StateStorage,
+    _state_storage: StateStorage, // Тип StateStorage уже Arc<TokioRwLock<...>>
     _cfg: Arc<Config>,
     _db: Arc<Db>,
 ) -> anyhow::Result<()>
 where
      E: Exchange + Clone + Send + Sync + 'static,
 {
-    let chat_id = msg.chat.id; // ИСПРАВЛЕНО: Назад на поле
+    let chat_id = msg.chat.id;
     let parts: Vec<&str> = args.split_whitespace().collect();
 
     if parts.is_empty() {
-         // ИСПРАВЛЕНО: Убрали ошибочный get_command_description
-         bot.send_message(chat_id, format!("Использование: /funding <SYMBOL> [days]\nПример: /funding BTC или /funding BTC 7")).await?;
-         if let Err(e) = bot.delete_message(chat_id, msg.id).await { warn!("Failed to delete invalid /funding command message: {}", e); } // ИСПРАВЛЕНО: Назад на поле
+         bot.send_message(chat_id, "Использование: /funding <SYMBOL> [days]\nПример: /funding BTC или /funding BTC 7").await?;
+         if let Err(e) = bot.delete_message(chat_id, msg.id).await { warn!("Failed to delete invalid /funding command message: {}", e); }
          return Ok(());
     }
 
@@ -77,11 +73,10 @@ where
 
     if days_u32 == 0 {
         bot.send_message(chat_id, "⚠️ Количество дней должно быть больше нуля.").await?;
-         if let Err(e) = bot.delete_message(chat_id, msg.id).await { warn!("Failed to delete invalid /funding command message: {}", e); } // ИСПРАВЛЕНО: Назад на поле
+         if let Err(e) = bot.delete_message(chat_id, msg.id).await { warn!("Failed to delete invalid /funding command message: {}", e); }
         return Ok(());
     }
     let days_u16 = days_u32.min(66) as u16;
-    // ИСПРАВЛЕНО: Приведение типов для сравнения
     if (days_u16 as u32) != days_u32 && parts.get(1).is_some() {
          bot.send_message(chat_id, format!("ℹ️ Количество дней для фандинга ограничено до {}.", days_u16)).await?;
     }
@@ -101,8 +96,7 @@ where
         }
     }
 
-     // Удаляем исходное сообщение /funding
-     if let Err(e) = bot.delete_message(chat_id, msg.id).await { // ИСПРАВЛЕНО: Назад на поле
+     if let Err(e) = bot.delete_message(chat_id, msg.id).await {
          warn!("Failed to delete /funding command message: {}", e);
      }
 
@@ -138,8 +132,7 @@ pub async fn handle_menu_info_callback<E>(
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
-    // Для CallbackQuery используем message.chat.id и message.id
-    if let Some(msg) = q.message {
+    if let Some(msg) = q.message.as_ref() {
         let chat_id = msg.chat().id;
         info!("Processing '{}' callback for chat_id: {}", callback_data::MENU_INFO, chat_id);
 
@@ -158,31 +151,28 @@ where
 pub async fn handle_show_status_callback<E>(
     bot: Bot,
     q: CallbackQuery,
-    exchange: Arc<E>, // Убрали mut
+    exchange: Arc<E>,
     _cfg: Arc<Config>,
     _db: Arc<Db>,
 ) -> anyhow::Result<()>
  where
      E: Exchange + Clone + Send + Sync + 'static,
  {
-    if let Some(msg) = q.message {
+    if let Some(msg) = q.message.as_ref() {
         let chat_id = msg.chat().id;
         info!("Processing '{}' callback for chat_id: {}", callback_data::SHOW_STATUS, chat_id);
 
-        // Показываем индикатор
         let kb = make_info_menu_keyboard();
         bot.edit_message_text(chat_id, msg.id(), "⏳ Проверка соединения...")
            .reply_markup(kb.clone())
            .await?;
 
-        // Логика проверки статуса
         let mut exchange_clone = (*exchange).clone();
         let status_text = match exchange_clone.check_connection().await {
             Ok(_) => "✅ Бот запущен и успешно подключен к бирже.".to_string(),
             Err(e) => format!("⚠️ Бот запущен, но есть проблема с подключением к бирже: {}", e),
         };
 
-        // Редактируем с результатом
         bot.edit_message_text(chat_id, msg.id(), status_text)
            .reply_markup(kb)
            .await?;
@@ -197,9 +187,9 @@ pub async fn handle_show_status_callback<E>(
 pub async fn handle_show_funding_callback(
     bot: Bot,
     q: CallbackQuery,
-    state_storage: StateStorage,
+    state_storage: StateStorage, // Тип StateStorage уже Arc<TokioRwLock<...>>
 ) -> anyhow::Result<()> {
-     if let Some(msg) = q.message {
+     if let Some(msg) = q.message.as_ref() {
         let chat_id = msg.chat().id;
         info!("Processing '{}' callback for chat_id: {}", callback_data::SHOW_FUNDING, chat_id);
 
@@ -211,12 +201,12 @@ pub async fn handle_show_funding_callback(
 
         bot.edit_message_text(chat_id, msg.id(), text).reply_markup(kb).await?;
 
-        // Устанавливаем состояние ожидания ввода символа
         {
-            let mut state_guard = state_storage.write().expect("Lock failed");
+            // <<< ИСПРАВЛЕНО: .await >>>
+            let mut state_guard = state_storage.write().await;
             state_guard.insert(chat_id, UserState::AwaitingFundingSymbolInput { last_bot_message_id: Some(msg.id().0) });
             info!("User state for {} set to AwaitingFundingSymbolInput", chat_id);
-        }
+        } // Блокировка записи освобождается здесь
 
      } else {
          warn!("CallbackQuery missing message in handle_show_funding_callback");
@@ -231,30 +221,29 @@ pub async fn handle_funding_symbol_input<E>(
     bot: Bot,
     msg: Message,
     exchange: Arc<E>,
-    state_storage: StateStorage,
+    state_storage: StateStorage, // Тип StateStorage уже Arc<TokioRwLock<...>>
     _cfg: Arc<Config>,
     _db: Arc<Db>,
 ) -> anyhow::Result<()>
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
-    let chat_id = msg.chat.id; // ИСПРАВЛЕНО: Назад на поле
-    let user_message_id = msg.id; // ИСПРАВЛЕНО: Назад на поле
+    let chat_id = msg.chat.id;
+    let user_message_id = msg.id;
     let symbol = msg.text().unwrap_or("").trim().to_uppercase();
 
-    // Получаем ID предыдущего сообщения бота из состояния
     let previous_bot_message_id = {
-        let state_guard = state_storage.read().expect("Lock failed");
+         // <<< ИСПРАВЛЕНО: .await >>>
+        let state_guard = state_storage.read().await;
         match state_guard.get(&chat_id) {
             Some(UserState::AwaitingFundingSymbolInput { last_bot_message_id }) => *last_bot_message_id,
             _ => {
                  if let Err(e) = bot.delete_message(chat_id, user_message_id).await { warn!("Failed delete unexpected funding symbol input: {}", e); }
-                 return Ok(()); // Не то состояние
+                 return Ok(());
             }
         }
-    };
+    }; // Блокировка чтения освобождается здесь
 
-    // Удаляем сообщение пользователя
     if let Err(e) = bot.delete_message(chat_id, user_message_id).await { warn!("Failed delete user funding symbol message: {}", e); }
 
     if symbol.is_empty() {
@@ -266,13 +255,12 @@ where
 
      info!("User {} entered symbol '{}' for funding", chat_id, symbol);
 
-    // Сбрасываем состояние ПЕРЕД запросом к API
     {
-        state_storage.write().expect("Lock failed").insert(chat_id, UserState::None);
+         // <<< ИСПРАВЛЕНО: .await >>>
+        state_storage.write().await.insert(chat_id, UserState::None);
         info!("User state for {} reset to None", chat_id);
-    }
+    } // Блокировка записи освобождается здесь
 
-    // Показываем индикатор ожидания
     let days_u16 = 30;
     let loading_text = format!("⏳ Загрузка ставки финансирования для {} ({} дн.)...", symbol, days_u16);
     let bot_msg_id_opt = previous_bot_message_id.map(MessageId);
@@ -283,8 +271,6 @@ where
          warn!("No previous bot message ID to edit for funding result {}", chat_id);
     }
 
-
-    // Выполняем запрос и показываем результат
     match exchange.get_funding_rate(&symbol, days_u16).await {
         Ok(rate) => {
             let text = format!("📈 Средняя ставка финансирования {} за ~{} дн.: {:.4}%", symbol, days_u16, rate * 100.0);

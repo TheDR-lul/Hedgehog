@@ -23,7 +23,6 @@ use teloxide::types::{
 use tracing::{info, warn, error};
 use futures::future::FutureExt;
 
-// --- Вспомогательные функции для этого модуля --- (без изменений)
 
 fn make_hedge_confirmation_keyboard() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
