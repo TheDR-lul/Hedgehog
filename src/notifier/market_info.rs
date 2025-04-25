@@ -166,12 +166,12 @@ pub async fn handle_show_status_callback<E>(
      E: Exchange + Clone + Send + Sync + 'static,
  {
     if let Some(msg) = q.message {
-        let chat_id = msg.chat.id;
+        let chat_id = msg.chat().id;
         info!("Processing '{}' callback for chat_id: {}", callback_data::SHOW_STATUS, chat_id);
 
         // Показываем индикатор
         let kb = make_info_menu_keyboard(); // Возвращаем подменю информации
-        bot.edit_message_text(chat_id, msg.id, "⏳ Проверка соединения...")
+        bot.edit_message_text(chat_id, msg.id(), "⏳ Проверка соединения...")
            .reply_markup(kb.clone()) // Клон для второго вызова
            .await?;
 
@@ -183,7 +183,7 @@ pub async fn handle_show_status_callback<E>(
         };
 
         // Редактируем с результатом, но оставляем клавиатуру подменю
-        bot.edit_message_text(chat_id, msg.id, status_text)
+        bot.edit_message_text(chat_id, msg.id(), status_text)
            .reply_markup(kb)
            .await?;
     } else {
@@ -201,7 +201,7 @@ pub async fn handle_show_funding_callback(
     // exchange, cfg, db - не нужны на этом шаге
 ) -> anyhow::Result<()> {
      if let Some(msg) = q.message {
-        let chat_id = msg.chat.id;
+        let chat_id = msg.chat().id;
         info!("Processing '{}' callback for chat_id: {}", callback_data::SHOW_FUNDING, chat_id);
 
         let text = "Введите символ для получения ставки финансирования (например, BTC):";
@@ -213,7 +213,7 @@ pub async fn handle_show_funding_callback(
          ]);
 
         // Редактируем сообщение
-        bot.edit_message_text(chat_id, msg.id, text).reply_markup(kb).await?;
+        bot.edit_message_text(chat_id, msg.id(), text).reply_markup(kb).await?;
 
         // Устанавливаем состояние ожидания ввода символа
         {
