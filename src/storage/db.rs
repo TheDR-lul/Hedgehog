@@ -301,3 +301,52 @@ pub async fn mark_hedge_as_unhedged(
 }
 
 // TODO: Добавить функции для работы с unhedge_operations, если нужно
+pub async fn get_all_completed_unhedged_ops(
+    db: &Db,
+    chat_id: i64,
+) -> Result<Vec<HedgeOperation>, SqlxError> {
+    // Используем sqlx::query() и ручной маппинг, как в других функциях этого файла
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id, chat_id, base_symbol, quote_currency, initial_sum, volatility,
+            target_spot_qty, target_futures_qty, start_timestamp, status,
+            spot_order_id, spot_filled_qty, futures_order_id, futures_filled_qty,
+            end_timestamp, error_message, unhedged_op_id
+        FROM hedge_operations
+        WHERE chat_id = ?         -- Фильтр по пользователю
+          AND status = 'Completed'  -- Только завершенные
+          AND unhedged_op_id IS NULL -- Только те, что еще не расхеджированы
+        ORDER BY end_timestamp DESC -- Сначала более новые
+        "#,
+    )
+    .bind(chat_id)
+    .fetch_all(db)
+    .await?;
+
+    // Ручной маппинг строк в Vec<HedgeOperation>
+    let mut operations = Vec::with_capacity(rows.len());
+    for row in rows {
+        let operation = HedgeOperation {
+            id: row.try_get("id")?,
+            chat_id: row.try_get("chat_id")?,
+            base_symbol: row.try_get("base_symbol")?,
+            quote_currency: row.try_get("quote_currency")?,
+            initial_sum: row.try_get("initial_sum")?,
+            volatility: row.try_get("volatility")?,
+            target_spot_qty: row.try_get("target_spot_qty")?,
+            target_futures_qty: row.try_get("target_futures_qty")?,
+            start_timestamp: row.try_get("start_timestamp")?,
+            status: row.try_get("status")?,
+            spot_order_id: row.try_get("spot_order_id")?,
+            spot_filled_qty: row.try_get("spot_filled_qty")?,
+            futures_order_id: row.try_get("futures_order_id")?,
+            futures_filled_qty: row.try_get("futures_filled_qty")?,
+            end_timestamp: row.try_get("end_timestamp")?,
+            error_message: row.try_get("error_message")?,
+            unhedged_op_id: row.try_get("unhedged_op_id")?,
+        };
+        operations.push(operation);
+    }
+    Ok(operations)
+}
