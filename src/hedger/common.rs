@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
-use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive}; // Добавили ToPrimitive
 
 
 use super::{HedgeProgressCallback, HedgeProgressUpdate, HedgeStage, Hedger, ORDER_FILL_TOLERANCE};
@@ -319,7 +319,8 @@ where
             debug!("op_id:{}: Checking price relevance for {} order {} (elapsed: {:?})...", operation_id, if is_spot { "spot" } else { "futures" }, order_id_to_check, elapsed_since_order_start);
             last_price_check = now; // Сбрасываем таймер проверки цены
 
-            match get_market_price(hedger.exchange.clone(), symbol, is_spot).await {
+            // --- ИСПРАВЛЕНО: Передаем quote_currency в get_market_price ---
+            match get_market_price(hedger.exchange.clone(), symbol, is_spot, &hedger.config.quote_currency).await {
                 Ok(market_price) => {
                     current_market_price = market_price; // Обновляем текущую рыночную цену
                     // Используем config для доступа к slippage
@@ -349,17 +350,22 @@ where
         if should_replace && status.remaining_qty > ORDER_FILL_TOLERANCE {
             is_replacement = true; // Устанавливаем флаг для колбэка
 
-            let remaining_total_qty = initial_target_qty - cumulative_filled_qty;
-            let remaining_total_qty_decimal = Decimal::from_f64(remaining_total_qty).unwrap_or_default();
+            // --- ИСПРАВЛЕНО: Используем Decimal для точного вычитания ---
+            let initial_target_qty_d = Decimal::from_f64(initial_target_qty).unwrap_or_default();
+            let cumulative_filled_qty_d = Decimal::from_f64(cumulative_filled_qty).unwrap_or_default();
+            let remaining_total_qty_d = (initial_target_qty_d - cumulative_filled_qty_d).max(Decimal::ZERO); // Убедимся, что не отрицательное
+            let remaining_total_qty = remaining_total_qty_d.to_f64().unwrap_or(0.0); // Конвертируем обратно в f64 для проверок и place_order
+            // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
             // --- Проверка на пыль (только для unhedge spot) ---
             if is_spot && side == OrderSide::Sell && min_order_qty_decimal.is_some() {
+                // Сравниваем Decimal с Decimal
                 if remaining_total_qty > ORDER_FILL_TOLERANCE
-                    && remaining_total_qty_decimal < min_order_qty_decimal.unwrap()
+                    && remaining_total_qty_d < min_order_qty_decimal.unwrap()
                 {
                     warn!(
-                        "op_id:{}: Unhedge spot remaining qty {:.8} is dust (min: {}). Ignoring. (Stage: {:?})",
-                        operation_id, remaining_total_qty, min_order_qty_decimal.unwrap(), stage
+                        "op_id:{}: Unhedge spot remaining qty {:.8} (Decimal: {}) is dust (min: {}). Ignoring. (Stage: {:?})",
+                        operation_id, remaining_total_qty, remaining_total_qty_d, min_order_qty_decimal.unwrap(), stage
                     );
                     if let Err(e) = cancel_order(hedger.exchange.clone(), symbol, &order_id_to_check, is_spot).await {
                         warn!("op_id:{}: Failed cancel dust {} order {}: {}", operation_id, if is_spot { "spot" } else { "futures" }, order_id_to_check, e);
@@ -487,15 +493,18 @@ where
 
 
             // --- Пересчет остатка и размещение нового ордера ---
-            let remaining_total_qty = initial_target_qty - cumulative_filled_qty;
+            // Используем f64 значение remaining_total_qty, полученное из Decimal
             if remaining_total_qty <= ORDER_FILL_TOLERANCE {
-                info!("op_id:{}: Remaining qty {:.8} is negligible after cancel/recheck. Exiting loop. (Stage: {:?})", operation_id, remaining_total_qty, stage);
+                // Добавим вывод Decimal для отладки
+                info!("op_id:{}: Remaining qty {:.8} (Decimal: {}) is negligible after cancel/recheck. Exiting loop. (Stage: {:?})",
+                      operation_id, remaining_total_qty, remaining_total_qty_d, stage);
                 break Ok((cumulative_filled_qty, last_placed_order_id));
             }
 
             // Получаем новую цену (если еще не получили при проверке свежести)
             if !should_replace { // should_replace был false, значит, цена не проверялась
-                 current_market_price = match get_market_price(hedger.exchange.clone(), symbol, is_spot).await {
+                 // --- ИСПРАВЛЕНО: Передаем quote_currency в get_market_price ---
+                 current_market_price = match get_market_price(hedger.exchange.clone(), symbol, is_spot, &hedger.config.quote_currency).await {
                     Ok(p) => p,
                     Err(e) => {
                         error!("op_id:{}: Failed to get new market price for replacement: {}. Aborting stage.", operation_id, e);
@@ -506,9 +515,14 @@ where
 
             // Используем config для доступа к slippage
             limit_price = calculate_limit_price(current_market_price, side, hedger.config.slippage);
-            current_order_target_qty = remaining_total_qty;
+            current_order_target_qty = remaining_total_qty; // Цель нового ордера - остаток (f64)
 
-            info!("op_id:{}: Placing new {} {} order at {:.8} for remaining qty {:.8} (Stage: {:?})", operation_id, if is_spot { "spot" } else { "futures" }, side, limit_price, current_order_target_qty, stage);
+            // Добавим вывод Decimal для отладки
+            info!("op_id:{}: Placing new {} {} order at {:.8} for remaining qty {:.8} (Decimal: {}) (Stage: {:?})",
+                  operation_id, if is_spot { "spot" } else { "futures" }, side, limit_price, current_order_target_qty, remaining_total_qty_d, stage);
+
+            // Передаем f64 в place_order, т.к. он ожидает f64.
+            // Внутри place_order (в bybit.rs) уже есть логика округления с Decimal.
             let new_order_id = place_order(hedger.exchange.clone(), symbol, side, current_order_target_qty, limit_price, is_spot).await?;
             info!("op_id:{}: Placed replacement {} order: id={} (Stage: {:?})", operation_id, if is_spot { "spot" } else { "futures" }, new_order_id, stage);
             current_order_id = Some(new_order_id.clone());
@@ -546,6 +560,7 @@ where
             }
             last_update_sent = now;
         }
+
         // --- Конец вызова колбэка ---
 
     } // --- Конец основного цикла loop ---
@@ -602,8 +617,10 @@ async fn get_market_price<E: Exchange>(
     exchange: E,
     symbol: &str, // Символ для API (spot или futures)
     is_spot: bool,
+    quote_currency: &str, // <-- ДОБАВЛЕН ПАРАМЕТР
 ) -> Result<f64> {
     let price = if is_spot {
+        // Для спота quote_currency не нужен
         exchange.get_spot_price(symbol).await?
     } else {
         // Для фьючерса берем среднюю цену между бидом и аском или последнюю цену
@@ -615,12 +632,14 @@ async fn get_market_price<E: Exchange>(
                      ticker.last_price
                  } else {
                      warn!("Falling back to spot price due to invalid futures ticker data.");
-                     get_spot_price_fallback(&exchange, symbol).await?
+                     // --- ИСПРАВЛЕНО: Передаем quote_currency ---
+                     get_spot_price_fallback(&exchange, symbol, quote_currency).await?
                  }
             }
             Err(e) => {
                  warn!("Failed get futures ticker for price: {}. Falling back to spot price.", e);
-                 get_spot_price_fallback(&exchange, symbol).await?
+                 // --- ИСПРАВЛЕНО: Передаем quote_currency ---
+                 get_spot_price_fallback(&exchange, symbol, quote_currency).await?
             }
         }
     };
@@ -632,22 +651,24 @@ async fn get_market_price<E: Exchange>(
 }
 
 // --- Helper for spot price fallback in get_market_price ---
-async fn get_spot_price_fallback<E: Exchange>(exchange: &E, futures_symbol: &str) -> Result<f64> {
+async fn get_spot_price_fallback<E: Exchange>(
+    exchange: &E,
+    futures_symbol: &str,
+    quote_currency: &str, // <-- ДОБАВЛЕН ПАРАМЕТР
+) -> Result<f64> {
     // TODO: Implement a robust way to get base symbol from futures symbol
-    // --- ИСПРАВЛЕНО: Используем quote_currency из exchange ---
-    // Получаем quote_currency. В идеале, он должен быть в структуре Hedger или Config.
-    // Здесь предполагаем, что можем получить его как-то из exchange (если он там есть)
-    // или передать как параметр. Пока что хардкодим USDT как пример.
-    // let quote_currency = exchange.get_quote_currency(); // Примерный метод
-    let quote_currency = "USDT"; // ЗАГЛУШКА! Нужно получить реальный quote_currency
-    // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+    // --- ИСПРАВЛЕНО: Используем quote_currency из параметра ---
+    // let quote_currency = "USDT"; // Убрали заглушку
 
+    // Используем переданный quote_currency
     let base_symbol = futures_symbol.trim_end_matches(quote_currency).trim_end_matches("PERP");
     if base_symbol == futures_symbol {
-        return Err(anyhow!("Could not determine base symbol from futures symbol '{}' for fallback", futures_symbol));
+        // Добавили quote_currency в сообщение об ошибке для ясности
+        return Err(anyhow!("Could not determine base symbol from futures symbol '{}' using quote '{}' for fallback", futures_symbol, quote_currency));
     }
     exchange.get_spot_price(base_symbol).await
 }
+
 
 
 // --- Вспомогательные синхронные функции ---
