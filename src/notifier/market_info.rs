@@ -111,7 +111,7 @@ fn make_info_menu_keyboard() -> InlineKeyboardMarkup {
             InlineKeyboardButton::callback("ℹ️ Статус API", callback_data::SHOW_STATUS),
         ],
         vec![
-             InlineKeyboardButton::callback("📈 Ставка Funding", callback_data::SHOW_FUNDING),
+             InlineKeyboardButton::callback("📈 Ставка Funding(сломана)", callback_data::SHOW_FUNDING),
         ],
         vec![
             InlineKeyboardButton::callback("⬅️ Назад", callback_data::BACK_TO_MAIN),
