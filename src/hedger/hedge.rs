@@ -199,6 +199,12 @@ where
              warn!("op_id:{}: Failed get spot execution details for order {}: {}. Will use loop quantity and current price for value estimation.", operation_identifier, final_spot_order_id, error);
              // Создаем "пустой" статус; стоимость будет пересчитана с запасной ценой
              DetailedOrderStatus {
+                 order_id: "".to_string(), // Placeholder for missing order ID
+                 symbol: symbol.clone(), // Use the symbol from the parameters
+                 side: OrderSide::Buy, // Assuming the side is Buy for this context
+                 last_filled_price: Some(0.0), // Placeholder for last filled price
+                 last_filled_qty: Some(0.0), // Placeholder for last filled quantity
+                 reject_reason: None, // No reject reason in this context
                  filled_qty: 0.0, // Будет проигнорировано
                  remaining_qty: 0.0,
                  cumulative_executed_value: 0.0, // Будет пересчитано

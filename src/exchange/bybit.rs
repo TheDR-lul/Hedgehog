@@ -1145,6 +1145,12 @@ impl Exchange for Bybit {
             cumulative_executed_value: cumulative_value,
             average_price: average_price,
             status_text,
+            last_filled_price: None, // Или укажите значение, если доступно
+            last_filled_qty: None, // Или укажите значение, если доступно
+            order_id: String::new(), // Или укажите значение, если доступно
+            reject_reason: None, // Или укажите значение, если доступно
+            side: OrderSide::Buy, // Или укажите значение, если доступно
+            symbol: String::new(), // Или укажите значение, если доступно
         })
     }
 
