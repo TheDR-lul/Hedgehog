@@ -409,28 +409,32 @@ where
                             }
                         }
                         // Проверяем, не исполнился ли ордер полностью или достигнута цель
-                        if final_status.remaining_qty <= ORDER_FILL_TOLERANCE
-                            || cumulative_filled_qty >= initial_target_qty - ORDER_FILL_TOLERANCE
-                        {
+                        if cumulative_filled_qty >= initial_target_qty - ORDER_FILL_TOLERANCE {
                             info!(
-                                "op_id:{}: Order {} filled completely after cancel or target reached. Exiting loop. (Stage: {:?})",
+                                "op_id:{}: Target reached after checking cancelled order {}. Exiting loop. (Stage: {:?})", // Уточнили лог
                                 operation_id, prev_id, stage
                             );
-                             // Финальная коррекция до цели, если нужно
-                             if (cumulative_filled_qty - initial_target_qty).abs() > ORDER_FILL_TOLERANCE && cumulative_filled_qty < initial_target_qty {
-                                 cumulative_filled_qty = initial_target_qty;
-                                 *total_filled_qty_storage.lock().await = cumulative_filled_qty; // Обновляем хранилище
-                                 if is_spot {
-                                     if let Err(e) = update_hedge_spot_order(db, operation_id, None, cumulative_filled_qty).await {
-                                         error!("op_id:{}: Failed update DB after final cancel correction: {}", operation_id, e);
-                                     }
-                                 }
-                             }
-                            break Ok((cumulative_filled_qty, last_placed_order_id)); // Возвращаем последнее ID
+                            // Финальная коррекция до цели, если нужно (остается)
+                            if (cumulative_filled_qty - initial_target_qty).abs() > ORDER_FILL_TOLERANCE && cumulative_filled_qty < initial_target_qty {
+                                warn!(
+                                    "op_id:{}: Final fill correction after cancel check: {:.8} -> {:.8}. (Stage: {:?})",
+                                    operation_id, cumulative_filled_qty, initial_target_qty, stage
+                                );
+                                cumulative_filled_qty = initial_target_qty;
+                                *total_filled_qty_storage.lock().await = cumulative_filled_qty; // Обновляем хранилище
+                                if is_spot {
+                                    if let Err(e) = update_hedge_spot_order(db, operation_id, None, cumulative_filled_qty).await {
+                                        error!("op_id:{}: Failed update DB after final cancel correction: {}", operation_id, e);
+                                    }
+                                }
+                            }
+                            break Ok((cumulative_filled_qty, last_placed_order_id)); // Выходим, так как цель достигнута
                         } else {
+                            // Цель НЕ достигнута, даже если remaining_qty == 0 из-за отмены.
+                            // Просто логируем оставшееся количество (если оно есть) и продолжаем к замене.
                             info!(
-                                "op_id:{}: Order {} still has remaining {:.8} after cancel. Proceeding with replacement. (Stage: {:?})",
-                                operation_id, prev_id, final_status.remaining_qty, stage
+                                "op_id:{}: Target NOT reached ({:.8}/{:.8}) after checking cancelled order {}. Proceeding with replacement. (Stage: {:?})",
+                                operation_id, cumulative_filled_qty, initial_target_qty, prev_id, stage
                             );
                         }
                     }

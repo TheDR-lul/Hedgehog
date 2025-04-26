@@ -3,13 +3,11 @@
 use super::{
     RunningOperations, RunningOperationInfo, OperationType, callback_data, navigation, StateStorage
 };
-// --- ИСПРАВЛЕНО: Убраны дубликаты, проверен импорт get_hedge_operation_by_id ---
 use crate::storage::{Db, update_hedge_final_status, get_hedge_operation_by_id};
 use crate::config::Config;
-use crate::exchange::{Exchange, OrderSide};
-// --- УДАЛЕНО: Дублирующая строка use crate::storage::{Db, update_hedge_final_status}; ---
+use crate::exchange::Exchange;
 use crate::hedger::ORDER_FILL_TOLERANCE;
-use crate::notifier::HashMap;
+use crate::exchange::types::OrderSide; // <-- ДОБАВЬ ЭТУ СТРОКУ
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{
@@ -17,7 +15,6 @@ use teloxide::types::{
 };
 use teloxide::requests::Requester;
 use tracing::{info, warn, error};
-use tokio::sync::MutexGuard;
 
 
 // --- Вспомогательная функция для форматирования списка активных операций ---

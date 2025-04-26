@@ -18,8 +18,7 @@ use teloxide::Bot;
 use tracing::info;
 
 use crate::config::Config;
-use crate::exchange::{Bybit, Exchange};
-// --- ИЗМЕНЕНО: Импортируем Db из storage ---
+use crate::exchange::{bybit::Bybit, Exchange}; // --- ИЗМЕНЕНО: Импортируем Db из storage ---
 use crate::storage::Db;
 // --- Конец изменений ---
 

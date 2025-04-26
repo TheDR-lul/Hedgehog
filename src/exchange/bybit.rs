@@ -1,8 +1,11 @@
-// src/exchange/bybit.rs
-
-// --- Используемые типажи и структуры ---
-use super::{Exchange, OrderStatus, FeeRate, FuturesTickerInfo}; // Добавил FuturesTickerInfo
-use crate::exchange::types::{Balance, Order, OrderSide, DetailedOrderStatus};
+use super::{Exchange, OrderStatus, FeeRate, FuturesTickerInfo};
+// --- ИСПРАВЛЕНО: Импортируем все нужные типы из types.rs ---
+use crate::exchange::types::{
+    Balance, Order, OrderSide, DetailedOrderStatus, OrderStatusText,
+    SpotInstrumentInfo, LinearInstrumentInfo // Оставляем InstrumentInfo
+};
+// --- ИСПРАВЛЕНО: Добавляем импорт HedgeOperation из storage ---
+use crate::storage::HedgeOperation;
 // --- Стандартные и внешние зависимости ---
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -18,15 +21,11 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, trace, warn};
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
-// Убрал FuturesTickerInfo отсюда, т.к. импортировали выше
 
 type HmacSha256 = Hmac<Sha256>;
 
 pub const SPOT_CATEGORY: &str = "spot";
 pub const LINEAR_CATEGORY: &str = "linear";
-
-// --- Структуры для парсинга ответов API ---
-
 /// Универсальная обёртка для ответов Bybit API v5
 #[derive(Deserialize, Debug)]
 struct ApiResponse {
@@ -39,7 +38,6 @@ struct ApiResponse {
     #[serde(rename = "time")]
     _server_time: Option<i64>,
 }
-
 /// Пустой результат для запросов без данных
 #[derive(Deserialize, Debug, Default)]
 struct EmptyResult {}
@@ -71,59 +69,16 @@ struct BalanceEntry {
     available: String,
 }
 
-// --- Структуры для информации об инструменте (Общие фильтры) ---
-#[derive(Deserialize, Debug, Clone)]
-pub struct LotSizeFilter {
-    #[serde(rename = "basePrecision")]
-    pub base_precision: Option<String>,
-    #[serde(rename = "qtyStep")]
-    pub qty_step: Option<String>,
-    #[serde(rename = "maxOrderQty")]
-    pub max_order_qty: String,
-    #[serde(rename = "minOrderQty")]
-    pub min_order_qty: String,
-    #[serde(rename = "maxMktOrderQty")]
-    pub max_mkt_order_qty: Option<String>,
-    #[serde(rename = "minNotionalValue")]
-    pub min_notional_value: Option<String>,
-    #[serde(rename = "postOnlyMaxOrderQty")]
-    pub post_only_max_order_qty: Option<String>,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct PriceFilter {
-    #[serde(rename = "tickSize")]
-    pub tick_size: String,
-}
-
 // --- Структуры для информации об инструменте СПОТ ---
 #[derive(Deserialize, Debug, Clone, Default)]
 struct SpotInstrumentsInfoResult {
-    list: Vec<SpotInstrumentInfo>,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct SpotInstrumentInfo { // Локальное определение
-    symbol: String,
-    #[serde(rename = "lotSizeFilter")]
-    pub lot_size_filter: LotSizeFilter,
-    #[serde(rename = "priceFilter")]
-    pub price_filter: PriceFilter,
+    list: Vec<SpotInstrumentInfo>, // Используем импортированный тип
 }
 
 // --- Структуры для информации об инструменте ЛИНЕЙНОМ ---
 #[derive(Deserialize, Debug, Clone, Default)]
 struct LinearInstrumentsInfoResult {
-    list: Vec<LinearInstrumentInfo>,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct LinearInstrumentInfo { // Локальное определение
-    pub symbol: String,
-    #[serde(rename = "lotSizeFilter")]
-    pub lot_size_filter: LotSizeFilter,
-    #[serde(rename = "priceFilter")]
-    pub price_filter: PriceFilter,
+    list: Vec<LinearInstrumentInfo>, // Используем импортированный тип
 }
 
 // --- Структуры для risk-limit (для MMR) ---
@@ -214,7 +169,7 @@ struct TickerInfo {
     price: String,
 }
 
-// --- ИСПРАВЛЕНО: Структуры для фьючерсного тикера вынесены на уровень модуля ---
+// Структуры для фьючерсного тикера
 #[derive(Deserialize, Debug)]
 struct FuturesTickerApiResponse {
     symbol: String,
@@ -231,7 +186,6 @@ struct FuturesTickersApiResult {
     category: String,
     list: Vec<FuturesTickerApiResponse>,
 }
-// --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
 /// Ответ по времени сервера
 #[derive(Deserialize, Debug, Default)]
@@ -1182,11 +1136,15 @@ impl Exchange for Bybit {
             "Detailed order status received (SPOT)"
         );
 
+        // --- ИСПРАВЛЕНО: Распаковываем Result ---
+        let status_text = OrderStatusText::from_str(&order_entry.status).unwrap(); // unwrap() безопасен здесь
+
         Ok(DetailedOrderStatus {
             filled_qty: filled_quantity,
             remaining_qty: remaining_quantity,
             cumulative_executed_value: cumulative_value,
             average_price: average_price,
+            status_text,
         })
     }
 
@@ -1194,7 +1152,6 @@ impl Exchange for Bybit {
         debug!(symbol=%symbol, category=LINEAR_CATEGORY, "Fetching futures ticker");
         let params = [("category", LINEAR_CATEGORY), ("symbol", symbol)];
 
-        // Сразу парсим в нужную структуру
         let api_result: FuturesTickersApiResult = self.call_api(
             Method::GET,
             "v5/market/tickers",
@@ -1203,17 +1160,14 @@ impl Exchange for Bybit {
             false
         ).await?;
 
-        // Используем api_result
         let ticker_data = api_result.list.into_iter()
             .find(|t| t.symbol == symbol)
             .ok_or_else(|| anyhow!("No futures ticker info found for {}", symbol))?;
 
-        // Парсим из ticker_data
         let bid_price = ticker_data.bid1_price.trim().parse::<f64>().map_err(|e| anyhow!("Failed to parse bid price for {}: {} (value: '{}')", symbol, e, ticker_data.bid1_price))?;
         let ask_price = ticker_data.ask1_price.trim().parse::<f64>().map_err(|e| anyhow!("Failed to parse ask price for {}: {} (value: '{}')", symbol, e, ticker_data.ask1_price))?;
         let last_price = ticker_data.last_price.trim().parse::<f64>().map_err(|e| anyhow!("Failed to parse last price for {}: {} (value: '{}')", symbol, e, ticker_data.last_price))?;
 
-        // Проверка на нулевые цены
         if bid_price <= 0.0 || ask_price <= 0.0 {
              warn!(symbol, bid=bid_price, ask=ask_price, "Received zero or non-positive bid/ask price from ticker");
              if last_price > 0.0 {
@@ -1226,4 +1180,46 @@ impl Exchange for Bybit {
             Ok(FuturesTickerInfo { symbol: ticker_data.symbol, bid_price, ask_price, last_price })
         }
     }
-}
+
+    // --- ИСПРАВЛЕНО: Реализация get_spot_price_fallback внутри impl Exchange ---
+    async fn get_spot_price_fallback(&self, futures_symbol: &str) -> Result<f64> {
+        // Используем self.quote_currency
+        let base_symbol = futures_symbol.trim_end_matches(&self.quote_currency).trim_end_matches("PERP");
+        if base_symbol == futures_symbol {
+            return Err(anyhow!("Could not determine base symbol from futures symbol '{}' for fallback", futures_symbol));
+        }
+        // Вызываем другой метод трейта через self
+        self.get_spot_price(base_symbol).await
+    }
+    // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+
+    // --- ИСПРАВЛЕНО: Реализация get_market_price внутри impl Exchange ---
+    async fn get_market_price(&self, symbol: &str, is_spot: bool) -> Result<f64> {
+        // ... (код без изменений) ...
+        let price = if is_spot {
+            self.get_spot_price(symbol).await?
+        } else {
+            match self.get_futures_ticker(symbol).await {
+                Ok(ticker) if ticker.bid_price > 0.0 && ticker.ask_price > 0.0 => (ticker.bid_price + ticker.ask_price) / 2.0,
+                Ok(ticker) => {
+                     warn!("Invalid ticker prices bid={}, ask={}. Using last_price if available.", ticker.bid_price, ticker.ask_price);
+                     if ticker.last_price > 0.0 {
+                         ticker.last_price
+                     } else {
+                         warn!("Falling back to spot price due to invalid futures ticker data.");
+                         self.get_spot_price_fallback(symbol).await? // Вызываем метод трейта
+                     }
+                }
+                Err(e) => {
+                     warn!("Failed get futures ticker for price: {}. Falling back to spot price.", e);
+                     self.get_spot_price_fallback(symbol).await? // Вызываем метод трейта
+                }
+            }
+        };
+        if price <= 0.0 {
+            Err(anyhow!("Invalid market price received: {}", price))
+        } else {
+            Ok(price)
+        }
+    }
+} // --- Конец impl Exchange for Bybit ---

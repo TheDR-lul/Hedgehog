@@ -1,11 +1,15 @@
 // src/exchange/types.rs
+use serde::Deserialize;
+use std::fmt;
+use std::str::FromStr; // Добавлено для FromStr
 
-use serde::{Deserialize, Serialize};
-use std::{fmt, str::FromStr};
-use anyhow::anyhow;
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Balance {
+    pub free: f64,
+    pub locked: f64,
+}
 
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 pub enum OrderSide {
     Buy,
     Sell,
@@ -13,79 +17,125 @@ pub enum OrderSide {
 
 impl fmt::Display for OrderSide {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl FromStr for OrderSide {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "buy"  => Ok(OrderSide::Buy),
-            "sell" => Ok(OrderSide::Sell),
-            other  => Err(anyhow!("Invalid order side: {}", other)),
-        }
-    }
-}
-
-// --- ДОБАВЛЕНО: Методы sign() и opposite() ---
-impl OrderSide {
-    pub fn sign(&self) -> f64 {
         match self {
-            OrderSide::Buy => -1.0,
-            OrderSide::Sell => 1.0,
-        }
-    }
-
-    pub fn opposite(&self) -> Self {
-        match self {
-            OrderSide::Buy => OrderSide::Sell,
-            OrderSide::Sell => OrderSide::Buy,
+            OrderSide::Buy => write!(f, "Buy"),
+            OrderSide::Sell => write!(f, "Sell"),
         }
     }
 }
 
-
-/// Описание ордера
-// --- ИЗМЕНЕНО: Убрал OrderSide из derive, т.к. он теперь Copy ---
-// --- Хотя можно и оставить, Clone все равно нужен ---
-#[derive(Debug, Clone)] // OrderSide теперь Copy, так что Order остается Clone
-pub struct Order {
-    pub id:     String,
-    pub side:   OrderSide, // Это поле теперь будет копироваться
-    pub qty:    f64,
-    pub price:  Option<f64>,
-    pub ts:     i64,
-}
-
-/// Расширенный статус ордера с деталями исполнения
 #[derive(Debug, Clone)]
+pub struct Order {
+    pub id: String,
+    pub side: OrderSide,
+    pub qty: f64,
+    pub price: Option<f64>, // None для рыночных
+    pub ts: i64, // Timestamp создания
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OrderStatus {
+    pub filled_qty: f64,
+    pub remaining_qty: f64,
+}
+
+// --- ДОБАВЛЕНО: Enum для текстового статуса ордера ---
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrderStatusText {
+    New,
+    PartiallyFilled,
+    Filled,
+    Cancelled,
+    PartiallyFilledCanceled, // Добавлено для Bybit
+    Rejected,
+    Untriggered, // Для условных ордеров
+    Triggered,   // Для условных ордеров
+    Unknown(String), // Для неизвестных статусов
+}
+
+impl FromStr for OrderStatusText {
+    type Err = (); // Ошибки парсинга не ожидаем, просто Unknown
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "New" => OrderStatusText::New,
+            "PartiallyFilled" => OrderStatusText::PartiallyFilled,
+            "Filled" => OrderStatusText::Filled,
+            "Cancelled" | "Canceled" => OrderStatusText::Cancelled, // Учитываем оба варианта
+            "PartiallyFilledCanceled" => OrderStatusText::PartiallyFilledCanceled,
+            "Rejected" => OrderStatusText::Rejected,
+            "Untriggered" => OrderStatusText::Untriggered,
+            "Triggered" => OrderStatusText::Triggered,
+            _ => OrderStatusText::Unknown(s.to_string()),
+        })
+    }
+}
+// --- КОНЕЦ ДОБАВЛЕНИЯ ---
+
+#[derive(Debug, Clone, PartialEq)] // --- ИСПРАВЛЕНО: Убрали Copy ---
 pub struct DetailedOrderStatus {
     pub filled_qty: f64,
     pub remaining_qty: f64,
-    pub cumulative_executed_value: f64, // Совокупная стоимость исполненного
-    pub average_price: f64,             // Средняя цена исполнения
+    pub cumulative_executed_value: f64,
+    pub average_price: f64,
+    // --- ДОБАВЛЕНО: Поле для текстового статуса ---
+    pub status_text: OrderStatusText,
 }
 
-/// Баланс монеты
-#[derive(Debug, Clone)]
-pub struct Balance {
-    pub free:   f64,
-    pub locked: f64,
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FeeRate {
+    pub maker: f64,
+    pub taker: f64,
 }
 
-/// Статус исполнения ордера (сколько уже исполнено и сколько осталось)
-#[derive(Debug, Clone)]
-pub struct OrderStatus {
-    pub filled_qty:    f64,
-    pub remaining_qty: f64,
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FuturesTickerInfo {
     pub symbol: String,
     pub bid_price: f64,
     pub ask_price: f64,
     pub last_price: f64,
 }
+
+// --- ДОБАВЛЕНО: Структуры для информации об инструменте ---
+#[derive(Deserialize, Debug, Clone)]
+pub struct LotSizeFilter {
+    #[serde(rename = "basePrecision")]
+    pub base_precision: Option<String>,
+    #[serde(rename = "qtyStep")]
+    pub qty_step: Option<String>,
+    #[serde(rename = "maxOrderQty")]
+    pub max_order_qty: String,
+    #[serde(rename = "minOrderQty")]
+    pub min_order_qty: String,
+    #[serde(rename = "maxMktOrderQty")]
+    pub max_mkt_order_qty: Option<String>,
+    #[serde(rename = "minNotionalValue")]
+    pub min_notional_value: Option<String>,
+    #[serde(rename = "postOnlyMaxOrderQty")]
+    pub post_only_max_order_qty: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct PriceFilter {
+    #[serde(rename = "tickSize")]
+    pub tick_size: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct SpotInstrumentInfo {
+    pub symbol: String, // Сделали pub
+    #[serde(rename = "lotSizeFilter")]
+    pub lot_size_filter: LotSizeFilter,
+    #[serde(rename = "priceFilter")]
+    pub price_filter: PriceFilter,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct LinearInstrumentInfo {
+    pub symbol: String, // Сделали pub
+    #[serde(rename = "lotSizeFilter")]
+    pub lot_size_filter: LotSizeFilter,
+    #[serde(rename = "priceFilter")]
+    pub price_filter: PriceFilter,
+}
+// --- КОНЕЦ ДОБАВЛЕНИЯ ---
