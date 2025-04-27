@@ -1,7 +1,7 @@
 pub mod config;
 pub mod exchange;
 pub mod hedger_ws;
-pub mod hedger; // Оставляем старый хеджер
+pub mod hedger; 
 pub mod notifier;
 pub mod logger;
 pub mod models;

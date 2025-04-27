@@ -7,7 +7,7 @@ pub mod market_info;
 pub mod hedge_flow;
 pub mod unhedge_flow;
 pub mod active_ops;
-mod hedge_flow_logic;
+pub mod hedge_flow_logic;
 // Заглушки
 //pub mod progress;      // TODO: Реализовать
 //pub mod utils;         // TODO: Реализовать

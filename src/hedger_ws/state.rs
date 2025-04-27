@@ -3,7 +3,6 @@
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use crate::exchange::types::{OrderSide, OrderStatusText, OrderbookLevel, DetailedOrderStatus};
-
 /// Статус конкретного ордера внутри чанка
 #[derive(Debug, Clone)]
 pub struct ChunkOrderState {

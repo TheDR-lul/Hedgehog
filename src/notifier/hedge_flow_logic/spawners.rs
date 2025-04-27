@@ -14,14 +14,12 @@ use crate::config::Config;
 use crate::exchange::Exchange;
 use crate::exchange::bybit_ws;
 use crate::exchange::types::SubscriptionType; // Убраны скобки
-use crate::hedger_ws::hedge_task::HedgerWsHedgeTask; //Hell
 // --- ИСПРАВЛЕНО: Используем относительный путь ---
 use super::super::super::hedger::{HedgeParams, HedgeProgressCallback, HedgeProgressUpdate, HedgeStage, Hedger, ORDER_FILL_TOLERANCE};
 use crate::models::HedgeRequest;
 use crate::storage::{Db, insert_hedge_operation};
 use crate::notifier::{RunningOperations, RunningOperationInfo, OperationType, navigation, callback_data};
-
-
+use crate::hedger_ws;
 // ... (остальной код файла без изменений) ...
 pub(super) async fn spawn_sequential_hedge_task<E>(
     bot: Bot,
@@ -280,7 +278,7 @@ where
         }.boxed()
      });
 
-    let hedge_task_result = HedgerWsHedgeTask::new(
+    let hedge_task_result = hedger_ws::hedge_task::HedgerWsHedgeTask::new(
         operation_id,
         request,
         cfg.clone(),
