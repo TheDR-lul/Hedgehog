@@ -5,7 +5,6 @@ use crate::exchange::types::{
     SpotInstrumentInfo, LinearInstrumentInfo // Оставляем InstrumentInfo
 };
 // --- ИСПРАВЛЕНО: Добавляем импорт HedgeOperation из storage ---
-use crate::storage::HedgeOperation;
 // --- Стандартные и внешние зависимости ---
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
