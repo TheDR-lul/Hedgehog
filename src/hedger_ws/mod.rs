@@ -2,12 +2,12 @@
 
 pub mod state;
 pub mod common;
-pub mod hedge_task; // Оставляем для основной структуры и run
-pub mod unhedge_task; // Аналогично для unhedge
-mod hedge_logic; // <-- Добавляем объявление нового модуля
-// Возможно, понадобится модуль и для unhedge_logic
+pub mod hedge_task;
+pub mod unhedge_task; // <-- Оставляем
 
-// Реэкспортируем основные типы состояния для удобства использования извне
+mod hedge_logic;
+mod unhedge_logic; // <-- Добавляем этот модуль
+
 pub use state::{HedgerWsState, HedgerWsStatus, OperationType, MarketUpdate, Leg, ChunkOrderState};
 
 // Возможно, в будущем здесь будет какой-то общий тип или функция-диспетчер,
