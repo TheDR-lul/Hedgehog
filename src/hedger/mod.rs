@@ -1,3 +1,4 @@
+// src/hedger/mod.rs
 use anyhow::Result;
 use rust_decimal::Decimal;
 use std::sync::Arc;

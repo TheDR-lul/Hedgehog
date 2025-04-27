@@ -2,8 +2,8 @@
 
 pub mod state;
 pub mod common;
-pub mod hedge_task;
 pub mod unhedge_task; // <-- Оставляем
+pub mod hedge_task;
 
 mod hedge_logic;
 mod unhedge_logic; // <-- Добавляем этот модуль

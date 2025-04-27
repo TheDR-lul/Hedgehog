@@ -1,6 +1,7 @@
 // src/notifier/hedge_flow_logic/spawners.rs
 
-use anyhow::{Result, anyhow}; // anyhow все еще нужен для возвращаемых ошибок
+// --- ИСПРАВЛЕНО: Убран anyhow и лишние скобки в use ---
+use anyhow::{Result};
 use std::sync::Arc;
 use std::time::Duration;
 use teloxide::prelude::*;
@@ -12,15 +13,16 @@ use futures::future::FutureExt;
 use crate::config::Config;
 use crate::exchange::Exchange;
 use crate::exchange::bybit_ws;
-use crate::exchange::types::{SubscriptionType};
-use crate::hedger_ws::hedge_task::HedgerWsHedgeTask; // Импорт структуры WS задачи
-use crate::hedger::{HedgeParams, HedgeProgressCallback, HedgeProgressUpdate, HedgeStage, Hedger, ORDER_FILL_TOLERANCE};
+use crate::exchange::types::SubscriptionType; // Убраны скобки
+use crate::hedger_ws::hedge_task::HedgerWsHedgeTask; //Hell
+// --- ИСПРАВЛЕНО: Используем относительный путь ---
+use super::super::super::hedger::{HedgeParams, HedgeProgressCallback, HedgeProgressUpdate, HedgeStage, Hedger, ORDER_FILL_TOLERANCE};
 use crate::models::HedgeRequest;
 use crate::storage::{Db, insert_hedge_operation};
 use crate::notifier::{RunningOperations, RunningOperationInfo, OperationType, navigation, callback_data};
 
 
-// ... (spawn_sequential_hedge_task с исправлениями) ...
+// ... (остальной код файла без изменений) ...
 pub(super) async fn spawn_sequential_hedge_task<E>(
     bot: Bot,
     exchange: Arc<E>,
@@ -28,7 +30,7 @@ pub(super) async fn spawn_sequential_hedge_task<E>(
     db: Arc<Db>,
     running_operations: RunningOperations,
     chat_id: ChatId,
-    params: HedgeParams, // <-- Используется тип
+    params: HedgeParams, // <-- Тип должен теперь разрешиться
     initial_sum: f64,
     volatility_percent: f64,
     waiting_message: MaybeInaccessibleMessage,
@@ -43,7 +45,7 @@ where
     let initial_spot_target_for_cb = params.spot_order_qty;
     let initial_fut_target_for_cb = params.fut_order_qty;
 
-    let hedger = Hedger::new((*exchange).clone(), (*cfg).clone()); // <-- Используется тип
+    let hedger = Hedger::new((*exchange).clone(), (*cfg).clone()); // <-- Тип должен теперь разрешиться
 
     let operation_id_result = insert_hedge_operation(
         db.as_ref(), chat_id.0, &params.symbol, &cfg.quote_currency, initial_sum,
@@ -178,7 +180,6 @@ where
     let bot_message_id = waiting_message.id();
     let symbol = request.symbol.clone();
     let initial_sum = request.sum;
-    // --- ИСПРАВЛЕНО: Добавили `_` ---
     let _volatility_percent = request.volatility * 100.0;
 
     info!("op_chat_id:{}: Preparing to spawn WS Hedge Task for {}...", chat_id, symbol);
@@ -218,9 +219,8 @@ where
         Err(e) => {
             error!("op_id:{}: Failed to connect WebSocket: {}", operation_id, e);
             let error_text = format!("❌ Ошибка подключения WebSocket: {}", e);
-             let _ = bot.edit_message_text(chat_id, bot_message_id, error_text.clone()) // Клонируем для передачи в DB
+             let _ = bot.edit_message_text(chat_id, bot_message_id, error_text.clone())
                       .reply_markup(navigation::make_main_menu_keyboard()).await;
-             // --- ИСПРАВЛЕНО: Передаем borrow строки ---
              let _ = crate::storage::update_hedge_final_status(db.as_ref(), operation_id, "Failed", None, 0.0, Some(&error_text)).await;
              return Err(e);
         }
@@ -232,7 +232,6 @@ where
 
     let progress_callback: HedgeProgressCallback = Box::new(move |update: HedgeProgressUpdate| {
         let bot_cb = bot_clone_for_callback.clone();
-        // --- ИСПРАВЛЕНО: Добавили `_` ---
         let _qc = cfg_clone_for_callback.quote_currency.clone();
         let symbol_cb = symbol_for_callback.clone();
         let msg_id_cb = bot_message_id;
@@ -300,9 +299,8 @@ where
         Err(e) => {
             error!("op_id:{}: Failed to initialize HedgerWsHedgeTask: {}", operation_id, e);
             let error_text = format!("❌ Ошибка инициализации WS стратегии: {}", e);
-            let _ = bot.edit_message_text(chat_id, bot_message_id, error_text.clone()) // Клонируем для передачи в DB
+            let _ = bot.edit_message_text(chat_id, bot_message_id, error_text.clone())
                      .reply_markup(navigation::make_main_menu_keyboard()).await;
-            // --- ИСПРАВЛЕНО: Передаем borrow строки ---
              let _ = crate::storage::update_hedge_final_status(db.as_ref(), operation_id, "Failed", None, 0.0, Some(&error_text)).await;
             return Err(e);
         }
