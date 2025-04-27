@@ -10,6 +10,8 @@ mod unhedge_logic; // <-- Добавляем этот модуль
 
 pub use state::{HedgerWsState, HedgerWsStatus, OperationType, MarketUpdate, Leg, ChunkOrderState};
 
+pub use hedge_task::HedgerWsHedgeTask as HedgeWSTask; // <-- Переименовываем
+
 // Возможно, в будущем здесь будет какой-то общий тип или функция-диспетчер,
 // которая будет запускать либо hedge_task, либо unhedge_task.
 // Например:
