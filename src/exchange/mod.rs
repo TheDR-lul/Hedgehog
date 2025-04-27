@@ -8,8 +8,6 @@ use crate::exchange::types::{
     SpotInstrumentInfo, LinearInstrumentInfo // Добавили InstrumentInfo
 };
 // --- УДАЛЕНО: use crate::hedger::params::{SpotInstrumentInfo, LinearInstrumentInfo}; ---
-
-
 #[async_trait]
 pub trait Exchange: Send + Sync {
     async fn check_connection(&mut self) -> Result<()>;
@@ -42,6 +40,7 @@ pub trait Exchange: Send + Sync {
 
 pub mod bybit;
 pub mod types;
+pub mod bybit_ws; // <-- Изменяем объявление на модуль
 
 // Функция для создания экземпляра биржи
 pub async fn create_exchange(
