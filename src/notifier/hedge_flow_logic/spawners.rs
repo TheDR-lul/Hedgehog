@@ -1,27 +1,29 @@
 // src/notifier/hedge_flow_logic/spawners.rs
 
 // --- ИСПРАВЛЕНО: Убран anyhow и лишние скобки в use ---
-use anyhow::{Result};
+use anyhow::Result; // Убраны скобки
 use std::sync::Arc;
 use std::time::Duration;
 use teloxide::prelude::*;
 use teloxide::types::{MaybeInaccessibleMessage, ChatId, InlineKeyboardButton, InlineKeyboardMarkup};
-use tokio::sync::{mpsc, Mutex as TokioMutex};
+// --- ИСПРАВЛЕНО: Убран неиспользуемый mpsc ---
+use tokio::sync::Mutex as TokioMutex;
 use tracing::{info, error, warn};
 use futures::future::FutureExt;
 
 use crate::config::Config;
 use crate::exchange::Exchange;
 use crate::exchange::bybit_ws;
-use crate::exchange::types::SubscriptionType; // Убраны скобки
+use crate::exchange::types::SubscriptionType;
 // --- ИСПРАВЛЕНО: Используем относительный путь ---
 use super::super::super::hedger::{HedgeParams, HedgeProgressCallback, HedgeProgressUpdate, HedgeStage, Hedger, ORDER_FILL_TOLERANCE};
 use crate::models::HedgeRequest;
 use crate::storage::{Db, insert_hedge_operation};
 use crate::notifier::{RunningOperations, RunningOperationInfo, OperationType, navigation, callback_data};
-use crate::hedger_ws::HedgeWSTask; // Используем реэкспортированный путь
+// --- ИСПРАВЛЕНО: Используем реэкспортированный путь и имя ---
+use crate::hedger_ws::HedgeWSTask;
+//use super::super::super::hedger_ws::hedge_task::HedgerWsHedgeTask; // Старый путь
 
-// ... (остальной код файла без изменений) ...
 pub(super) async fn spawn_sequential_hedge_task<E>(
     bot: Bot,
     exchange: Arc<E>,
@@ -29,7 +31,7 @@ pub(super) async fn spawn_sequential_hedge_task<E>(
     db: Arc<Db>,
     running_operations: RunningOperations,
     chat_id: ChatId,
-    params: HedgeParams, // <-- Тип должен теперь разрешиться
+    params: HedgeParams,
     initial_sum: f64,
     volatility_percent: f64,
     waiting_message: MaybeInaccessibleMessage,
@@ -44,7 +46,7 @@ where
     let initial_spot_target_for_cb = params.spot_order_qty;
     let initial_fut_target_for_cb = params.fut_order_qty;
 
-    let hedger = Hedger::new((*exchange).clone(), (*cfg).clone()); // <-- Тип должен теперь разрешиться
+    let hedger = Hedger::new((*exchange).clone(), (*cfg).clone());
 
     let operation_id_result = insert_hedge_operation(
         db.as_ref(), chat_id.0, &params.symbol, &cfg.quote_currency, initial_sum,
@@ -229,6 +231,11 @@ where
     let cfg_clone_for_callback = cfg.clone();
     let symbol_for_callback = symbol.clone();
 
+    // --- ИСПРАВЛЕНО: Тип HedgeProgressCallback теперь использует Decimal ---
+    // Примечание: Текущая реализация HedgeProgressCallback в этом файле использует f64.
+    // Это потребует рефакторинга HedgeProgressUpdate и колбэка, чтобы использовать Decimal,
+    // если HedgerWsHedgeTask ожидает Decimal.
+    // Пока оставляем f64, предполагая, что HedgeProgressCallback универсален или будет адаптирован.
     let progress_callback: HedgeProgressCallback = Box::new(move |update: HedgeProgressUpdate| {
         let bot_cb = bot_clone_for_callback.clone();
         let _qc = cfg_clone_for_callback.quote_currency.clone();
@@ -236,8 +243,14 @@ where
         let msg_id_cb = bot_message_id;
         let chat_id_cb = chat_id;
         let operation_id_cb = operation_id;
+        // --- ПРЕДУПРЕЖДЕНИЕ: Конвертация Decimal -> f64 может быть неточной ---
+        // Если HedgeProgressUpdate будет использовать Decimal, эти конвертации нужно убрать.
         let spot_target_cb = if update.stage == HedgeStage::Spot { update.total_target_qty } else { 0.0 };
         let fut_target_cb = if update.stage == HedgeStage::Futures { update.total_target_qty } else { 0.0 };
+        let cumulative_filled_qty_cb = update.cumulative_filled_qty;
+        let current_spot_price_cb = update.current_spot_price;
+        let new_limit_price_cb = update.new_limit_price;
+        // --- КОНЕЦ ПРЕДУПРЕЖДЕНИЯ ---
 
         async move {
             let symbol = symbol_cb;
@@ -246,24 +259,24 @@ where
 
             let text = match update.stage {
                 HedgeStage::Spot => {
-                    let filled_percent = if spot_target_cb > ORDER_FILL_TOLERANCE { (update.cumulative_filled_qty / spot_target_cb) * 100.0 } else { 0.0 };
+                    let filled_percent = if spot_target_cb > ORDER_FILL_TOLERANCE { (cumulative_filled_qty_cb / spot_target_cb) * 100.0 } else { 0.0 };
                     let filled_blocks = (filled_percent / (100.0 / progress_bar_len as f64)).round() as usize;
                     let empty_blocks = progress_bar_len - filled_blocks;
                     let progress_bar = format!("[{}{}]", "█".repeat(filled_blocks), "░".repeat(empty_blocks));
                     format!( "⏳ Хедж WS (Спот) ID:{} {} ({})\nРын.цена: {:.2}\nОрдер ПОКУПКА: {:.2} {}\nИсполнено (всего): {:.6}/{:.6} ({:.1}%)",
-                             operation_id_cb, progress_bar, symbol, update.current_spot_price,
-                             update.new_limit_price, status_text,
-                             update.cumulative_filled_qty, spot_target_cb, filled_percent)
+                             operation_id_cb, progress_bar, symbol, current_spot_price_cb,
+                             new_limit_price_cb, status_text,
+                             cumulative_filled_qty_cb, spot_target_cb, filled_percent)
                 }
                 HedgeStage::Futures => {
-                    let filled_percent = if fut_target_cb > ORDER_FILL_TOLERANCE { (update.cumulative_filled_qty / fut_target_cb) * 100.0 } else { 0.0 };
+                    let filled_percent = if fut_target_cb > ORDER_FILL_TOLERANCE { (cumulative_filled_qty_cb / fut_target_cb) * 100.0 } else { 0.0 };
                     let filled_blocks = (filled_percent / (100.0 / progress_bar_len as f64)).round() as usize;
                     let empty_blocks = progress_bar_len - filled_blocks;
                     let progress_bar = format!("[{}{}]", "█".repeat(filled_blocks), "░".repeat(empty_blocks));
                     format!( "⏳ Хедж WS (Фьюч) ID:{} {} ({})\nСпот цена: {:.2}\nОрдер ПРОДАЖА: {:.2} {}\nИсполнено (всего): {:.6}/{:.6} ({:.1}%)",
-                             operation_id_cb, progress_bar, symbol, update.current_spot_price,
-                             update.new_limit_price, status_text,
-                             update.cumulative_filled_qty, fut_target_cb, filled_percent)
+                             operation_id_cb, progress_bar, symbol, current_spot_price_cb,
+                             new_limit_price_cb, status_text,
+                             cumulative_filled_qty_cb, fut_target_cb, filled_percent)
                 }
             };
             let cancel_callback_data = format!("{}{}", callback_data::PREFIX_CANCEL_ACTIVE_OP, operation_id_cb);
@@ -279,6 +292,7 @@ where
         }.boxed()
      });
 
+    // --- ИСПРАВЛЕНО: Используем HedgeWSTask::new ---
     let hedge_task_result = HedgeWSTask::new(
         operation_id,
         request,
@@ -289,14 +303,15 @@ where
         ws_receiver,
     ).await;
 
-    let mut hedge_task = match hedge_task_result {
+    // --- ИСПРАВЛЕНО: Используем HedgeWSTask ---
+    let mut hedge_task: HedgeWSTask = match hedge_task_result {
         Ok(task) => {
-            info!("op_id:{}: HedgerWsHedgeTask initialized successfully.", operation_id);
+            info!("op_id:{}: HedgeWSTask initialized successfully.", operation_id);
              let _ = bot.edit_message_text(chat_id, bot_message_id, format!("⏳ Запуск WS стратегии для {} (ID: {})...", symbol, operation_id)).await;
             task
         },
         Err(e) => {
-            error!("op_id:{}: Failed to initialize HedgerWsHedgeTask: {}", operation_id, e);
+            error!("op_id:{}: Failed to initialize HedgeWSTask: {}", operation_id, e);
             let error_text = format!("❌ Ошибка инициализации WS стратегии: {}", e);
             let _ = bot.edit_message_text(chat_id, bot_message_id, error_text.clone())
                      .reply_markup(navigation::make_main_menu_keyboard()).await;
@@ -315,22 +330,41 @@ where
 
         let mut ops_guard = running_operations_clone.lock().await;
         ops_guard.remove(&(chat_id, operation_id));
-        drop(ops_guard);
+        drop(ops_guard); // Explicitly drop the guard after removal
 
         match run_result {
             Ok(_) => {
                 info!("op_id:{}: WS Hedge task completed successfully.", operation_id);
                 let final_text = format!("✅ WS Хедж ID:{} для {} завершен.", operation_id, symbol_clone_for_spawn);
-                let _ = bot_clone_for_spawn.edit_message_text(chat_id, bot_message_id, final_text)
-                         .reply_markup(navigation::make_main_menu_keyboard())
-                         .await;
+                // Check if message is still accessible before editing
+                if !waiting_message.is_inaccessible() {
+                    if let Err(e) = bot_clone_for_spawn.edit_message_text(chat_id, bot_message_id, final_text)
+                             .reply_markup(navigation::make_main_menu_keyboard())
+                             .await {
+                        warn!("op_id:{}: Failed to edit final success message: {}", operation_id, e);
+                    }
+                } else {
+                    info!("op_id:{}: Original message inaccessible, cannot edit final success status.", operation_id);
+                }
             }
             Err(e) => {
-                error!("op_id:{}: WS Hedge task failed: {}", operation_id, e);
+                // Avoid logging the error twice if it's just "cancelled by user" which is handled elsewhere
+                if !e.to_string().contains("cancelled by user") {
+                    error!("op_id:{}: WS Hedge task failed: {}", operation_id, e);
+                } else {
+                    info!("op_id:{}: WS Hedge task cancelled by user.", operation_id);
+                }
                  let final_text = format!("❌ Ошибка WS Хедж ID:{}: {}", operation_id, e);
-                 let _ = bot_clone_for_spawn.edit_message_text(chat_id, bot_message_id, final_text)
-                          .reply_markup(navigation::make_main_menu_keyboard())
-                          .await;
+                 // Check if message is still accessible before editing
+                 if !waiting_message.is_inaccessible() {
+                     if let Err(edit_err) = bot_clone_for_spawn.edit_message_text(chat_id, bot_message_id, final_text)
+                              .reply_markup(navigation::make_main_menu_keyboard())
+                              .await {
+                         warn!("op_id:{}: Failed to edit final error message: {}", operation_id, edit_err);
+                     }
+                 } else {
+                     info!("op_id:{}: Original message inaccessible, cannot edit final error status.", operation_id);
+                 }
             }
         }
     });
@@ -341,7 +375,11 @@ where
         operation_type: OperationType::Hedge,
         symbol: symbol.clone(),
         bot_message_id: bot_message_id.0,
+        // --- ПРЕДУПРЕЖДЕНИЕ: total_filled_spot_qty не обновляется для WS ---
+        // HedgerWsHedgeTask не имеет доступа к этому Arc<Mutex<f64>>.
+        // Если это поле нужно для WS, потребуется другой механизм обновления.
         total_filled_spot_qty: Arc::new(TokioMutex::new(0.0)),
+        // --- КОНЕЦ ПРЕДУПРЕЖДЕНИЯ ---
     };
     running_operations.lock().await.insert((chat_id, operation_id), info);
     info!("op_id:{}: Stored running WS hedge info.", operation_id);

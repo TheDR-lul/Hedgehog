@@ -46,7 +46,7 @@ impl HedgerWsUnhedgeTask {
             original_operation, config, database, exchange_rest, progress_callback, ws_receiver
         ).await
     }
-
+    
     pub async fn run(&mut self) -> Result<()> {
         info!(operation_id = self.operation_id, "Starting HedgerWsUnhedgeTask run loop...");
 
