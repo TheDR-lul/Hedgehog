@@ -19,7 +19,7 @@ use crate::hedger_ws::common::calculate_auto_chunk_parameters;
 // Используем хелперы из hedge_logic для общих функций
 
 
-pub async fn initialize_task(
+pub(crate) async fn initialize_task(
     original_operation: HedgeOperation,
     config: Arc<Config>,
     database: Arc<storage::Db>,

@@ -12,7 +12,7 @@ use crate::hedger_ws::state::{ChunkOrderState, HedgerWsStatus, Leg};
 use crate::hedger_ws::unhedge_logic::helpers::{calculate_limit_price_for_leg, round_down_step, get_current_price, send_progress_update, update_final_db_status}; // Добавили update_final_db_status
 
 // Не возвращаем bool
-pub async fn start_next_chunk(task: &mut HedgerWsUnhedgeTask) -> Result<()> {
+pub(crate) async fn start_next_chunk(task: &mut HedgerWsUnhedgeTask) -> Result<()> {
     let chunk_index = match task.state.status {
          HedgerWsStatus::StartingChunk(index) => index,
          HedgerWsStatus::RunningChunk(index) => {

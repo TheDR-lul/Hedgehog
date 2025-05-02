@@ -23,7 +23,7 @@ use crate::hedger_ws::state::{HedgerWsState, HedgerWsStatus}; // Доступ к
 use crate::hedger_ws::common::calculate_auto_chunk_parameters; // Доступ к common
 use crate::hedger_ws::hedge_logic::helpers::{get_decimals_from_step, get_step_decimal}; // Доступ к хелперам
 
-pub async fn initialize_task(
+pub(crate) async fn initialize_task(
     operation_id: i64,
     request: HedgeRequest,
     config: Arc<Config>,

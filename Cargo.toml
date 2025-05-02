@@ -2,7 +2,7 @@
 name = "hedgehog"
 version = "0.1.1"
 edition = "2024"
-#build = "build.rs"
+build = "build.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
