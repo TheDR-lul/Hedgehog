@@ -1,6 +1,6 @@
 // src/notifier/market_info.rs
 
-use super::{StateStorage, UserState, callback_data}; // Command здесь нужен для BotCommands
+use crate::notifier::{StateStorage, UserState, callback_data}; // Command здесь нужен для BotCommands
 use crate::config::Config;
 use crate::exchange::Exchange;
 use crate::storage::Db;

@@ -1,7 +1,8 @@
 // src/notifier/navigation.rs
 
 // <<< ИСПРАВЛЕНО: Убран RunningOperations >>>
-use super::{StateStorage, UserState, callback_data};
+use crate::notifier::{StateStorage, UserState, callback_data};
+use crate::notifier::RunningOperations; // Убран из импорта super
 use crate::config::Config;
 use crate::exchange::Exchange;
 use crate::storage::Db;
@@ -159,7 +160,6 @@ pub async fn handle_menu_info_callback<E>(
 }
 
 // <<< ИСПРАВЛЕНО: Убран неиспользуемый RunningOperations из импорта и сигнатуры >>>
-use super::RunningOperations; // Убран из импорта super
 pub async fn handle_menu_active_ops_callback(
     bot: Bot, q: CallbackQuery, _running_operations: RunningOperations, _state_storage: StateStorage
 ) -> anyhow::Result<()> {

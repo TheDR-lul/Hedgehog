@@ -2,7 +2,7 @@
 
 // <<< ИСПРАВЛЕНО: Убраны UserState, RunningOperations, Balance, MessageId, ChatId >>>
 // Command и callback_data используются (косвенно через Command::descriptions и в handle_menu_wallet_callback)
-use super::{callback_data, StateStorage}; // Оставляем StateStorage, т.к. он в сигнатурах
+use crate::notifier::{callback_data, StateStorage}; // Оставляем StateStorage, т.к. он в сигнатурах
 use crate::config::Config;
 use crate::exchange::Exchange; // Оставляем Exchange
 use crate::storage::Db;

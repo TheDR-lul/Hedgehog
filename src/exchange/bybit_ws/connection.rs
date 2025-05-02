@@ -11,9 +11,9 @@ use futures_util::StreamExt; // Для метода .split()
 
 use crate::config::Config;
 use crate::exchange::types::{SubscriptionType, WebSocketMessage};
-use super::protocol::{authenticate, subscribe};
-use super::read_loop::read_loop;
-use super::{WsStream, WsSink, CONNECT_TIMEOUT_SECONDS}; // Импортируем типы и константу из mod.rs
+use crate::exchange::bybit_ws::protocol::{authenticate, subscribe};
+use crate::exchange::bybit_ws::read_loop::read_loop;
+use crate::exchange::bybit_ws::{WsStream, WsSink, CONNECT_TIMEOUT_SECONDS}; // Импортируем типы и константу из mod.rs
 
 // Сделали pub(super)
 pub(super) async fn connect_auth_and_subscribe_internal(

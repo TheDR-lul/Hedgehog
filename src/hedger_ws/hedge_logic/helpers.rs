@@ -11,8 +11,8 @@ use crate::config::WsLimitOrderPlacementStrategy;
 // Убираем лишние скобки
 use crate::exchange::types::OrderSide;
 use crate::storage;
-use super::super::hedge_task::HedgerWsHedgeTask;
-use super::super::state::{HedgerWsStatus, Leg};
+use crate::hedger_ws::hedge_task::HedgerWsHedgeTask;
+use crate::hedger_ws::state::{HedgerWsStatus, Leg};
 
 // Расчет лимитной цены для ноги
 pub fn calculate_limit_price_for_leg(task: &HedgerWsHedgeTask, leg: Leg) -> Result<Decimal> {

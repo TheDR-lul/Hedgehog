@@ -5,8 +5,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 use tracing::{error, info, warn};
 
-use super::common::{manage_order_loop, OrderLoopParams}; // Используем общую функцию
-use super::{
+use crate::hedger::common::{manage_order_loop, OrderLoopParams}; // Используем общую функцию
+use crate::hedger::{
     HedgeProgressCallback, HedgeProgressUpdate, HedgeStage, Hedger, ORDER_FILL_TOLERANCE,
 };
 use crate::exchange::types::OrderSide;

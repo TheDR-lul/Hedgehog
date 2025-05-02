@@ -1,4 +1,5 @@
-use super::{Exchange, OrderStatus, FeeRate, FuturesTickerInfo};
+use crate::exchange::types::{OrderStatus, FeeRate, FuturesTickerInfo};
+use crate::exchange::Exchange;
 // --- ИСПРАВЛЕНО: Импортируем все нужные типы из types.rs ---
 use crate::exchange::types::{
     Balance, Order, OrderSide, DetailedOrderStatus, OrderStatusText,

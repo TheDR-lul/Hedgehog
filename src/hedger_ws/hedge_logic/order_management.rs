@@ -8,9 +8,9 @@ use tracing::{error, info, warn, trace}; // Добавили trace
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::exchange::types::{OrderSide, OrderStatusText};
-use super::super::hedge_task::HedgerWsHedgeTask;
-use super::super::state::{ChunkOrderState, HedgerWsStatus, Leg};
-use super::helpers::{calculate_limit_price_for_leg, round_down_step};
+use crate::hedger_ws::hedge_task::HedgerWsHedgeTask;
+use crate::hedger_ws::state::{ChunkOrderState, HedgerWsStatus, Leg};
+use crate::hedger_ws::hedge_logic::helpers::{calculate_limit_price_for_leg, round_down_step};
 
 // Проверка активных ордеров на "устаревание" цены
 pub async fn check_stale_orders(task: &mut HedgerWsHedgeTask) -> Result<()> {

@@ -6,10 +6,10 @@ use rust_decimal_macros::dec;
 use tracing::{debug, error, info, warn, trace};
 
 use crate::exchange::types::{WebSocketMessage, DetailedOrderStatus, OrderSide, OrderStatusText, OrderbookLevel};
-use super::super::hedge_task::HedgerWsHedgeTask;
-use super::super::state::{HedgerWsStatus, Leg, OperationType}; // Добавили OperationType
-use super::order_management::handle_cancel_confirmation;
-use super::helpers::{get_current_price, send_progress_update};
+use crate::hedger_ws::hedge_task::HedgerWsHedgeTask;
+use crate::hedger_ws::state::{HedgerWsStatus, Leg, OperationType}; // Добавили OperationType
+use crate::hedger_ws::hedge_logic::order_management::handle_cancel_confirmation;
+use crate::hedger_ws::hedge_logic::helpers::{get_current_price, send_progress_update};
 
 // ... handle_websocket_message, handle_order_book_update, handle_public_trade_update без изменений ...
 pub async fn handle_websocket_message(task: &mut HedgerWsHedgeTask, message: WebSocketMessage) -> Result<()> {

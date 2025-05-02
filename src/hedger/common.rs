@@ -10,7 +10,7 @@ use tracing::{debug, error, info, warn};
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive}; // Добавили ToPrimitive
 
 
-use super::{HedgeProgressCallback, HedgeProgressUpdate, HedgeStage, Hedger, ORDER_FILL_TOLERANCE};
+use crate::hedger::{HedgeProgressCallback, HedgeProgressUpdate, HedgeStage, Hedger, ORDER_FILL_TOLERANCE};
 use crate::exchange::types::{OrderSide, OrderStatus as ExchangeOrderStatus};
 use crate::exchange::Exchange;
 use crate::storage::{update_hedge_spot_order, Db}; // Добавим Db и нужные функции

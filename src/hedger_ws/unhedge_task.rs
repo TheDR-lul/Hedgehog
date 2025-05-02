@@ -14,9 +14,10 @@ use crate::exchange::types::WebSocketMessage;
 use crate::hedger::HedgeProgressCallback;
 use crate::storage::{self, HedgeOperation};
 // --- ИСПРАВЛЕНО: Убираем use hedge_logic ---
-use super::unhedge_logic;
+use crate::hedger_ws::unhedge_logic;
 // use super::hedge_logic; // Больше не нужен здесь
-use super::state::{HedgerWsState, HedgerWsStatus, Leg}; // Leg может понадобиться для статуса WaitingImbalance
+use crate::hedger_ws::state::{HedgerWsState, HedgerWsStatus, Leg}; // Leg может понадобиться для статуса WaitingImbalance
+use crate::hedger_ws::unhedge_logic::init;
 
 pub struct HedgerWsUnhedgeTask {
     pub(crate) operation_id: i64,
@@ -42,7 +43,7 @@ impl HedgerWsUnhedgeTask {
         ws_receiver: mpsc::Receiver<Result<WebSocketMessage>>,
     ) -> Result<Self> {
         // Вызов из unhedge_logic
-        unhedge_logic::init::initialize_task(
+        initialize_task(
             original_operation, config, database, exchange_rest, progress_callback, ws_receiver
         ).await
     }

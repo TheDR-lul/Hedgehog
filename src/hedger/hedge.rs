@@ -9,8 +9,8 @@ use tokio::time::sleep;
 use tracing::{error, info, warn};
 
 // --- ИСПРАВЛЕНО: manage_order_loop теперь возвращает Result<(f64, Option<String>)> ---
-use super::common::{calculate_limit_price, manage_order_loop, OrderLoopParams};
-use super::{
+use crate::hedger::common::{calculate_limit_price, manage_order_loop, OrderLoopParams};
+use crate::hedger::{
     HedgeParams, HedgeProgressCallback, HedgeProgressUpdate, HedgeStage, Hedger,
     ORDER_FILL_TOLERANCE,
 };

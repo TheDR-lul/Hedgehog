@@ -1,5 +1,5 @@
 // src/notifier/unhedge_flow.rs
-use super::{
+use crate::notifier::{
     StateStorage, UserState, RunningOperations, callback_data, navigation,
 };
 use crate::config::Config;

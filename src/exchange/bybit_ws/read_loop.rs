@@ -13,9 +13,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::exchange::types::{SubscriptionType, WebSocketMessage};
-use super::connection::connect_auth_and_subscribe_internal;
-use super::protocol::handle_message;
-use super::{WsStream, WsSink, READ_TIMEOUT_SECONDS};
+use crate::exchange::bybit_ws::connection::connect_auth_and_subscribe_internal;
+use crate::exchange::bybit_ws::protocol::handle_message;
+use crate::exchange::bybit_ws::{WsStream, WsSink, READ_TIMEOUT_SECONDS};
 
 
 pub(super) async fn read_loop(

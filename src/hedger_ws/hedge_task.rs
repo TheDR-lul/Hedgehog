@@ -16,7 +16,7 @@ use crate::models::HedgeRequest;
 use crate::storage;
 
 // --- ДОБАВЛЕНО: Импортируем функции напрямую ---
-use super::hedge_logic::{
+use crate::hedger_ws::hedge_logic::{
     chunk_execution::start_next_chunk,
     helpers::{check_chunk_completion, check_value_imbalance, update_final_db_status},
     init::initialize_task,
@@ -26,7 +26,7 @@ use super::hedge_logic::{
 // --- КОНЕЦ ДОБАВЛЕНИЙ ---
 
 // Импортируем нужные типы состояний и вспомогательные типы
-use super::state::{HedgerWsState, HedgerWsStatus, Leg};
+use crate::hedger_ws::state::{HedgerWsState, HedgerWsStatus, Leg};
 
 // Определение структуры остается, но поля делаем pub(crate)
 // чтобы они были доступны функциям в подмодуле hedge_logic

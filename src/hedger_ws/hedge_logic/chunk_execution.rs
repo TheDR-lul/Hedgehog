@@ -6,9 +6,9 @@ use rust_decimal_macros::dec;
 use tracing::{debug, error, info, warn};
 
 use crate::exchange::types::OrderSide;
-use super::super::hedge_task::HedgerWsHedgeTask;
-use super::super::state::{ChunkOrderState, HedgerWsStatus, Leg};
-use super::helpers::{calculate_limit_price_for_leg, round_down_step, get_current_price, send_progress_update}; // Используем хелперы
+use crate::hedger_ws::hedge_task::HedgerWsHedgeTask;
+use crate::hedger_ws::state::{ChunkOrderState, HedgerWsStatus, Leg};
+use crate::hedger_ws::hedge_logic::helpers::{calculate_limit_price_for_leg, round_down_step, get_current_price, send_progress_update}; // Используем хелперы
 
 // Возвращает Ok(true), если чанк был пропущен, Ok(false) если запущен, Err при ошибке.
 pub async fn start_next_chunk(task: &mut HedgerWsHedgeTask) -> Result<bool> {

@@ -9,8 +9,8 @@ use std::str::FromStr;
 use crate::config::WsLimitOrderPlacementStrategy;
 use crate::exchange::types::OrderSide;
 // --- ИЗМЕНЕНО: Ссылка на HedgerWsUnhedgeTask ---
-use super::super::unhedge_task::HedgerWsUnhedgeTask;
-use super::super::state::{HedgerWsStatus, Leg};
+use crate::hedger_ws::unhedge_task::HedgerWsUnhedgeTask;
+use crate::hedger_ws::state::{HedgerWsStatus, Leg};
 
 // Расчет лимитной цены для ноги (Unhedge)
 // Логика та же, но тип task другой

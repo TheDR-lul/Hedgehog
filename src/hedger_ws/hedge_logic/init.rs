@@ -18,12 +18,11 @@ use crate::exchange::types::WebSocketMessage;
 use crate::hedger::HedgeProgressCallback;
 use crate::models::HedgeRequest;
 use crate::storage;
-use super::super::hedge_task::HedgerWsHedgeTask; // Доступ к структуре
-use super::super::state::{HedgerWsState, HedgerWsStatus}; // Доступ к состояниям
-use super::super::common::calculate_auto_chunk_parameters; // Доступ к common
-use super::helpers::{get_decimals_from_step, get_step_decimal}; // Доступ к хелперам
+use crate::hedger_ws::hedge_task::HedgerWsHedgeTask; // Доступ к структуре
+use crate::hedger_ws::state::{HedgerWsState, HedgerWsStatus}; // Доступ к состояниям
+use crate::hedger_ws::common::calculate_auto_chunk_parameters; // Доступ к common
+use crate::hedger_ws::hedge_logic::helpers::{get_decimals_from_step, get_step_decimal}; // Доступ к хелперам
 
-#[allow(clippy::too_many_arguments)]
 pub async fn initialize_task(
     operation_id: i64,
     request: HedgeRequest,

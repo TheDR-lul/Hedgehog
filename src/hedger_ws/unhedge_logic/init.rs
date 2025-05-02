@@ -13,13 +13,12 @@ use crate::exchange::Exchange;
 use crate::exchange::types::WebSocketMessage;
 use crate::hedger::HedgeProgressCallback;
 use crate::storage::{self, HedgeOperation};
-use super::super::unhedge_task::HedgerWsUnhedgeTask;
-use super::super::state::{HedgerWsState, HedgerWsStatus};
-use super::super::common::calculate_auto_chunk_parameters;
+use crate::hedger_ws::unhedge_task::HedgerWsUnhedgeTask;
+use crate::hedger_ws::state::{HedgerWsState, HedgerWsStatus};
+use crate::hedger_ws::common::calculate_auto_chunk_parameters;
 // Используем хелперы из hedge_logic для общих функций
 
 
-#[allow(clippy::too_many_arguments)]
 pub async fn initialize_task(
     original_operation: HedgeOperation,
     config: Arc<Config>,
