@@ -1,4 +1,4 @@
-// src/hedger_ws/hedge_logic/init.rs
+// src/webservice_hedge/hedge_logic/init.rs
 
 use anyhow::{anyhow, Context, Result};
 use rust_decimal::prelude::*;
@@ -18,10 +18,10 @@ use crate::exchange::types::WebSocketMessage;
 use crate::hedger::HedgeProgressCallback;
 use crate::models::HedgeRequest;
 use crate::storage;
-use crate::hedger_ws::hedge_task::HedgerWsHedgeTask; // Доступ к структуре
-use crate::hedger_ws::state::{HedgerWsState, HedgerWsStatus}; // Доступ к состояниям
-use crate::hedger_ws::common::calculate_auto_chunk_parameters; // Доступ к common
-use crate::hedger_ws::hedge_logic::helpers::{get_decimals_from_step, get_step_decimal}; // Доступ к хелперам
+use crate::webservice_hedge::hedge_task::HedgerWsHedgeTask; // Доступ к структуре
+use crate::webservice_hedge::state::{HedgerWsState, HedgerWsStatus}; // Доступ к состояниям
+use crate::webservice_hedge::common::calculate_auto_chunk_parameters; // Доступ к common
+use crate::webservice_hedge::hedge_logic::helpers::{get_decimals_from_step, get_step_decimal}; // Доступ к хелперам
 
 pub(crate) async fn initialize_task(
     operation_id: i64,

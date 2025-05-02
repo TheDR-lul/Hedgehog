@@ -1,4 +1,4 @@
-// src/hedger_ws/unhedge_task.rs
+// src/webservice_hedge/unhedge_task.rs
 
 use anyhow::{anyhow, Result};
 use rust_decimal::Decimal;
@@ -14,9 +14,9 @@ use crate::exchange::types::WebSocketMessage;
 use crate::hedger::HedgeProgressCallback;
 use crate::storage::{self, HedgeOperation};
 // --- ИСПРАВЛЕНО: Убираем use hedge_logic ---
-use crate::hedger_ws::unhedge_logic;
-use crate::hedger_ws::state::{HedgerWsState, HedgerWsStatus, Leg}; // Leg может понадобиться для статуса WaitingImbalance
-use crate::hedger_ws::unhedge_logic::init::initialize_task; // Импортируем функцию инициализации из unhedge_logic
+use crate::webservice_hedge::unhedge_logic;
+use crate::webservice_hedge::state::{HedgerWsState, HedgerWsStatus, Leg}; // Leg может понадобиться для статуса WaitingImbalance
+use crate::webservice_hedge::unhedge_logic::init::initialize_task; // Импортируем функцию инициализации из unhedge_logic
 
 pub struct HedgerWsUnhedgeTask {
     pub(crate) operation_id: i64,

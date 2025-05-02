@@ -1,4 +1,4 @@
-// src/hedger_ws/hedge_logic/helpers.rs
+// src/webservice_hedge/hedge_logic/helpers.rs
 
 use anyhow::{anyhow, Context, Result};
 use rust_decimal::prelude::*;
@@ -11,8 +11,8 @@ use crate::config::WsLimitOrderPlacementStrategy;
 // Убираем лишние скобки
 use crate::exchange::types::OrderSide;
 use crate::storage;
-use crate::hedger_ws::hedge_task::HedgerWsHedgeTask;
-use crate::hedger_ws::state::{HedgerWsStatus, Leg};
+use crate::webservice_hedge::hedge_task::HedgerWsHedgeTask;
+use crate::webservice_hedge::state::{HedgerWsStatus, Leg};
 
 // Расчет лимитной цены для ноги
 pub fn calculate_limit_price_for_leg(task: &HedgerWsHedgeTask, leg: Leg) -> Result<Decimal> {

@@ -1,4 +1,4 @@
-// src/hedger_ws/unhedge_logic/init.rs
+// src/webservice_hedge/unhedge_logic/init.rs
 
 use anyhow::{anyhow, Context, Result};
 use rust_decimal::prelude::*;
@@ -13,9 +13,9 @@ use crate::exchange::Exchange;
 use crate::exchange::types::WebSocketMessage;
 use crate::hedger::HedgeProgressCallback;
 use crate::storage::{self, HedgeOperation};
-use crate::hedger_ws::unhedge_task::HedgerWsUnhedgeTask;
-use crate::hedger_ws::state::{HedgerWsState, HedgerWsStatus};
-use crate::hedger_ws::common::calculate_auto_chunk_parameters;
+use crate::webservice_hedge::unhedge_task::HedgerWsUnhedgeTask;
+use crate::webservice_hedge::state::{HedgerWsState, HedgerWsStatus};
+use crate::webservice_hedge::common::calculate_auto_chunk_parameters;
 // Используем хелперы из hedge_logic для общих функций
 
 
@@ -100,8 +100,8 @@ pub(crate) async fn initialize_task(
 
     let min_futures_quantity = Decimal::from_str(&linear_info.lot_size_filter.min_order_qty)?;
     // Используем общие хелперы из hedge_logic
-    let spot_quantity_step = crate::hedger_ws::hedge_logic::helpers::get_step_decimal(spot_info.lot_size_filter.base_precision.as_deref())?;
-    let futures_quantity_step = crate::hedger_ws::hedge_logic::helpers::get_step_decimal(linear_info.lot_size_filter.qty_step.as_deref())?;
+    let spot_quantity_step = crate::webservice_hedge::hedge_logic::helpers::get_step_decimal(spot_info.lot_size_filter.base_precision.as_deref())?;
+    let futures_quantity_step = crate::webservice_hedge::hedge_logic::helpers::get_step_decimal(linear_info.lot_size_filter.qty_step.as_deref())?;
     let min_spot_notional = spot_info.lot_size_filter.min_notional_value.as_deref().and_then(|s| Decimal::from_str(s).ok());
     let min_futures_notional = linear_info.lot_size_filter.min_notional_value.as_deref().and_then(|s| Decimal::from_str(s).ok());
 

@@ -1,4 +1,4 @@
-// src/hedger_ws/unhedge_logic/ws_handlers.rs
+// src/webservice_hedge/unhedge_logic/ws_handlers.rs
 
 use anyhow::{anyhow, Result};
 use rust_decimal::prelude::*;
@@ -7,11 +7,11 @@ use tracing::{debug, error, info, warn, trace};
 
 use crate::exchange::types::{WebSocketMessage, DetailedOrderStatus, OrderSide, OrderStatusText, OrderbookLevel};
 // --- Ссылка на HedgerWsUnhedgeTask ---
-use crate::hedger_ws::unhedge_task::HedgerWsUnhedgeTask;
-use crate::hedger_ws::state::{HedgerWsStatus, Leg, OperationType};
+use crate::webservice_hedge::unhedge_task::HedgerWsUnhedgeTask;
+use crate::webservice_hedge::state::{HedgerWsStatus, Leg, OperationType};
 // --- Используем order_management из hedge_logic (пока считаем общим) ---
 // --- И хелперы из ЭТОГО модуля (unhedge_logic) ---
-use crate::hedger_ws::unhedge_logic::helpers::{get_current_price, send_progress_update};
+use crate::webservice_hedge::unhedge_logic::helpers::{get_current_price, send_progress_update};
 
 // Главный обработчик сообщений WS для Unhedge
 pub async fn handle_websocket_message(task: &mut HedgerWsUnhedgeTask, message: WebSocketMessage) -> Result<()> {

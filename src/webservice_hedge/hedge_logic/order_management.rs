@@ -1,4 +1,4 @@
-// src/hedger_ws/hedge_logic/order_management.rs
+// src/webservice_hedge/hedge_logic/order_management.rs
 
 use anyhow::{anyhow, Result, Context};
 use rust_decimal::prelude::*;
@@ -8,9 +8,9 @@ use tracing::{error, info, warn, trace}; // Добавили trace
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::exchange::types::{OrderSide, OrderStatusText};
-use crate::hedger_ws::hedge_task::HedgerWsHedgeTask;
-use crate::hedger_ws::state::{ChunkOrderState, HedgerWsStatus, Leg};
-use crate::hedger_ws::hedge_logic::helpers::{calculate_limit_price_for_leg, round_down_step};
+use crate::webservice_hedge::hedge_task::HedgerWsHedgeTask;
+use crate::webservice_hedge::state::{ChunkOrderState, HedgerWsStatus, Leg};
+use crate::webservice_hedge::hedge_logic::helpers::{calculate_limit_price_for_leg, round_down_step};
 
 // Проверка активных ордеров на "устаревание" цены
 pub async fn check_stale_orders(task: &mut HedgerWsHedgeTask) -> Result<()> {
@@ -100,7 +100,7 @@ pub async fn handle_cancel_confirmation(task: &mut HedgerWsHedgeTask, cancelled_
 
      let (total_target_qty_approx, filled_qty, min_quantity, step, is_spot) = match leg {
          Leg::Spot => {
-             let price = crate::hedger_ws::hedge_logic::helpers::get_current_price(task, Leg::Spot).unwrap_or(Decimal::ONE);
+             let price = crate::webservice_hedge::hedge_logic::helpers::get_current_price(task, Leg::Spot).unwrap_or(Decimal::ONE);
              let target_approx = if price > Decimal::ZERO { task.state.initial_target_spot_value / price } else { Decimal::MAX };
              (target_approx, task.state.cumulative_spot_filled_quantity, task.state.min_spot_quantity, task.state.spot_quantity_step, true)
          }
@@ -159,7 +159,7 @@ pub async fn handle_cancel_confirmation(task: &mut HedgerWsHedgeTask, cancelled_
                     let error_msg = format!("Failed to place replacement {:?} order: {}", leg, e);
                     error!(operation_id = task.operation_id, error=%error_msg, ?leg);
                     task.state.status = HedgerWsStatus::Failed(error_msg); // <-- Добавляем строку ошибки
-                    crate::hedger_ws::hedge_logic::helpers::update_final_db_status(task).await;
+                    crate::webservice_hedge::hedge_logic::helpers::update_final_db_status(task).await;
                     return Err(e).context("Failed to place replacement order");
                }
            }

@@ -1,4 +1,4 @@
-// src/hedger_ws/unhedge_logic/helpers.rs
+// src/webservice_hedge/unhedge_logic/helpers.rs
 
 use anyhow::{anyhow, Context, Result};
 use rust_decimal::prelude::*;
@@ -9,8 +9,8 @@ use std::str::FromStr;
 use crate::config::WsLimitOrderPlacementStrategy;
 use crate::exchange::types::OrderSide;
 // --- ИЗМЕНЕНО: Ссылка на HedgerWsUnhedgeTask ---
-use crate::hedger_ws::unhedge_task::HedgerWsUnhedgeTask;
-use crate::hedger_ws::state::{HedgerWsStatus, Leg};
+use crate::webservice_hedge::unhedge_task::HedgerWsUnhedgeTask;
+use crate::webservice_hedge::state::{HedgerWsStatus, Leg};
 
 // Расчет лимитной цены для ноги (Unhedge)
 // Логика та же, но тип task другой

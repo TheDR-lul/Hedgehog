@@ -1,4 +1,4 @@
-// src/hedger_ws/hedge_task.rs
+// src/webservice_hedge/hedge_task.rs
 
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
@@ -15,7 +15,7 @@ use crate::models::HedgeRequest;
 use crate::storage;
 
 // --- ДОБАВЛЕНО: Импортируем функции напрямую ---
-use crate::hedger_ws::hedge_logic::{
+use crate::webservice_hedge::hedge_logic::{
     chunk_execution::start_next_chunk,
     helpers::{check_chunk_completion, check_value_imbalance, update_final_db_status},
     init::initialize_task,
@@ -25,7 +25,7 @@ use crate::hedger_ws::hedge_logic::{
 // --- КОНЕЦ ДОБАВЛЕНИЙ ---
 
 // Импортируем нужные типы состояний и вспомогательные типы
-use crate::hedger_ws::state::{HedgerWsState, HedgerWsStatus, Leg};
+use crate::webservice_hedge::state::{HedgerWsState, HedgerWsStatus, Leg};
 
 // Определение структуры остается, но поля делаем pub(crate)
 // чтобы они были доступны функциям в подмодуле hedge_logic

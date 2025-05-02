@@ -1,4 +1,4 @@
-// src/hedger_ws/unhedge_logic/chunk_execution.rs
+// src/webservice_hedge/unhedge_logic/chunk_execution.rs
 
 use anyhow::{anyhow, Result, Context};
 use rust_decimal::prelude::*;
@@ -6,10 +6,10 @@ use rust_decimal_macros::dec;
 use tracing::{debug, error, info, warn};
 
 use crate::exchange::types::OrderSide;
-use crate::hedger_ws::unhedge_task::HedgerWsUnhedgeTask; // Ссылка на структуру unhedge
-use crate::hedger_ws::state::{ChunkOrderState, HedgerWsStatus, Leg};
+use crate::webservice_hedge::unhedge_task::HedgerWsUnhedgeTask; // Ссылка на структуру unhedge
+use crate::webservice_hedge::state::{ChunkOrderState, HedgerWsStatus, Leg};
 // --- ИЗМЕНЕНО: Используем хелперы из ЭТОГО ЖЕ модуля ---
-use crate::hedger_ws::unhedge_logic::helpers::{calculate_limit_price_for_leg, round_down_step, get_current_price, send_progress_update, update_final_db_status}; // Добавили update_final_db_status
+use crate::webservice_hedge::unhedge_logic::helpers::{calculate_limit_price_for_leg, round_down_step, get_current_price, send_progress_update, update_final_db_status}; // Добавили update_final_db_status
 
 // Не возвращаем bool
 pub(crate) async fn start_next_chunk(task: &mut HedgerWsUnhedgeTask) -> Result<()> {
