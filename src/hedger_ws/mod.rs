@@ -4,9 +4,8 @@ pub mod state;
 pub mod common;
 pub mod unhedge_task; // <-- Оставляем
 pub mod hedge_task;
-
-mod hedge_logic;
-mod unhedge_logic; // <-- Добавляем этот модуль
+pub mod hedge_logic;
+pub mod unhedge_logic; // <-- Добавляем этот модуль
 
 pub use state::{HedgerWsState, HedgerWsStatus, OperationType, MarketUpdate, Leg, ChunkOrderState};
 

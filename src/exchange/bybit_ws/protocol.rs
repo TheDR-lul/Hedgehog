@@ -1,7 +1,7 @@
 // src/exchange/bybit_ws/protocol.rs
 
 use crate::exchange::bybit_ws::types_internal::*; // Внутренние типы
-use crate::exchange::types::{WebSocketMessage}; // Убрали OrderSide
+use crate::exchange::types::WebSocketMessage; // Убрали OrderSide
 use anyhow::{anyhow, Result, Context}; // Добавили Context
 use futures_util::SinkExt; // Добавили SinkExt
 use hmac::{Hmac, Mac};
@@ -144,15 +144,15 @@ fn parse_bybit_response(response: BybitWsResponse) -> Result<Option<WebSocketMes
 
         if topic == "order" {
             // Вызываем функцию парсинга из types_internal
-            super::types_internal::parse_order_update(data).map(WebSocketMessage::OrderUpdate).map(Some)
+            crate::exchange::bybit_ws::types_internal::parse_order_update(data).map(WebSocketMessage::OrderUpdate).map(Some)
         } else if topic.starts_with("orderbook.") {
             // Вызываем функцию парсинга из types_internal
-            super::types_internal::parse_orderbook_update(data).map(|(symbol, bids, asks)| WebSocketMessage::OrderBookL2 {
+            crate::exchange::bybit_ws::types_internal::parse_orderbook_update(data).map(|(symbol, bids, asks)| WebSocketMessage::OrderBookL2 {
                 symbol, bids, asks, is_snapshot: message_type == Some("snapshot")
             }).map(Some)
         } else if topic.starts_with("publicTrade.") {
             // Вызываем функцию парсинга из types_internal
-            super::types_internal::parse_public_trade_update(data).map(|opt_data| opt_data.map(
+            crate::exchange::bybit_ws::types_internal::parse_public_trade_update(data).map(|opt_data| opt_data.map(
                 |(symbol, price, qty, side, timestamp)| WebSocketMessage::PublicTrade { symbol, price, qty, side, timestamp }
             ))
         } else {

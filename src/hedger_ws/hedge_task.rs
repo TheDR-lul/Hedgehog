@@ -2,11 +2,10 @@
 
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use tokio::time::sleep;
 use std::time::Duration;
-
+use tokio::sync::mpsc::Receiver;
 // Основные зависимости остаются
 use crate::config::Config;
 use crate::exchange::Exchange;
@@ -31,13 +30,13 @@ use crate::hedger_ws::state::{HedgerWsState, HedgerWsStatus, Leg};
 // Определение структуры остается, но поля делаем pub(crate)
 // чтобы они были доступны функциям в подмодуле hedge_logic
 pub struct HedgerWsHedgeTask {
-    pub(crate) operation_id: i64,
-    pub(crate) config: Arc<Config>,
-    pub(crate) database: Arc<storage::Db>,
-    pub(crate) state: HedgerWsState,
-    pub(crate) ws_receiver: mpsc::Receiver<Result<WebSocketMessage>>,
-    pub(crate) exchange_rest: Arc<dyn Exchange>,
-    pub(crate) progress_callback: HedgeProgressCallback,
+    pub operation_id: i64,
+    pub config: Arc<Config>,
+    pub database: Arc<storage::Db>,
+    pub state: HedgerWsState,
+    pub ws_receiver: Receiver<Result<WebSocketMessage>>,
+    pub exchange_rest: Arc<dyn Exchange>,
+    pub progress_callback: HedgeProgressCallback,
 }
 
 impl HedgerWsHedgeTask {
@@ -49,7 +48,7 @@ impl HedgerWsHedgeTask {
         database: Arc<storage::Db>,
         exchange_rest: Arc<dyn Exchange>,
         progress_callback: HedgeProgressCallback,
-        ws_receiver: mpsc::Receiver<Result<WebSocketMessage>>,
+        ws_receiver: Receiver<Result<WebSocketMessage>>,
     ) -> Result<Self> {
         // --- ИЗМЕНЕНО: Прямой вызов ---
         initialize_task(

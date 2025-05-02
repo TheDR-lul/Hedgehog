@@ -153,7 +153,7 @@ where
         }
     };
     let spot_initial_limit_price =
-        super::common::calculate_limit_price(current_spot_price, OrderSide::Sell, hedger.slippage);
+        crate::hedger::common::calculate_limit_price(current_spot_price, OrderSide::Sell, hedger.slippage);
 
     let spot_loop_params = OrderLoopParams {
         hedger,
@@ -244,7 +244,7 @@ where
         }
     };
     let futures_initial_limit_price =
-        super::common::calculate_limit_price(futures_market_price, OrderSide::Buy, hedger.slippage);
+        crate::hedger::common::calculate_limit_price(futures_market_price, OrderSide::Buy, hedger.slippage);
 
     let futures_loop_params = OrderLoopParams {
         hedger,

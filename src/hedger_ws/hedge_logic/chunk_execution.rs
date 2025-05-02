@@ -197,7 +197,7 @@ pub async fn start_next_chunk(task: &mut HedgerWsHedgeTask) -> Result<bool> {
     // --- Обработка ошибок размещения ---
     if let Some(error) = spot_place_error.or(futures_place_error) {
         task.state.status = HedgerWsStatus::Failed(format!("Chunk {} placement error: {}", chunk_index, error));
-        super::helpers::update_final_db_status(task).await;
+        crate::hedger_ws::hedge_logic::helpers::update_final_db_status(task).await;
         return Err(error);
     }
 

@@ -100,7 +100,7 @@ pub async fn handle_cancel_confirmation(task: &mut HedgerWsHedgeTask, cancelled_
 
      let (total_target_qty_approx, filled_qty, min_quantity, step, is_spot) = match leg {
          Leg::Spot => {
-             let price = super::helpers::get_current_price(task, Leg::Spot).unwrap_or(Decimal::ONE);
+             let price = crate::hedger_ws::hedge_logic::helpers::get_current_price(task, Leg::Spot).unwrap_or(Decimal::ONE);
              let target_approx = if price > Decimal::ZERO { task.state.initial_target_spot_value / price } else { Decimal::MAX };
              (target_approx, task.state.cumulative_spot_filled_quantity, task.state.min_spot_quantity, task.state.spot_quantity_step, true)
          }
@@ -159,7 +159,7 @@ pub async fn handle_cancel_confirmation(task: &mut HedgerWsHedgeTask, cancelled_
                     let error_msg = format!("Failed to place replacement {:?} order: {}", leg, e);
                     error!(operation_id = task.operation_id, error=%error_msg, ?leg);
                     task.state.status = HedgerWsStatus::Failed(error_msg); // <-- Добавляем строку ошибки
-                    super::helpers::update_final_db_status(task).await;
+                    crate::hedger_ws::hedge_logic::helpers::update_final_db_status(task).await;
                     return Err(e).context("Failed to place replacement order");
                }
            }
