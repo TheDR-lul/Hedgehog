@@ -17,7 +17,7 @@ use crate::storage::{self, HedgeOperation};
 use crate::hedger_ws::unhedge_logic;
 // use super::hedge_logic; // Больше не нужен здесь
 use crate::hedger_ws::state::{HedgerWsState, HedgerWsStatus, Leg}; // Leg может понадобиться для статуса WaitingImbalance
-use crate::hedger_ws::unhedge_logic::init;
+use crate::hedger_ws::unhedge_logic::init::initialize_task; // Импортируем функцию инициализации из unhedge_logic
 
 pub struct HedgerWsUnhedgeTask {
     pub(crate) operation_id: i64,
@@ -33,7 +33,6 @@ pub struct HedgerWsUnhedgeTask {
 }
 
 impl HedgerWsUnhedgeTask {
-    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         original_operation: HedgeOperation,
         config: Arc<Config>,
