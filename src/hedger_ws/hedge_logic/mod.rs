@@ -9,6 +9,6 @@ pub mod reconciliation;
 pub mod helpers;
 
 // Можно реэкспортировать ключевые функции, если это удобно
-// pub use init::initialize_task;
-// pub use chunk_execution::start_next_chunk;
-// pub use reconciliation::reconcile;
+pub use init::initialize_task;
+pub use chunk_execution::start_next_chunk;
+pub use reconciliation::reconcile;
