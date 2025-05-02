@@ -9,6 +9,9 @@ use tokio::sync::Mutex as TokioMutex;
 use tracing::{info, error, warn};
 use futures::future::FutureExt;
 
+// --- ИСПРАВЛЕНО: Убран неиспользуемый импорт ---
+// use crate::webservice_hedge::hedge_logic::helpers::send_progress_update;
+use crate::webservice_hedge::hedge_task::HedgerWsHedgeTask;
 use crate::config::Config;
 use crate::exchange::Exchange;
 use crate::exchange::bybit_ws;
@@ -18,7 +21,7 @@ use crate::models::HedgeRequest;
 use crate::storage::{Db, insert_hedge_operation};
 use crate::notifier::{RunningOperations, RunningOperationInfo, OperationType, navigation, callback_data};
 // Ensure the correct path to the module
-use crate::webservice_hedge::hedge_task::HedgerWsHedgeTask;
+
 
 pub(super) async fn spawn_sequential_hedge_task<E>(
     bot: Bot,
@@ -33,7 +36,7 @@ pub(super) async fn spawn_sequential_hedge_task<E>(
     waiting_message: MaybeInaccessibleMessage, // Keep taking ownership here
 )
 where
-    E: Exchange + Clone + Send + Sync + 'static,
+E: Exchange + Clone + Send + Sync + 'static,
 {
     // --- ИСПРАВЛЕНО: Получаем ID из MaybeInaccessibleMessage через borrow ---
     let bot_message_id = match &waiting_message { // Borrow here
@@ -98,10 +101,12 @@ where
 
              let text = match update.stage {
                  HedgeStage::Spot => {
+                     // Прогресс текущего ордера
                      let filled_percent = if update.target_qty > ORDER_FILL_TOLERANCE { (update.filled_qty / update.target_qty) * 100.0 } else { 0.0 };
                      let filled_blocks = (filled_percent / (100.0 / progress_bar_len as f64)).round() as usize;
                      let empty_blocks = progress_bar_len - filled_blocks;
                      let progress_bar = format!("[{}{}]", "█".repeat(filled_blocks), "░".repeat(empty_blocks));
+                     // Проверка завершения спотовой части
                      if (update.cumulative_filled_qty - spot_target_cb).abs() <= ORDER_FILL_TOLERANCE {
                          format!( "✅ Спот куплен ID:{} ({})\nРын.цена: {:.2}\nОжидание продажи фьючерса...", operation_id_cb, symbol, update.current_spot_price)
                      } else {
@@ -109,6 +114,7 @@ where
                      }
                  }
                  HedgeStage::Futures => {
+                     // Общий прогресс фьючерсной части
                      let filled_percent = if fut_target_cb > ORDER_FILL_TOLERANCE { (update.cumulative_filled_qty / fut_target_cb) * 100.0 } else { 0.0 };
                      let filled_blocks = (filled_percent / (100.0 / progress_bar_len as f64)).round() as usize;
                      let empty_blocks = progress_bar_len - filled_blocks;
@@ -214,7 +220,7 @@ where
 
     let operation_id_result = insert_hedge_operation(
         db.as_ref(), chat_id.0, &symbol, &cfg.quote_currency, initial_sum,
-        request.volatility, 0.0, 0.0,
+        request.volatility, 0.0, 0.0, // В WS стратегии начальные target_qty могут быть 0, они определятся позже
     ).await;
 
     let operation_id = match operation_id_result {
@@ -253,6 +259,7 @@ where
              // --- ИСПРАВЛЕНО: Используем bot_message_id ---
              let _ = bot.edit_message_text(chat_id, bot_message_id, error_text.clone())
                       .reply_markup(navigation::make_main_menu_keyboard()).await;
+             // Обновляем статус в БД на Failed
              let _ = crate::storage::update_hedge_final_status(db.as_ref(), operation_id, "Failed", None, 0.0, Some(&error_text)).await;
              return Err(e);
         }
@@ -270,11 +277,15 @@ where
         let msg_id_cb = bot_message_id; // Используем ID, захваченный ранее
         let chat_id_cb = chat_id;
         let operation_id_cb = operation_id;
-        let spot_target_cb = if update.stage == HedgeStage::Spot { update.total_target_qty } else { 0.0 };
-        let fut_target_cb = if update.stage == HedgeStage::Futures { update.total_target_qty } else { 0.0 };
+        // --- ИСПРАВЛЕНО: Логика расчета прогресса ---
+        // Общие цели для прогресс-бара (предполагаем, что total_target_qty - это общая цель для ноги)
+        let overall_spot_target = if update.stage == HedgeStage::Spot { update.total_target_qty } else { 0.0 };
+        let overall_fut_target = if update.stage == HedgeStage::Futures { update.total_target_qty } else { 0.0 };
         let cumulative_filled_qty_cb = update.cumulative_filled_qty;
         let current_spot_price_cb = update.current_spot_price;
+        // Детали текущего ордера для текста
         let new_limit_price_cb = update.new_limit_price;
+        // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
         async move {
             let symbol = symbol_cb;
@@ -283,24 +294,30 @@ where
 
             let text = match update.stage {
                 HedgeStage::Spot => {
-                    let filled_percent = if spot_target_cb > ORDER_FILL_TOLERANCE { (cumulative_filled_qty_cb / spot_target_cb) * 100.0 } else { 0.0 };
+                    // --- ИСПРАВЛЕНО: Общий прогресс ---
+                    let filled_percent = if overall_spot_target > ORDER_FILL_TOLERANCE { (cumulative_filled_qty_cb / overall_spot_target) * 100.0 } else { 0.0 };
                     let filled_blocks = (filled_percent / (100.0 / progress_bar_len as f64)).round() as usize;
                     let empty_blocks = progress_bar_len - filled_blocks;
                     let progress_bar = format!("[{}{}]", "█".repeat(filled_blocks), "░".repeat(empty_blocks));
-                    format!( "⏳ Хедж WS (Спот) ID:{} {} ({})\nРын.цена: {:.2}\nОрдер ПОКУПКА: {:.2} {}\nИсполнено (всего): {:.6}/{:.6} ({:.1}%)",
+                    // Текст показывает детали текущего ордера и общий прогресс
+                    format!( "⏳ Хедж WS (Спот) ID:{} {} ({})\nРын.цена: {:.2}\nТек. ордер ПОКУПКА: {:.2} {}\nИсполнено (всего): {:.6}/{:.6} ({:.1}%)",
                              operation_id_cb, progress_bar, symbol, current_spot_price_cb,
                              new_limit_price_cb, status_text,
-                             cumulative_filled_qty_cb, spot_target_cb, filled_percent)
+                             cumulative_filled_qty_cb, overall_spot_target, filled_percent)
+                    // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
                 }
                 HedgeStage::Futures => {
-                    let filled_percent = if fut_target_cb > ORDER_FILL_TOLERANCE { (cumulative_filled_qty_cb / fut_target_cb) * 100.0 } else { 0.0 };
+                    // --- ИСПРАВЛЕНО: Общий прогресс ---
+                    let filled_percent = if overall_fut_target > ORDER_FILL_TOLERANCE { (cumulative_filled_qty_cb / overall_fut_target) * 100.0 } else { 0.0 };
                     let filled_blocks = (filled_percent / (100.0 / progress_bar_len as f64)).round() as usize;
                     let empty_blocks = progress_bar_len - filled_blocks;
                     let progress_bar = format!("[{}{}]", "█".repeat(filled_blocks), "░".repeat(empty_blocks));
-                    format!( "⏳ Хедж WS (Фьюч) ID:{} {} ({})\nСпот цена: {:.2}\nОрдер ПРОДАЖА: {:.2} {}\nИсполнено (всего): {:.6}/{:.6} ({:.1}%)",
+                    // Текст показывает детали текущего ордера и общий прогресс
+                    format!( "⏳ Хедж WS (Фьюч) ID:{} {} ({})\nСпот цена: {:.2}\nТек. ордер ПРОДАЖА: {:.2} {}\nИсполнено (всего): {:.6}/{:.6} ({:.1}%)",
                              operation_id_cb, progress_bar, symbol, current_spot_price_cb,
                              new_limit_price_cb, status_text,
-                             cumulative_filled_qty_cb, fut_target_cb, filled_percent)
+                             cumulative_filled_qty_cb, overall_fut_target, filled_percent)
+                    // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
                 }
             };
             let cancel_callback_data = format!("{}{}", callback_data::PREFIX_CANCEL_ACTIVE_OP, operation_id_cb);
@@ -340,6 +357,7 @@ where
             // --- ИСПРАВЛЕНО: Используем bot_message_id ---
             let _ = bot.edit_message_text(chat_id, bot_message_id, error_text.clone())
                      .reply_markup(navigation::make_main_menu_keyboard()).await;
+             // Обновляем статус в БД на Failed
              let _ = crate::storage::update_hedge_final_status(db.as_ref(), operation_id, "Failed", None, 0.0, Some(&error_text)).await;
             return Err(e);
         }
@@ -354,13 +372,22 @@ where
         info!("op_id:{}: Spawning WS hedge task execution...", operation_id);
         let run_result = hedge_task.run().await;
 
+        // Удаляем информацию об операции из running_operations ПОСЛЕ завершения задачи
+        // (кроме случая отмены через кнопку, где она удаляется раньше)
         let mut ops_guard = running_operations_clone.lock().await;
-        ops_guard.remove(&(chat_id, operation_id));
+        // Проверяем, не была ли она уже удалена (например, при отмене через кнопку)
+        if ops_guard.contains_key(&(chat_id, operation_id)) {
+            ops_guard.remove(&(chat_id, operation_id));
+            info!("op_id:{}: Removed running WS operation info after task completion.", operation_id);
+        } else {
+            info!("op_id:{}: Running WS operation info already removed (likely due to cancellation).", operation_id);
+        }
         drop(ops_guard);
 
         match run_result {
             Ok(_) => {
                 info!("op_id:{}: WS Hedge task completed successfully.", operation_id);
+                // Финальный статус уже должен быть обновлен в БД внутри hedge_task.run()
                 let final_text = format!("✅ WS Хедж ID:{} для {} завершен.", operation_id, symbol_clone_for_spawn);
                 // --- ИСПРАВЛЕНО: Используем bot_message_id ---
                 if let Err(e) = bot_clone_for_spawn.edit_message_text(chat_id, bot_message_id, final_text)
@@ -370,6 +397,7 @@ where
                 }
             }
             Err(e) => {
+                // Финальный статус (Failed или Cancelled) уже должен быть обновлен в БД внутри hedge_task.run()
                 if !e.to_string().contains("cancelled by user") {
                     error!("op_id:{}: WS Hedge task failed: {}", operation_id, e);
                 } else {
@@ -392,6 +420,8 @@ where
         operation_type: OperationType::Hedge,
         symbol: symbol.clone(),
         bot_message_id: bot_message_id.0, // Используем ID из переменной
+        // Для WS-задачи total_filled_spot_qty пока не отслеживается таким образом,
+        // т.к. прогресс идет через колбэк с другими данными. Ставим заглушку.
         total_filled_spot_qty: Arc::new(TokioMutex::new(0.0)),
     };
     running_operations.lock().await.insert((chat_id, operation_id), info);
@@ -399,3 +429,4 @@ where
 
     Ok(())
 }
+

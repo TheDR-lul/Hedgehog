@@ -8,6 +8,7 @@ pub mod hedge_flow;
 pub mod unhedge_flow;
 pub mod active_ops;
 pub mod hedge_flow_logic;
+pub mod hedge_flow_spawners;
 
 // Заглушки
 //pub mod progress;      // TODO: Реализовать

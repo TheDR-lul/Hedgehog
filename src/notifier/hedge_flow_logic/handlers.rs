@@ -1,7 +1,7 @@
 // src/notifier/hedge_flow_logic/handlers.rs
 
-use super::ui::{make_dialog_keyboard, make_hedge_confirmation_keyboard, prompt_asset_selection};
-use super::spawners::{spawn_sequential_hedge_task, spawn_ws_hedge_task};
+use crate::notifier::hedge_flow_logic::ui::{make_dialog_keyboard, make_hedge_confirmation_keyboard, prompt_asset_selection};
+use crate::notifier::hedge_flow_spawners::{spawn_sequential_hedge_task, spawn_ws_hedge_task};
 use crate::notifier::{StateStorage, UserState, RunningOperations, callback_data, navigation};
 use crate::config::{Config, HedgeStrategy};
 use crate::exchange::Exchange;
