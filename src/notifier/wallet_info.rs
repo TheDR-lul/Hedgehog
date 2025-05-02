@@ -2,7 +2,7 @@
 
 // <<< ИСПРАВЛЕНО: Убраны UserState, RunningOperations, Balance, MessageId, ChatId >>>
 // Command и callback_data используются (косвенно через Command::descriptions и в handle_menu_wallet_callback)
-use super::{Command, callback_data, StateStorage}; // Оставляем StateStorage, т.к. он в сигнатурах
+use super::{callback_data, StateStorage}; // Оставляем StateStorage, т.к. он в сигнатурах
 use crate::config::Config;
 use crate::exchange::Exchange; // Оставляем Exchange
 use crate::storage::Db;
@@ -12,7 +12,7 @@ use teloxide::prelude::*; // Оставляем для Bot, Requester и т.д.
 use teloxide::types::{
     InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery, // Убраны MessageId, ChatId
 };
-use teloxide::utils::command::BotCommands; // Используется для Command::descriptions
+ // Используется для Command::descriptions
 use tracing::{info, warn, error}; // Используются
 
 // --- Вспомогательная функция ---

@@ -1,7 +1,6 @@
 // src/exchange/mod.rs
 use anyhow::Result;
 use async_trait::async_trait;
-use crate::storage::HedgeOperation;
 // --- ИСПРАВЛЕНО: Импортируем типы отсюда ---
 use crate::exchange::types::{
     Balance, Order, OrderSide, OrderStatus, FeeRate, FuturesTickerInfo, DetailedOrderStatus,

@@ -11,8 +11,6 @@ use super::super::unhedge_task::HedgerWsUnhedgeTask;
 use super::super::state::{HedgerWsStatus, Leg, OperationType};
 // --- Используем order_management из hedge_logic (пока считаем общим) ---
 // --- И хелперы из ЭТОГО модуля (unhedge_logic) ---
-use super::super::hedge_logic::order_management::handle_cancel_confirmation as hedge_handle_cancel_confirmation;
-use super::super::hedge_logic::order_management::check_stale_orders as hedge_check_stale_orders;
 use super::helpers::{get_current_price, send_progress_update};
 
 // Главный обработчик сообщений WS для Unhedge

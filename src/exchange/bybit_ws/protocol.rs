@@ -5,15 +5,15 @@ use crate::exchange::types::{WebSocketMessage}; // Убрали OrderSide
 use anyhow::{anyhow, Result, Context}; // Добавили Context
 use futures_util::SinkExt; // Добавили SinkExt
 use hmac::{Hmac, Mac};
-use serde_json::{json, Value}; // Value используется
+use serde_json::json; // Value используется
 use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_tungstenite::tungstenite::protocol::Message; // Добавили Message
 use tracing::{debug, error, info, trace, warn};
 use super::WsSink; // Импорт типа WsSink
-use rust_decimal::prelude::ToPrimitive; // Используется хелперами
-use rust_decimal::Decimal; // Используется хелперами
-use std::str::FromStr; // Используется хелперами
+ // Используется хелперами
+ // Используется хелперами
+ // Используется хелперами
 
 type HmacSha256 = Hmac<Sha256>;
 

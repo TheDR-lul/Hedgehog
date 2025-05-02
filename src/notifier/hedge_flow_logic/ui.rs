@@ -10,7 +10,7 @@ use teloxide::prelude::*;
 use teloxide::types::{
     InlineKeyboardButton, InlineKeyboardMarkup, MessageId, ChatId,
 };
-use tracing::{info, warn, error};
+use tracing::{info, error};
 use anyhow::Result; // Добавили anyhow
 
 // Создает клавиатуру подтверждения хеджа

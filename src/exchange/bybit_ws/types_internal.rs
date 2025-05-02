@@ -1,7 +1,7 @@
 // src/exchange/bybit_ws/types_internal.rs
 
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use tracing::warn;
 use crate::exchange::types::{OrderSide, OrderStatusText, DetailedOrderStatus, OrderbookLevel}; // Импорт общих типов

@@ -9,7 +9,7 @@ use tracing::{debug, info, warn};
 use std::str::FromStr;
 
 use crate::config::Config;
-use crate::exchange::{Exchange, bybit::{SPOT_CATEGORY, LINEAR_CATEGORY}};
+use crate::exchange::Exchange;
 use crate::exchange::types::WebSocketMessage;
 use crate::hedger::HedgeProgressCallback;
 use crate::storage::{self, HedgeOperation};
@@ -17,7 +17,6 @@ use super::super::unhedge_task::HedgerWsUnhedgeTask;
 use super::super::state::{HedgerWsState, HedgerWsStatus};
 use super::super::common::calculate_auto_chunk_parameters;
 // Используем хелперы из hedge_logic для общих функций
-use super::super::hedge_logic::helpers::{get_decimals_from_step, get_step_decimal};
 
 
 #[allow(clippy::too_many_arguments)]

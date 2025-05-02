@@ -17,7 +17,7 @@ use super::super::super::hedger::{HedgeParams, HedgeProgressCallback, HedgeProgr
 use crate::models::HedgeRequest;
 use crate::storage::{Db, insert_hedge_operation};
 use crate::notifier::{RunningOperations, RunningOperationInfo, OperationType, navigation, callback_data};
-use crate::HedgeWSTask;
+use crate::hedger_ws::hedge_task::HedgerWsHedgeTask; // <-- Переименовываем
 
 pub(super) async fn spawn_sequential_hedge_task<E>(
     bot: Bot,
@@ -316,7 +316,7 @@ where
         }.boxed()
      });
 
-    let hedge_task_result = HedgeWSTask::new(
+    let hedge_task_result = HedgerWsHedgeTask::new(
         operation_id,
         request,
         cfg.clone(),
@@ -326,15 +326,15 @@ where
         ws_receiver,
     ).await;
 
-    let mut hedge_task: HedgeWSTask = match hedge_task_result {
+    let mut hedge_task: HedgerWsHedgeTask = match hedge_task_result {
         Ok(task) => {
-            info!("op_id:{}: HedgeWSTask initialized successfully.", operation_id);
+            info!("op_id:{}: HedgerWsHedgeTask initialized successfully.", operation_id);
              // --- ИСПРАВЛЕНО: Используем bot_message_id ---
              let _ = bot.edit_message_text(chat_id, bot_message_id, format!("⏳ Запуск WS стратегии для {} (ID: {})...", symbol, operation_id)).await;
             task
         },
         Err(e) => {
-            error!("op_id:{}: Failed to initialize HedgeWSTask: {}", operation_id, e);
+            error!("op_id:{}: Failed to initialize HedgerWsHedgeTask: {}", operation_id, e);
             let error_text = format!("❌ Ошибка инициализации WS стратегии: {}", e);
             // --- ИСПРАВЛЕНО: Используем bot_message_id ---
             let _ = bot.edit_message_text(chat_id, bot_message_id, error_text.clone())

@@ -5,7 +5,7 @@ use rust_decimal::prelude::*;
 use std::str::FromStr;
 use tracing::{debug, info, warn};
 
-use super::{HedgeParams, Hedger}; // Используем типы из родительского модуля
+use super::HedgeParams; // Используем типы из родительского модуля
 use crate::exchange::bybit::SPOT_CATEGORY;
 use crate::exchange::Exchange;
 use crate::models::HedgeRequest;

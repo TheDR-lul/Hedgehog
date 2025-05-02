@@ -3,12 +3,11 @@
 use anyhow::{anyhow, Context, Result};
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
-use tracing::{error, info, trace, warn}; // Добавляем нужные макросы
+use tracing::{info, trace, warn}; // Добавляем нужные макросы
 use std::str::FromStr;
 
 use crate::config::WsLimitOrderPlacementStrategy;
 use crate::exchange::types::OrderSide;
-use crate::storage;
 // --- ИЗМЕНЕНО: Ссылка на HedgerWsUnhedgeTask ---
 use super::super::unhedge_task::HedgerWsUnhedgeTask;
 use super::super::state::{HedgerWsStatus, Leg};

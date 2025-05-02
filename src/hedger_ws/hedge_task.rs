@@ -42,7 +42,6 @@ pub struct HedgerWsHedgeTask {
 
 impl HedgerWsHedgeTask {
     // Конструктор теперь вызывает функцию инициализации из подмодуля
-    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         operation_id: i64,
         request: HedgeRequest,
