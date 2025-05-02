@@ -1,12 +1,10 @@
 // src/notifier/hedge_flow_logic/spawners.rs
-
 // --- ИСПРАВЛЕНО: Убран anyhow и лишние скобки в use ---
-use anyhow::Result; // Убраны скобки
+use anyhow::{Result, anyhow};
 use std::sync::Arc;
 use std::time::Duration;
 use teloxide::prelude::*;
-use teloxide::types::{MaybeInaccessibleMessage, ChatId, InlineKeyboardButton, InlineKeyboardMarkup};
-// --- ИСПРАВЛЕНО: Убран неиспользуемый mpsc ---
+use teloxide::types::{MaybeInaccessibleMessage, ChatId, InlineKeyboardButton, InlineKeyboardMarkup, Message, MessageId};
 use tokio::sync::Mutex as TokioMutex;
 use tracing::{info, error, warn};
 use futures::future::FutureExt;
@@ -15,16 +13,13 @@ use crate::config::Config;
 use crate::exchange::Exchange;
 use crate::exchange::bybit_ws;
 use crate::exchange::types::SubscriptionType;
-// --- ИСПРАВЛЕНО: Используем относительный путь ---
 use super::super::super::hedger::{HedgeParams, HedgeProgressCallback, HedgeProgressUpdate, HedgeStage, Hedger, ORDER_FILL_TOLERANCE};
 use crate::models::HedgeRequest;
 use crate::storage::{Db, insert_hedge_operation};
 use crate::notifier::{RunningOperations, RunningOperationInfo, OperationType, navigation, callback_data};
-// --- ИСПРАВЛЕНО: Используем реэкспортированный путь и имя ---
-use crate::hedger_ws::HedgeWSTask;
-//use super::super::super::hedger_ws::hedge_task::HedgerWsHedgeTask; // Старый путь
+use crate::hedger_ws::HedgeWSTask; // Ensure this matches the actual module path where HedgeWSTask is defined
 
-pub(super) async fn spawn_sequential_hedge_task<E>(
+pub(super) async fn spawn_sequential_hedge_task<E>( 
     bot: Bot,
     exchange: Arc<E>,
     cfg: Arc<Config>,
@@ -39,7 +34,20 @@ pub(super) async fn spawn_sequential_hedge_task<E>(
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
-    let bot_message_id = waiting_message.id();
+    // --- ИСПРАВЛЕНО: Получаем ID из MaybeInaccessibleMessage ---
+    let bot_message_id = match waiting_message {
+        MaybeInaccessibleMessage::Regular(msg) => msg.id,
+        MaybeInaccessibleMessage::Inaccessible(_) => {
+            error!("Cannot start sequential hedge: initial waiting message is inaccessible.");
+            // Можно отправить новое сообщение об ошибке, если нужно
+            let _ = bot.send_message(chat_id, "❌ Ошибка: Не удалось получить доступ к исходному сообщению для обновления статуса хеджирования.")
+                       .reply_markup(navigation::make_main_menu_keyboard())
+                       .await;
+            return;
+        }
+    };
+    // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+
     let symbol_for_callback = params.symbol.clone();
     let symbol_for_task_body = params.symbol.clone();
     let symbol_for_info = params.symbol.clone();
@@ -74,7 +82,7 @@ where
          let bot_for_callback = bot_clone.clone();
          let qc = cfg_clone.quote_currency.clone();
          let symbol_cb = symbol_for_callback.clone();
-         let msg_id_cb = bot_message_id;
+         let msg_id_cb = bot_message_id; // Используем ID, полученный ранее
          let chat_id_cb = chat_id;
          let initial_sum_cb = initial_sum;
          let operation_id_cb = operation_id;
@@ -140,6 +148,7 @@ where
                      operation_id, final_spot_value_gross, cfg_task.quote_currency, symbol_for_task_body,
                      volatility_percent, spot_qty_gross, final_net_spot_balance, fut_qty_net,
                  );
+                 // --- ИСПРАВЛЕНО: Используем bot_message_id ---
                  let _ = bot.edit_message_text(chat_id, bot_message_id, success_text).reply_markup(navigation::make_main_menu_keyboard()).await;
             }
             Err(e) => {
@@ -147,6 +156,7 @@ where
                  else {
                       error!("op_id:{}: Hedge execution failed: {}", operation_id, e);
                       let error_text = format!("❌ Ошибка хеджирования ID:{}: {}", operation_id, e);
+                       // --- ИСПРАВЛЕНО: Используем bot_message_id ---
                        let _ = bot.edit_message_text(chat_id, bot_message_id, error_text)
                                   .reply_markup(navigation::make_main_menu_keyboard())
                                   .await;
@@ -157,7 +167,8 @@ where
 
     let info = RunningOperationInfo {
         handle: task.abort_handle(), operation_id, operation_type: OperationType::Hedge,
-        symbol: symbol_for_info, bot_message_id: bot_message_id.0, total_filled_spot_qty: total_filled_qty_storage,
+        symbol: symbol_for_info, bot_message_id: bot_message_id.0, // Используем ID из переменной
+        total_filled_spot_qty: total_filled_qty_storage,
     };
     running_operations.lock().await.insert((chat_id, operation_id), info);
     info!("op_id:{}: Stored running hedge info.", operation_id);
@@ -178,7 +189,19 @@ pub(super) async fn spawn_ws_hedge_task<E>(
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
-    let bot_message_id = waiting_message.id();
+    // --- ИСПРАВЛЕНО: Получаем ID из MaybeInaccessibleMessage ---
+    let bot_message_id = match waiting_message {
+        MaybeInaccessibleMessage::Regular(msg) => msg.id,
+        MaybeInaccessibleMessage::Inaccessible(_) => {
+            error!("Cannot start WS hedge: initial waiting message is inaccessible.");
+            let _ = bot.send_message(chat_id, "❌ Ошибка: Не удалось получить доступ к исходному сообщению для обновления статуса WS хеджирования.")
+                     .reply_markup(navigation::make_main_menu_keyboard()).await;
+            // В этом случае возвращаем ошибку, т.к. без ID сообщения не можем продолжить
+            return Err(anyhow!("Initial waiting message inaccessible"));
+        }
+    };
+    // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+
     let symbol = request.symbol.clone();
     let initial_sum = request.sum;
     let _volatility_percent = request.volatility * 100.0;
@@ -194,12 +217,14 @@ where
         Ok(id) => { info!("op_id:{}: Created DB record for WS hedge operation.", id); id }
         Err(e) => {
             error!("op_id:?: Failed insert WS hedge op to DB: {}", e);
+            // --- ИСПРАВЛЕНО: Используем bot_message_id ---
             let _ = bot.edit_message_text(chat_id, bot_message_id, format!("❌ DB Error: {}", e))
                      .reply_markup(navigation::make_main_menu_keyboard()).await;
             return Err(e.into());
         }
     };
 
+    // --- ИСПРАВЛЕНО: Используем bot_message_id ---
     let _ = bot.edit_message_text(chat_id, bot_message_id, format!("⏳ Подключение WebSocket для {}...", symbol)).await;
     let spot_symbol_ws = format!("{}{}", symbol, cfg.quote_currency);
     let futures_symbol_ws = format!("{}{}", symbol, cfg.quote_currency);
@@ -214,12 +239,14 @@ where
     let ws_receiver = match ws_receiver_result {
         Ok(receiver) => {
             info!("op_id:{}: WebSocket connected and subscribed successfully.", operation_id);
+            // --- ИСПРАВЛЕНО: Используем bot_message_id ---
             let _ = bot.edit_message_text(chat_id, bot_message_id, format!("⏳ Инициализация стратегии WS для {}...", symbol)).await;
             receiver
         },
         Err(e) => {
             error!("op_id:{}: Failed to connect WebSocket: {}", operation_id, e);
             let error_text = format!("❌ Ошибка подключения WebSocket: {}", e);
+             // --- ИСПРАВЛЕНО: Используем bot_message_id ---
              let _ = bot.edit_message_text(chat_id, bot_message_id, error_text.clone())
                       .reply_markup(navigation::make_main_menu_keyboard()).await;
              let _ = crate::storage::update_hedge_final_status(db.as_ref(), operation_id, "Failed", None, 0.0, Some(&error_text)).await;
@@ -231,26 +258,18 @@ where
     let cfg_clone_for_callback = cfg.clone();
     let symbol_for_callback = symbol.clone();
 
-    // --- ИСПРАВЛЕНО: Тип HedgeProgressCallback теперь использует Decimal ---
-    // Примечание: Текущая реализация HedgeProgressCallback в этом файле использует f64.
-    // Это потребует рефакторинга HedgeProgressUpdate и колбэка, чтобы использовать Decimal,
-    // если HedgerWsHedgeTask ожидает Decimal.
-    // Пока оставляем f64, предполагая, что HedgeProgressCallback универсален или будет адаптирован.
     let progress_callback: HedgeProgressCallback = Box::new(move |update: HedgeProgressUpdate| {
         let bot_cb = bot_clone_for_callback.clone();
         let _qc = cfg_clone_for_callback.quote_currency.clone();
         let symbol_cb = symbol_for_callback.clone();
-        let msg_id_cb = bot_message_id;
+        let msg_id_cb = bot_message_id; // Используем ID
         let chat_id_cb = chat_id;
         let operation_id_cb = operation_id;
-        // --- ПРЕДУПРЕЖДЕНИЕ: Конвертация Decimal -> f64 может быть неточной ---
-        // Если HedgeProgressUpdate будет использовать Decimal, эти конвертации нужно убрать.
         let spot_target_cb = if update.stage == HedgeStage::Spot { update.total_target_qty } else { 0.0 };
         let fut_target_cb = if update.stage == HedgeStage::Futures { update.total_target_qty } else { 0.0 };
         let cumulative_filled_qty_cb = update.cumulative_filled_qty;
         let current_spot_price_cb = update.current_spot_price;
         let new_limit_price_cb = update.new_limit_price;
-        // --- КОНЕЦ ПРЕДУПРЕЖДЕНИЯ ---
 
         async move {
             let symbol = symbol_cb;
@@ -292,7 +311,6 @@ where
         }.boxed()
      });
 
-    // --- ИСПРАВЛЕНО: Используем HedgeWSTask::new ---
     let hedge_task_result = HedgeWSTask::new(
         operation_id,
         request,
@@ -303,16 +321,17 @@ where
         ws_receiver,
     ).await;
 
-    // --- ИСПРАВЛЕНО: Используем HedgeWSTask ---
     let mut hedge_task: HedgeWSTask = match hedge_task_result {
         Ok(task) => {
             info!("op_id:{}: HedgeWSTask initialized successfully.", operation_id);
+             // --- ИСПРАВЛЕНО: Используем bot_message_id ---
              let _ = bot.edit_message_text(chat_id, bot_message_id, format!("⏳ Запуск WS стратегии для {} (ID: {})...", symbol, operation_id)).await;
             task
         },
         Err(e) => {
             error!("op_id:{}: Failed to initialize HedgeWSTask: {}", operation_id, e);
             let error_text = format!("❌ Ошибка инициализации WS стратегии: {}", e);
+            // --- ИСПРАВЛЕНО: Используем bot_message_id ---
             let _ = bot.edit_message_text(chat_id, bot_message_id, error_text.clone())
                      .reply_markup(navigation::make_main_menu_keyboard()).await;
              let _ = crate::storage::update_hedge_final_status(db.as_ref(), operation_id, "Failed", None, 0.0, Some(&error_text)).await;
@@ -330,34 +349,34 @@ where
 
         let mut ops_guard = running_operations_clone.lock().await;
         ops_guard.remove(&(chat_id, operation_id));
-        drop(ops_guard); // Explicitly drop the guard after removal
+        drop(ops_guard);
 
         match run_result {
             Ok(_) => {
                 info!("op_id:{}: WS Hedge task completed successfully.", operation_id);
                 let final_text = format!("✅ WS Хедж ID:{} для {} завершен.", operation_id, symbol_clone_for_spawn);
-                // Check if message is still accessible before editing
-                if !waiting_message.is_inaccessible() {
-                    if let Err(e) = bot_clone_for_spawn.edit_message_text(chat_id, bot_message_id, final_text)
+                // --- ИСПРАВЛЕНО: Используем pattern matching для MaybeInaccessibleMessage ---
+                if let MaybeInaccessibleMessage::Regular(msg) = waiting_message {
+                    if let Err(e) = bot_clone_for_spawn.edit_message_text(chat_id, msg.id, final_text)
                              .reply_markup(navigation::make_main_menu_keyboard())
                              .await {
-                        warn!("op_id:{}: Failed to edit final success message: {}", operation_id, e);
+                        warn!("op_id:{}: Failed to edit final success message: {}", operation_id, e); 
                     }
                 } else {
                     info!("op_id:{}: Original message inaccessible, cannot edit final success status.", operation_id);
                 }
+                // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
             }
             Err(e) => {
-                // Avoid logging the error twice if it's just "cancelled by user" which is handled elsewhere
                 if !e.to_string().contains("cancelled by user") {
                     error!("op_id:{}: WS Hedge task failed: {}", operation_id, e);
                 } else {
                     info!("op_id:{}: WS Hedge task cancelled by user.", operation_id);
                 }
                  let final_text = format!("❌ Ошибка WS Хедж ID:{}: {}", operation_id, e);
-                 // Check if message is still accessible before editing
-                 if !waiting_message.is_inaccessible() {
-                     if let Err(edit_err) = bot_clone_for_spawn.edit_message_text(chat_id, bot_message_id, final_text)
+                 // --- ИСПРАВЛЕНО: Используем pattern matching для MaybeInaccessibleMessage ---
+                 if let MaybeInaccessibleMessage::Regular(msg) = waiting_message {
+                     if let Err(edit_err) = bot_clone_for_spawn.edit_message_text(chat_id, msg.id, final_text)
                               .reply_markup(navigation::make_main_menu_keyboard())
                               .await {
                          warn!("op_id:{}: Failed to edit final error message: {}", operation_id, edit_err);
@@ -365,6 +384,7 @@ where
                  } else {
                      info!("op_id:{}: Original message inaccessible, cannot edit final error status.", operation_id);
                  }
+                 // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
             }
         }
     });
@@ -374,12 +394,8 @@ where
         operation_id,
         operation_type: OperationType::Hedge,
         symbol: symbol.clone(),
-        bot_message_id: bot_message_id.0,
-        // --- ПРЕДУПРЕЖДЕНИЕ: total_filled_spot_qty не обновляется для WS ---
-        // HedgerWsHedgeTask не имеет доступа к этому Arc<Mutex<f64>>.
-        // Если это поле нужно для WS, потребуется другой механизм обновления.
+        bot_message_id: bot_message_id.0, // Используем ID из переменной
         total_filled_spot_qty: Arc::new(TokioMutex::new(0.0)),
-        // --- КОНЕЦ ПРЕДУПРЕЖДЕНИЯ ---
     };
     running_operations.lock().await.insert((chat_id, operation_id), info);
     info!("op_id:{}: Stored running WS hedge info.", operation_id);
