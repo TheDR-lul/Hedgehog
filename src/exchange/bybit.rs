@@ -653,42 +653,50 @@ impl Exchange for Bybit {
             })
     }
 
-    /// Получить ставки комиссии
     async fn get_fee_rate(&self, symbol: &str, category: &str) -> Result<FeeRate> {
-        let pair = match category {
-            SPOT_CATEGORY => self.format_pair(symbol),
-            LINEAR_CATEGORY => self.format_pair(symbol),
+        let pair_to_use = match category {
+            SPOT_CATEGORY | LINEAR_CATEGORY => {
+                let uppercased_symbol = symbol.to_uppercase();
+                if uppercased_symbol.ends_with(&self.quote_currency.to_uppercase()) {
+                    uppercased_symbol // Используем символ как есть, если он уже содержит валюту котировки
+                } else {
+                    self.format_pair(symbol) // Иначе, форматируем
+                }
+            }
             _ => return Err(anyhow!("Unsupported category for fee rate: {}", category)),
         };
-        debug!(%pair, %category, "Fetching fee rate");
+        
+        debug!(pair = %pair_to_use, %category, "Fetching fee rate for pair");
 
-        let params = [("symbol", pair.as_str())];
+        // ВАЖНО: Убедитесь, что `pair_to_use` используется далее в функции,
+        // особенно при формировании параметров запроса и поиске в результате.
+        let params = [("symbol", pair_to_use.as_str())];
 
         let fee_result: FeeRateResult = self.call_api(
             Method::GET,
             "v5/account/fee-rate",
-            Some(&params),
+            Some(&params), // Используем pair_to_use
             None,
             true,
         ).await?;
 
         let entry = fee_result.list.into_iter()
-            .find(|e| e.symbol == pair)
+            .find(|e| e.symbol == pair_to_use) // Сравниваем с pair_to_use
             .ok_or_else(|| {
-                warn!("Fee rate entry not found for {} in category {}", pair, category);
-                anyhow!("Fee rate entry not found for {}/{}", category, pair)
+                warn!("Fee rate entry not found for {} in category {}", pair_to_use, category);
+                anyhow!("Fee rate entry not found for {}/{}", category, pair_to_use)
             })?;
-
+        
         let maker = entry.maker_fee_rate.parse::<f64>().map_err(|e| {
-            error!("Failed to parse maker fee rate for {}: {} (value: '{}')", pair, e, entry.maker_fee_rate);
-            anyhow!("Failed to parse maker fee rate for {}: {}", pair, e)
+            error!("Failed to parse maker fee rate for {}: {} (value: '{}')", pair_to_use, e, entry.maker_fee_rate);
+            anyhow!("Failed to parse maker fee rate for {}: {}", pair_to_use, e)
         })?;
         let taker = entry.taker_fee_rate.parse::<f64>().map_err(|e| {
-            error!("Failed to parse taker fee rate for {}: {} (value: '{}')", pair, e, entry.taker_fee_rate);
-            anyhow!("Failed to parse taker fee rate for {}: {}", pair, e)
+            error!("Failed to parse taker fee rate for {}: {} (value: '{}')", pair_to_use, e, entry.taker_fee_rate);
+            anyhow!("Failed to parse taker fee rate for {}: {}", pair_to_use, e)
         })?;
 
-        info!(%pair, %category, maker, taker, "Fee rate received");
+        info!(pair = %pair_to_use, %category, maker, taker, "Fee rate received");
         Ok(FeeRate { maker, taker })
     }
 

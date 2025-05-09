@@ -7,13 +7,14 @@ use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, MaybeI
 use tokio::sync::Mutex as TokioMutex;
 use tracing::{info, error, warn};
 use futures::future::FutureExt;
-use anyhow::{anyhow, Result}; // Убедимся, что anyhow::Result используется
+use anyhow::{anyhow, Result};
+use std::collections::HashSet; // <--- ДОБАВЛЕН ИМПОРТ
 
 use crate::webservice_hedge::hedge_task::HedgerWsHedgeTask;
 use crate::config::Config;
 use crate::exchange::Exchange;
 use crate::exchange::bybit_ws;
-use crate::exchange::types::SubscriptionType;
+use crate::exchange::types::SubscriptionType; // Убедитесь, что SubscriptionType импортирован
 use crate::hedger::{HedgeParams, HedgeProgressCallback, HedgeProgressUpdate, HedgeStage, Hedger, ORDER_FILL_TOLERANCE};
 use crate::models::HedgeRequest;
 use crate::storage::{Db, insert_hedge_operation};
@@ -182,7 +183,7 @@ pub(super) async fn spawn_ws_hedge_task<E>(
     chat_id: ChatId,
     request: HedgeRequest,
     initial_bot_message: MaybeInaccessibleMessage,
-) -> Result<()> // ИЗМЕНЕНО: anyhow::Result<()>
+) -> Result<()>
 where
     E: Exchange + Clone + Send + Sync + 'static,
 {
@@ -207,7 +208,7 @@ where
 
     let operation_id_result = insert_hedge_operation(
         db.as_ref(), chat_id.0, &symbol, &cfg.quote_currency, initial_sum,
-        volatility_fraction, 0.0, 0.0,
+        volatility_fraction, 0.0, 0.0, // target_spot_qty and target_futures_qty будут обновлены позже из HedgerWsHedgeTask
     ).await;
 
     let operation_id = match operation_id_result {
@@ -226,14 +227,19 @@ where
 
     let spot_symbol_ws = format!("{}{}", symbol, cfg.quote_currency);
     let futures_symbol_ws = format!("{}{}", symbol, cfg.quote_currency);
+    let ws_order_book_depth = cfg.ws_order_book_depth;
 
-    let subscriptions = vec![
-        SubscriptionType::Order,
-        SubscriptionType::Orderbook { symbol: spot_symbol_ws.clone(), depth: cfg.ws_order_book_depth },
-        SubscriptionType::Orderbook { symbol: futures_symbol_ws.clone(), depth: cfg.ws_order_book_depth },
-    ];
+    // --- НАЧАЛО ИЗМЕНЕНИЯ: Дедупликация подписок ---
+    let mut unique_subscriptions = HashSet::new();
+    unique_subscriptions.insert(SubscriptionType::Order);
+    unique_subscriptions.insert(SubscriptionType::Orderbook { symbol: spot_symbol_ws.clone(), depth: ws_order_book_depth });
+    unique_subscriptions.insert(SubscriptionType::Orderbook { symbol: futures_symbol_ws.clone(), depth: ws_order_book_depth });
 
-    let ws_receiver_result = bybit_ws::connect_and_subscribe((*cfg).clone(), subscriptions).await;
+    let subscriptions_vec: Vec<SubscriptionType> = unique_subscriptions.into_iter().collect();
+    // --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
+    // Используем subscriptions_vec вместо старого subscriptions
+    let ws_receiver_result = bybit_ws::connect_and_subscribe((*cfg).clone(), subscriptions_vec).await;
 
     let ws_receiver = match ws_receiver_result {
         Ok(receiver) => {
@@ -263,7 +269,7 @@ where
         let chat_id_cb = chat_id;
         let operation_id_cb = operation_id;
         let stage_cb = update.stage;
-        let current_price_cb = update.current_spot_price;
+        let current_price_cb = update.current_spot_price; // Может быть спот или фьюч в зависимости от этапа
         let limit_price_cb = update.new_limit_price;
         let is_replacement_cb = update.is_replacement;
         let filled_qty_current_order_cb = update.filled_qty;
@@ -274,18 +280,30 @@ where
         async move {
             let progress_bar_len = 10;
             let status_text_suffix = if is_replacement_cb { "(Ордер переставлен)" } else { "" };
+
             let current_order_filled_percent = if target_qty_current_order_cb > ORDER_FILL_TOLERANCE {
                 (filled_qty_current_order_cb / target_qty_current_order_cb) * 100.0
-            } else { 0.0 };
+            } else {
+                0.0 // Если цель 0, считаем прогресс 0 или 100 в зависимости от filled
+            };
+
             let overall_stage_filled_percent = if total_target_qty_stage_cb > ORDER_FILL_TOLERANCE {
                 (cumulative_filled_qty_stage_cb / total_target_qty_stage_cb) * 100.0
-            } else { 0.0 };
-            let filled_blocks_overall = (overall_stage_filled_percent / (100.0 / progress_bar_len as f64)).round() as usize;
+            } else {
+                 if cumulative_filled_qty_stage_cb > ORDER_FILL_TOLERANCE { 100.0 } else { 0.0 }
+            };
+
+            let filled_blocks_overall = (overall_stage_filled_percent.min(100.0) / (100.0 / progress_bar_len as f64)).round() as usize;
             let empty_blocks_overall = progress_bar_len - filled_blocks_overall;
             let progress_bar_overall = format!("[{}{}]", "█".repeat(filled_blocks_overall), "░".repeat(empty_blocks_overall));
+
             let stage_name = match stage_cb {
                 HedgeStage::Spot => "Спот (покупка)",
                 HedgeStage::Futures => "Фьючерс (продажа)",
+            };
+            let market_price_label = match stage_cb {
+                 HedgeStage::Spot => "Спот",
+                 HedgeStage::Futures => "Фьюч", // Или "Спот", если current_price_cb это всегда спот
             };
 
             let text = format!(
@@ -295,12 +313,13 @@ where
                   Исполнено (тек.ордер): {:.1}%\n\
                   Исполнено (всего этап): {:.6}/{:.6} ({:.1}%)",
                  stage_name, operation_id_cb, progress_bar_overall, symbol_cb,
-                 if stage_cb == HedgeStage::Spot { "Спот" } else { "Фьюч" },
-                 current_price_cb, qc_cb, target_qty_current_order_cb,
-                 limit_price_cb, status_text_suffix,
-                 if target_qty_current_order_cb > ORDER_FILL_TOLERANCE { "" } else { "(нет активного ордера)" },
-                 current_order_filled_percent, cumulative_filled_qty_stage_cb,
-                 total_target_qty_stage_cb, overall_stage_filled_percent
+                 market_price_label, current_price_cb, qc_cb,
+                 target_qty_current_order_cb, limit_price_cb, qc_cb, // Добавил qc_cb к цене ордера
+                 status_text_suffix,
+                 //if target_qty_current_order_cb > ORDER_FILL_TOLERANCE { "" } else { "(нет активного ордера)" }, // Убрал, т.к. filled/target важнее
+                 current_order_filled_percent,
+                 cumulative_filled_qty_stage_cb, total_target_qty_stage_cb,
+                 overall_stage_filled_percent
             );
 
             let cancel_callback_data = format!("{}{}", callback_data::PREFIX_CANCEL_ACTIVE_OP, operation_id_cb);
@@ -316,6 +335,7 @@ where
         }.boxed()
      });
 
+    // В request.symbol должен быть базовый символ, например "BTC"
     let hedge_task_result = HedgerWsHedgeTask::new(
         operation_id, request, cfg.clone(), db.clone(),
         exchange_rest.clone(), progress_callback, ws_receiver,
@@ -339,6 +359,7 @@ where
     let bot_clone_for_spawn = bot.clone();
     let running_operations_clone = running_operations.clone();
     let symbol_clone_for_spawn = symbol.clone();
+    let cfg_clone_for_spawn = cfg.clone(); // Клонируем конфиг для доступа к quote_currency
 
     let task_handle = tokio::spawn(async move {
         info!("op_id:{}: Spawning WS hedge task execution...", operation_id);
@@ -351,11 +372,11 @@ where
         } else {
             info!("op_id:{}: Running WS operation info already removed (likely due to cancellation).", operation_id);
         }
-        drop(ops_guard);
+        drop(ops_guard); // Освобождаем мьютекс как можно скорее
 
         match run_result {
             Ok(_) => {
-                info!("op_id:{}: WS Hedge task completed successfully (status: {:?}).", operation_id, hedge_task.state.status);
+                info!("op_id:{}: WS Hedge task completed successfully (final state: {:?}).", operation_id, hedge_task.state.status);
                 let final_spot_filled = hedge_task.state.cumulative_spot_filled_quantity.to_string();
                 let final_futures_filled = hedge_task.state.cumulative_futures_filled_quantity.to_string();
                 let final_text = format!(
@@ -363,7 +384,8 @@ where
                      Куплено спота: ~{} {}\n\
                      Продано фьючерса: ~{} {}",
                     operation_id, symbol_clone_for_spawn, final_spot_filled,
-                    symbol_clone_for_spawn, final_futures_filled, symbol_clone_for_spawn
+                    cfg_clone_for_spawn.quote_currency, // Используем quote_currency из cfg
+                    final_futures_filled, cfg_clone_for_spawn.quote_currency // Используем quote_currency из cfg
                 );
                 if let Err(e) = bot_clone_for_spawn.edit_message_text(chat_id, bot_message_id, final_text)
                          .reply_markup(navigation::make_main_menu_keyboard())
@@ -391,10 +413,10 @@ where
     let operation_info = RunningOperationInfo {
         handle: task_handle.abort_handle(),
         operation_id,
-        operation_type: OperationType::Hedge,
+        operation_type: OperationType::Hedge, // Убедитесь, что это правильный тип
         symbol: symbol.clone(),
         bot_message_id: bot_message_id.0,
-        total_filled_spot_qty: Arc::new(TokioMutex::new(0.0)),
+        total_filled_spot_qty: Arc::new(TokioMutex::new(0.0)), // Инициализируем нулем для WS-стратегии
     };
     running_operations.lock().await.insert((chat_id, operation_id), operation_info);
     info!("op_id:{}: Stored running WS hedge info.", operation_id);
