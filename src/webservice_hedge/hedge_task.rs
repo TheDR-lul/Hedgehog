@@ -105,7 +105,7 @@ impl HedgerWsHedgeTask {
                     self.state.status = HedgerWsStatus::SettingLeverage; 
                     break;
                 }
-                warn!(operation_id = self.operation_id, attempt = attempt + 1, "Waiting for initial market data (attempt {}/50)...", attempt + 1);
+                warn!(operation_id = self.operation_id, attempt = attempt + 1, "Waiting for initial market data (attempt {}/200)...", attempt + 1);
                 
                 tokio::select! {
                     biased; 
