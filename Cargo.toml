@@ -5,7 +5,7 @@ edition = "2024"
 build = "build.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.45.0", features = ["rt-multi-thread", "macros"] }
 reqwest = { version = "0.12.15", features = ["json", "stream"] }
 config = "0.15.11"
 toml = "0.8.22"
