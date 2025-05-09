@@ -11,14 +11,26 @@ use teloxide::types::{
     InlineKeyboardButton, InlineKeyboardMarkup, MessageId, ChatId,
 };
 use tracing::{info, error};
-use anyhow::Result; // Добавили anyhow
+use anyhow::Result;
 
-// Создает клавиатуру подтверждения хеджа
+// Создает клавиатуру подтверждения хеджа с выбором стратегии
 pub(super) fn make_hedge_confirmation_keyboard() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![
-            InlineKeyboardButton::callback("✅ Да, запустить", format!("{}{}", callback_data::PREFIX_HEDGE_CONFIRM, "yes")),
-            // TODO: Добавить кнопки выбора стратегии здесь!
+            InlineKeyboardButton::callback(
+                "🚀 Запустить Sequential",
+                // Используем существующий PREFIX_HEDGE_CONFIRM, но с новым payload "seq"
+                format!("{}{}", callback_data::PREFIX_HEDGE_CONFIRM, "seq")
+            ),
+        ],
+        vec![
+            InlineKeyboardButton::callback(
+                "🛰️ Запустить WebSocket",
+                // Используем существующий PREFIX_HEDGE_CONFIRM, но с новым payload "ws"
+                format!("{}{}", callback_data::PREFIX_HEDGE_CONFIRM, "ws")
+            ),
+        ],
+        vec![
             InlineKeyboardButton::callback("❌ Нет, отмена", callback_data::CANCEL_DIALOG),
         ],
     ])

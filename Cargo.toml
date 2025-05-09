@@ -29,9 +29,9 @@ rust_decimal_macros = "1.37.1"
 futures = "0.3.31"
 chrono = "0.4.41"
 winres = "0.1"
-tokio-tungstenite = "0.26.2"
 futures-util = "0.3.31"
 url = "2.5.4"
+tokio-tungstenite = { version = "0.26.2", features = ["rustls-tls-native-roots"] }
 
 [build-dependencies]
 embed-resource = "3.0.2"
