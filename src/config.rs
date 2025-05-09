@@ -71,7 +71,7 @@ fn default_hedge_strategy() -> HedgeStrategy { HedgeStrategy::Sequential }
 fn default_ws_auto_chunk_target_count() -> u32 { 15 }
 
 // --- ИЗМЕНЕНО ЗДЕСЬ ---
-fn default_ws_order_book_depth() -> u32 { 1 } // Изменено с 10 на 50 (или 1, если 50 не подойдет)
+fn default_ws_order_book_depth() -> u32 { 50 } // Изменено с 10 на 50 (или 1, если 50 не подойдет)
 
 fn default_ws_max_value_imbalance_ratio() -> Option<f64> { Some(0.05) }
 fn default_ws_reconnect_delay_secs() -> u64 { 5 }

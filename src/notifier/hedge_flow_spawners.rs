@@ -3,12 +3,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 use teloxide::prelude::*;
-use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, MaybeInaccessibleMessage, MessageId};
+// ИЗМЕНЕНО: Убран неиспользуемый MessageId
+use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, MaybeInaccessibleMessage};
 use tokio::sync::Mutex as TokioMutex;
-use tracing::{info, error, warn, debug}; // Добавил debug
-use futures::future::FutureExt;
-use anyhow::{anyhow, Result, Context}; // Добавил Context
+// ИЗМЕНЕНО: Убран неиспользуемый debug и Context (если они действительно не используются во всем файле)
+// Если debug! используется где-то еще в этой функции, оставьте его.
+use tracing::{info, error, warn}; 
+use anyhow::{anyhow, Result}; 
 use std::collections::HashSet;
+use futures_util::FutureExt;
+use tokio::sync::mpsc;
 
 use crate::webservice_hedge::hedge_task::HedgerWsHedgeTask;
 use crate::webservice_hedge::state::HedgerWsStatus;
@@ -21,8 +25,8 @@ use crate::models::HedgeRequest;
 use crate::storage::{Db, insert_hedge_operation};
 use crate::notifier::{RunningOperations, RunningOperationInfo, OperationType, navigation, callback_data};
 
+// Функция spawn_sequential_hedge_task остается без изменений в этой итерации
 pub(super) async fn spawn_sequential_hedge_task<E>(
-    // ... (код этой функции остается без изменений, как в предыдущем ответе) ...
     bot: Bot,
     exchange: Arc<E>,
     cfg: Arc<Config>,
@@ -68,7 +72,7 @@ E: Exchange + Clone + Send + Sync + 'static,
         Err(e) => {
             error!("Failed insert hedge op to DB: {}", e);
             let _ = bot.edit_message_text(chat_id, bot_message_id, format!("❌ DB Error: {}", e))
-                     .reply_markup(navigation::make_main_menu_keyboard()).await;
+                         .reply_markup(navigation::make_main_menu_keyboard()).await;
             return;
         }
     };
@@ -175,12 +179,12 @@ E: Exchange + Clone + Send + Sync + 'static,
 
 pub(super) async fn spawn_ws_hedge_task<E>(
     bot: Bot,
-    exchange_rest: Arc<E>,
+    exchange_rest: Arc<E>, 
     cfg: Arc<Config>,
     db: Arc<Db>,
     running_operations: RunningOperations,
     chat_id: ChatId,
-    request: HedgeRequest,
+    request: HedgeRequest, // request используется для инициализации HedgerWsHedgeTask
     initial_bot_message: MaybeInaccessibleMessage,
 ) -> Result<()>
 where
@@ -189,12 +193,12 @@ where
     let bot_message_id = match initial_bot_message {
         MaybeInaccessibleMessage::Regular(msg) => msg.id,
         MaybeInaccessibleMessage::Inaccessible(_) => {
-            error!("op_chat_id:{}: Cannot start WS hedge: initial waiting message is inaccessible. Sending new status message.", chat_id);
-            if let Ok(new_msg) = bot.send_message(chat_id, "⚠️ Ошибка: Исходное сообщение для обновления статуса WS хеджирования недоступно. Хеджирование запускается...").await {
+            error!("op_chat_id:{}: Cannot start WS hedge: initial waiting message is inaccessible.", chat_id);
+            if let Ok(new_msg) = bot.send_message(chat_id, "⚠️ Исходное сообщение для обновления статуса WS хеджирования недоступно. Запускаю WS хеджирование...").await {
                 new_msg.id
             } else {
-                error!("op_chat_id:{}: Failed to send new status message after initial message became inaccessible for WS hedge.", chat_id);
-                return Err(anyhow!("Initial bot message inaccessible and failed to send new one for WS hedge."));
+                error!("op_chat_id:{}: Failed to send new status message for WS hedge.", chat_id);
+                return Err(anyhow!("Failed to secure a message ID for WS hedge status updates."));
             }
         }
     };
@@ -207,154 +211,82 @@ where
 
     let operation_id = match insert_hedge_operation(
         db.as_ref(), chat_id.0, &symbol, &cfg.quote_currency, initial_sum,
-        volatility_fraction, 0.0, 0.0,
+        volatility_fraction, 0.0, 0.0, 
     ).await {
         Ok(id) => { info!("op_id:{}: Created DB record for WS hedge operation.", id); id }
         Err(e) => {
             error!("op_id:?: Failed insert WS hedge op to DB: {}", e);
             let _ = bot.edit_message_text(chat_id, bot_message_id, format!("❌ DB Error: {}", e))
-                     .reply_markup(navigation::make_main_menu_keyboard()).await;
+                         .reply_markup(navigation::make_main_menu_keyboard()).await;
             return Err(e.into());
         }
     };
 
     let _ = bot.edit_message_text(chat_id, bot_message_id, format!("⏳ Подключение WebSocket для {} (ID: {})...", symbol, operation_id))
-               .reply_markup(InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new()))
+               .reply_markup(InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new())) 
                .await;
 
-    let spot_symbol_ws = format!("{}{}", symbol, cfg.quote_currency);
-    let futures_symbol_ws = format!("{}{}", symbol, cfg.quote_currency);
-    let ws_order_book_depth = cfg.ws_order_book_depth; // Например, 1 или 50
-
-    let mut unique_subscriptions = HashSet::new();
-    let order_sub = SubscriptionType::Order;
-    let spot_orderbook_sub = SubscriptionType::Orderbook { symbol: spot_symbol_ws.clone(), depth: ws_order_book_depth };
-    let futures_orderbook_sub = SubscriptionType::Orderbook { symbol: futures_symbol_ws.clone(), depth: ws_order_book_depth };
-    
-    unique_subscriptions.insert(order_sub.clone());
-    unique_subscriptions.insert(spot_orderbook_sub.clone());
-    unique_subscriptions.insert(futures_orderbook_sub.clone());
-    
-    let subscriptions_to_connect: Vec<SubscriptionType> = unique_subscriptions.into_iter().collect();
-    
-    // Копируем для проверки ответа
-    let mut expected_successful_subscriptions = HashSet::new();
-    if subscriptions_to_connect.contains(&order_sub) { expected_successful_subscriptions.insert("order".to_string()); }
-    if subscriptions_to_connect.contains(&spot_orderbook_sub) { expected_successful_subscriptions.insert(format!("orderbook.{}.{}", ws_order_book_depth, spot_symbol_ws)); }
-    if subscriptions_to_connect.contains(&futures_orderbook_sub) && spot_symbol_ws != futures_symbol_ws { // Избегаем дублирования если символы одинаковые
-        expected_successful_subscriptions.insert(format!("orderbook.{}.{}", ws_order_book_depth, futures_symbol_ws));
-    }
-
-
-    let mut ws_receiver = match bybit_ws::connect_and_subscribe((*cfg).clone(), subscriptions_to_connect.clone()).await {
+    let private_subscriptions = vec![SubscriptionType::Order];
+    let mut private_ws_receiver = match bybit_ws::connect_and_subscribe((*cfg).clone(), private_subscriptions).await {
         Ok(receiver) => {
-            info!("op_id:{}: WebSocket connected and initial subscription requests sent.", operation_id);
+            info!("op_id:{}: Private WebSocket connected for 'order' topic.", operation_id);
             receiver
         },
         Err(e) => {
-            error!("op_id:{}: Failed to connect WebSocket: {}", operation_id, e);
-            let error_text = format!("❌ Ошибка подключения WebSocket: {}", e);
-             let _ = bot.edit_message_text(chat_id, bot_message_id, error_text.clone())
-                      .reply_markup(navigation::make_main_menu_keyboard()).await;
-             let _ = crate::storage::update_hedge_final_status(db.as_ref(), operation_id, "Failed", None, 0.0, Some(&error_text)).await;
-             return Err(e);
+            error!("op_id:{}: Failed to connect Private WebSocket: {}", operation_id, e);
+            let err_text = format!("❌ Ошибка подключения приватного WebSocket: {}", e);
+            let _ = bot.edit_message_text(chat_id, bot_message_id, err_text.clone()).reply_markup(navigation::make_main_menu_keyboard()).await;
+            let _ = crate::storage::update_hedge_final_status(db.as_ref(), operation_id, "Failed", None, 0.0, Some(&err_text)).await;
+            return Err(e);
         }
     };
+    if !wait_for_specific_subscriptions(operation_id, &mut private_ws_receiver, &["order".to_string()], Duration::from_secs(10)).await {
+        let err_text = "❌ Не удалось подтвердить подписку 'order' на приватном WebSocket.".to_string();
+        error!("op_id:{}: {}", operation_id, err_text);
+        let _ = bot.edit_message_text(chat_id, bot_message_id, err_text.clone()).reply_markup(navigation::make_main_menu_keyboard()).await;
+        let _ = crate::storage::update_hedge_final_status(db.as_ref(), operation_id, "Failed", None, 0.0, Some(&err_text)).await;
+        return Err(anyhow!(err_text));
+    }
+    info!("op_id:{}: 'order' subscription confirmed on private WebSocket.", operation_id);
+
+    let spot_symbol_ws = format!("{}{}", symbol, cfg.quote_currency);
+    let ws_order_book_depth = cfg.ws_order_book_depth;
+    let orderbook_subscriptions = vec![
+        SubscriptionType::Orderbook { symbol: spot_symbol_ws.clone(), depth: ws_order_book_depth }
+    ];
     
-    // --- Ожидание подтверждения подписок ---
-    let subscription_timeout = Duration::from_secs(10);
-    let mut received_successful_subscriptions = HashSet::new();
-    let mut received_failed_subscriptions = HashSet::new();
-    let mut all_expected_confirmed = false;
+    let public_stream_category = "spot"; 
 
-    info!("op_id:{}: Waiting for subscription confirmations... Expected: {:?}", operation_id, expected_successful_subscriptions);
-
-    match tokio::time::timeout(subscription_timeout, async {
-        while let Some(msg_result) = ws_receiver.recv().await {
-            match msg_result {
-                Ok(WebSocketMessage::SubscriptionResponse { success, topic }) => {
-                    info!("op_id:{}: Received subscription response: success={}, topic={}", operation_id, success, topic);
-                    if success {
-                        received_successful_subscriptions.insert(topic.clone());
-                    } else {
-                        received_failed_subscriptions.insert(topic.clone());
-                    }
-                    // Проверяем, все ли ожидаемые подписки подтверждены (успешно или нет)
-                    // Это упрощенная проверка, т.к. Bybit может прислать одно общее сообщение об успехе/неудаче батча
-                    if expected_successful_subscriptions.iter().all(|expected_topic| {
-                        received_successful_subscriptions.contains(expected_topic) || received_failed_subscriptions.contains(expected_topic)
-                    }) {
-                        break; // Все ожидаемые ответы получены
-                    }
-                }
-                Ok(WebSocketMessage::Error(e)) => { // Обработка ошибок, которые могут прийти до HedgerWsHedgeTask
-                    error!("op_id:{}: WebSocket error during subscription wait: {}", operation_id, e);
-                    return Err(anyhow!("WS error during subscription: {}", e));
-                }
-                Err(e) => {
-                    error!("op_id:{}: MPSC channel error during subscription wait: {}", operation_id, e);
-                    return Err(anyhow!("MPSC error during subscription: {}", e));
-                }
-                _ => {} // Игнорируем другие типы сообщений на этом этапе
-            }
+    let mut public_ws_receiver = match bybit_ws::connect_public_stream((*cfg).clone(), public_stream_category, orderbook_subscriptions).await {
+        Ok(receiver) => {
+            info!("op_id:{}: Public WebSocket connected for 'orderbook' topic (category: {}).", operation_id, public_stream_category);
+            receiver
+        },
+        Err(e) => {
+            error!("op_id:{}: Failed to connect Public WebSocket (category: {}): {}", operation_id, public_stream_category, e);
+            let err_text = format!("❌ Ошибка подключения публичного WebSocket ({}): {}", public_stream_category, e);
+            let _ = bot.edit_message_text(chat_id, bot_message_id, err_text.clone()).reply_markup(navigation::make_main_menu_keyboard()).await;
+            let _ = crate::storage::update_hedge_final_status(db.as_ref(), operation_id, "Failed", None, 0.0, Some(&err_text)).await;
+            return Err(e);
         }
-        Ok(())
-    }).await {
-        Ok(Ok(_)) => { // Таймаут не сработал, цикл завершился
-            // Проверяем, все ли КРИТИЧНЫЕ подписки успешны
-            let orderbook_topic_spot = format!("orderbook.{}.{}", ws_order_book_depth, spot_symbol_ws);
-            let orderbook_topic_futures = format!("orderbook.{}.{}", ws_order_book_depth, futures_symbol_ws);
-
-            let order_subscribed = received_successful_subscriptions.contains("order");
-            let spot_orderbook_subscribed = received_successful_subscriptions.contains(&orderbook_topic_spot);
-            // Фьючерсный стакан нужен, только если он отличается от спотового
-            let futures_orderbook_subscribed = if spot_symbol_ws == futures_symbol_ws {
-                spot_orderbook_subscribed // Если символы те же, считаем, что уже подписаны
-            } else {
-                received_successful_subscriptions.contains(&orderbook_topic_futures)
-            };
-
-            if order_subscribed && spot_orderbook_subscribed && futures_orderbook_subscribed {
-                all_expected_confirmed = true;
-                info!("op_id:{}: All critical subscriptions confirmed successfully.", operation_id);
-            } else {
-                let mut missing_subs = Vec::new();
-                if !order_subscribed { missing_subs.push("order".to_string());}
-                if !spot_orderbook_subscribed { missing_subs.push(orderbook_topic_spot.clone());}
-                if spot_symbol_ws != futures_symbol_ws && !futures_orderbook_subscribed { missing_subs.push(orderbook_topic_futures.clone()); }
-                
-                error!("op_id:{}: Critical subscriptions failed or not confirmed: {:?}. Successful: {:?}, Failed in response: {:?}", 
-                    operation_id, missing_subs, received_successful_subscriptions, received_failed_subscriptions);
-            }
-        }
-        Ok(Err(e)) => { // Ошибка из цикла ожидания
-             error!("op_id:{}: Error while waiting for subscription confirmations: {}", operation_id, e);
-        }
-        Err(_) => { // Таймаут
-            error!("op_id:{}: Timed out waiting for subscription confirmations. Received: {:?}, Expected: {:?}", 
-                operation_id, received_successful_subscriptions, expected_successful_subscriptions);
-        }
+    };
+    let expected_orderbook_topic = format!("orderbook.{}.{}", ws_order_book_depth, spot_symbol_ws);
+    if !wait_for_specific_subscriptions(operation_id, &mut public_ws_receiver, &[expected_orderbook_topic.clone()], Duration::from_secs(10)).await {
+        let err_text = format!("❌ Не удалось подтвердить подписку '{}' на публичном WebSocket.", expected_orderbook_topic);
+        error!("op_id:{}: {}", operation_id, err_text);
+        let _ = bot.edit_message_text(chat_id, bot_message_id, err_text.clone()).reply_markup(navigation::make_main_menu_keyboard()).await;
+        let _ = crate::storage::update_hedge_final_status(db.as_ref(), operation_id, "Failed", None, 0.0, Some(&err_text)).await;
+        return Err(anyhow!(err_text));
     }
-
-    if !all_expected_confirmed {
-        let error_text = "❌ Ошибка: Не удалось подтвердить все необходимые WebSocket подписки.".to_string();
-        error!("op_id:{}: Final check: Not all expected subscriptions confirmed. Aborting WS hedge task spawn.", operation_id);
-        let _ = bot.edit_message_text(chat_id, bot_message_id, error_text.clone())
-                    .reply_markup(navigation::make_main_menu_keyboard()).await;
-        let _ = crate::storage::update_hedge_final_status(db.as_ref(), operation_id, "Failed", None, 0.0, Some(&error_text)).await;
-        return Err(anyhow!(error_text));
-    }
+    info!("op_id:{}: '{}' subscription confirmed on public WebSocket.", operation_id, expected_orderbook_topic);
 
     let _ = bot.edit_message_text(chat_id, bot_message_id, format!("⏳ Инициализация WS стратегии для {} (ID: {})...", symbol, operation_id)).await;
-    // --- Конец ожидания подтверждения подписок ---
-
-
+    
     let bot_clone_for_callback = bot.clone();
     let cfg_for_callback = cfg.clone();
     let symbol_for_callback = symbol.clone();
 
     let progress_callback: HedgeProgressCallback = Box::new(move |update: HedgeProgressUpdate| {
-        // ... (логика колбэка остается без изменений) ...
         let bot_cb = bot_clone_for_callback.clone();
         let qc_cb = cfg_for_callback.quote_currency.clone();
         let symbol_cb = symbol_for_callback.clone();
@@ -427,18 +359,26 @@ where
         }.boxed()
      });
 
+    // ИЗМЕНЕН ВЫЗОВ HedgerWsHedgeTask::new
     let mut hedge_task = match HedgerWsHedgeTask::new(
-        operation_id, request, cfg.clone(), db.clone(),
-        exchange_rest.clone(), progress_callback, ws_receiver, // Передаем обновленный ws_receiver
+        operation_id,
+        request, // request здесь уже есть и имеет тип HedgeRequest
+        cfg.clone(),
+        db.clone(),
+        exchange_rest.clone(), 
+        progress_callback,
+        private_ws_receiver,   // <--- Передаем приватный приемник
+        public_ws_receiver,    // <--- Передаем публичный приемник
     ).await {
         Ok(task) => {
-            info!("op_id:{}: HedgerWsHedgeTask initialized successfully.", operation_id);
+            info!("op_id:{}: HedgerWsHedgeTask initialized successfully with dual WebSocket streams.", operation_id);
             task
         },
         Err(e) => {
-            let error_text = format!("❌ Ошибка инициализации WS стратегии: {}", e);
+            let error_text = format!("❌ Ошибка инициализации WS стратегии (dual stream): {}", e);
             let _ = bot.edit_message_text(chat_id, bot_message_id, error_text.clone())
-                     .reply_markup(navigation::make_main_menu_keyboard()).await;
+                         .reply_markup(navigation::make_main_menu_keyboard()).await;
+            // Статус в БД уже должен быть обновлен внутри HedgerWsHedgeTask::new при ошибке
             return Err(e);
         }
     };
@@ -449,41 +389,8 @@ where
     let cfg_clone_for_spawn = cfg.clone();
 
     let task_handle = tokio::spawn(async move {
-        info!("op_id:{}: Spawning WS hedge task execution...", operation_id);
+        info!("op_id:{}: Spawning WS hedge task execution (dual stream)...", operation_id);
         
-        if matches!(hedge_task.state.status, HedgerWsStatus::StartingChunk(1)) {
-            let mut price_data_ready = false;
-            for attempt in 0..15 {
-                if hedge_task.state.spot_market_data.best_bid_price.is_some() && 
-                   hedge_task.state.spot_market_data.best_ask_price.is_some() &&
-                   hedge_task.state.futures_market_data.best_bid_price.is_some() &&
-                   hedge_task.state.futures_market_data.best_ask_price.is_some()
-                {
-                    price_data_ready = true;
-                    info!(operation_id = hedge_task.operation_id, "Market data for initial chunk is ready.");
-                    break;
-                }
-                warn!(operation_id = hedge_task.operation_id, attempt = attempt + 1, "Waiting for initial market data before starting chunk 1...");
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-
-            if !price_data_ready {
-                let error_msg = "Failed to get initial market data for chunk calculation after several attempts.";
-                error!(operation_id = hedge_task.operation_id, "{}", error_msg);
-                hedge_task.state.status = HedgerWsStatus::Failed(error_msg.to_string());
-                crate::webservice_hedge::hedge_logic::helpers::update_final_db_status(&hedge_task).await;
-
-                let final_text = format!("❌ Ошибка WS Хедж ID:{}: {}", hedge_task.operation_id, error_msg);
-                if let Err(edit_err) = bot_clone_for_spawn.edit_message_text(chat_id, bot_message_id, final_text)
-                         .reply_markup(navigation::make_main_menu_keyboard())
-                         .await {
-                    warn!("op_id:{}: Failed to edit final error message: {}", hedge_task.operation_id, edit_err);
-                }
-                running_operations_clone.lock().await.remove(&(chat_id, hedge_task.operation_id));
-                return;
-            }
-        }
-
         let run_result = hedge_task.run().await;
 
         let mut ops_guard = running_operations_clone.lock().await;
@@ -493,7 +400,7 @@ where
         } else {
             info!("op_id:{}: Running WS operation info already removed (likely due to cancellation).", operation_id);
         }
-        drop(ops_guard);
+        drop(ops_guard); 
 
         match run_result {
             Ok(_) => {
@@ -534,13 +441,71 @@ where
     let operation_info = RunningOperationInfo {
         handle: task_handle.abort_handle(),
         operation_id,
-        operation_type: OperationType::Hedge,
+        operation_type: OperationType::Hedge, 
         symbol: symbol.clone(),
         bot_message_id: bot_message_id.0,
-        total_filled_spot_qty: Arc::new(TokioMutex::new(0.0)),
+        total_filled_spot_qty: Arc::new(TokioMutex::new(0.0)), 
     };
     running_operations.lock().await.insert((chat_id, operation_id), operation_info);
-    info!("op_id:{}: Stored running WS hedge info.", operation_id);
+    info!("op_id:{}: Stored running WS hedge info (dual stream).", operation_id);
 
     Ok(())
+}
+
+// Вспомогательная функция для ожидания подтверждений подписок
+async fn wait_for_specific_subscriptions(
+    operation_id: i64,
+    ws_receiver: &mut mpsc::Receiver<Result<WebSocketMessage>>,
+    expected_topics: &[String], // Принимаем срез строк
+    timeout_duration: Duration,
+) -> bool {
+    let mut confirmed_topics = HashSet::new();
+    // Создаем HashSet из ожидаемых топиков для быстрой проверки
+    let expected_set: HashSet<_> = expected_topics.iter().map(|s| s.as_str()).collect();
+
+    info!("op_id:{}: Waiting for specific subscriptions: {:?}...", operation_id, expected_topics);
+
+    match tokio::time::timeout(timeout_duration, async {
+        // Цикл продолжается, пока не будут подтверждены все ожидаемые топики
+        while confirmed_topics.len() < expected_topics.len() {
+            match ws_receiver.recv().await {
+                Some(Ok(WebSocketMessage::SubscriptionResponse { success, topic })) => {
+                    info!("op_id:{}: Received subscription response: success={}, topic={}", operation_id, success, topic);
+                    // Проверяем, есть ли этот топик в списке ожидаемых
+                    if expected_set.contains(topic.as_str()) {
+                        if success {
+                            confirmed_topics.insert(topic);
+                        } else {
+                            error!("op_id:{}: Failed subscription for expected topic: {}", operation_id, topic);
+                            return false; // Критическая ошибка, если ожидаемая подписка не удалась
+                        }
+                    } else {
+                        // Получен ответ на подписку, которой нет в списке ожидаемых для этого стрима
+                        warn!("op_id:{}: Received unexpected subscription response for topic: {} (success: {})", operation_id, topic, success);
+                    }
+                }
+                Some(Ok(WebSocketMessage::Error(e))) => {
+                    error!("op_id:{}: WebSocket error during specific subscription wait: {}", operation_id, e);
+                    return false;
+                }
+                Some(Err(e)) => {
+                    error!("op_id:{}: MPSC channel error during specific subscription wait: {}", operation_id, e);
+                    return false;
+                }
+                None => { 
+                    error!("op_id:{}: MPSC channel closed during specific subscription wait.", operation_id);
+                    return false;
+                }
+                _ => {} // Игнорируем другие типы сообщений (Pong, Connected, Disconnected, etc.)
+            }
+        }
+        true // Все ожидаемые подписки подтверждены
+    }).await {
+        Ok(success) => success, 
+        Err(_) => { 
+            error!("op_id:{}: Timed out waiting for specific subscriptions. Confirmed: {:?}, Expected: {:?}", 
+                operation_id, confirmed_topics, expected_topics);
+            false
+        }
+    }
 }
