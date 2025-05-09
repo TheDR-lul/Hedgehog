@@ -2,7 +2,7 @@
 
 //! Определение схемы базы данных SQLite с использованием sqlx.
 
-use sqlx::sqlite::{SqlitePool, SqliteRow};
+use sqlx::sqlite::SqlitePool;
 use sqlx::{Error, FromRow, Row};
 use tracing::info;
 

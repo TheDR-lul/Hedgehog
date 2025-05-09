@@ -1,26 +1,23 @@
-# Переименуйте в Config.toml и заполните своими значениями
+# ==== Bybit ====
+bybit_api_key    = ""
+bybit_api_secret = ""
 
-# Bybit API
-bybit_api_key    = "YOUR_BYBIT_API_KEY"
-bybit_api_secret = "YOUR_BYBIT_API_SECRET"
-
-# Путь к локальной базе данных SQLite
+# ==== База данных ====
+# Файл будет создан рядом с исполняемым .exe
 sqlite_path      = "hedgehog.db"
+# Если хотите держать в подпапке, пишите "data/hedgehog.db"
+# (каталог data/ создастся автоматически при первом запуске)
 
-# Telegram‑бот
-telegram_token   = "YOUR_TELEGRAM_BOT_TOKEN"
+# ==== Telegram ====
+telegram_token   = ""
 
-# Дефолтные параметры стратегии
-default_volatility = 0.6    # 60%
-offset_points      = 10     # Понижение/повышение цены лимитки
-# 1) Тестнет (официальный sandbox):
+# ==== Параметры стратегии по умолчанию ====
 use_testnet = true
 
-# 2) Или ваш региональный прод‑домен:
-#bybit_base_url = "https://api.bybit.nl"    # Нидерланды
-#bybit_base_url = "https://api.byhkbit.com" # Гонконг
-#bybit_base_url = "https://api.bybit-tr.com" # Турция
-#bybit_base_url = "https://api.bybit.kz"    # Казахстан
-
-# 3) Для обычного продакшна (API.bybit.com)
-# Если neither use_testnet nor bybit_base_url set — будет https://api.bybit.com
+# Стратегия
+quote_currency = "USDT"
+default_volatility = 0.6 # 60 %
+offset_points      = 10    # +/- 10 пунктов для лимитки Пока не используется
+slippage = 0.0 # 0.0%
+max_wait_secs = 30 # 30 секунд
+max_allowed_leverage = 10 # 10x

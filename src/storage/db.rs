@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::{Error as SqlxError, Row}; // Переименовываем Error и добавляем Row
 use std::str::FromStr;
-use tracing::{error, info, warn};
+use tracing::info;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // Переопределяем Db как SqlitePool для простоты
@@ -282,21 +282,71 @@ pub async fn get_completed_unhedged_ops_for_symbol(
 pub async fn mark_hedge_as_unhedged(
     db: &Db,
     hedge_operation_id: i64,
-    unhedge_operation_id: i64, // ID записи в таблице unhedge_operations (если она есть)
+    // unhedge_operation_id: i64, // Больше не принимаем ID операции расхеджирования
 ) -> Result<(), SqlxError> {
-    // Используем query!
+    let ts = current_timestamp(); // Получаем текущее время
     sqlx::query!(
         r#"
         UPDATE hedge_operations
-        SET unhedged_op_id = ?
+        SET unhedged_op_id = ? -- Устанавливаем timestamp как маркер
         WHERE id = ? AND status = 'Completed' AND unhedged_op_id IS NULL
         "#,
-        unhedge_operation_id,
+        ts, // Передаем timestamp
         hedge_operation_id
     )
     .execute(db)
     .await?;
+    info!("Marked hedge operation {} as unhedged with timestamp {}", hedge_operation_id, ts); // Добавлен лог
     Ok(())
 }
 
 // TODO: Добавить функции для работы с unhedge_operations, если нужно
+pub async fn get_all_completed_unhedged_ops(
+    db: &Db,
+    chat_id: i64,
+) -> Result<Vec<HedgeOperation>, SqlxError> {
+    // Используем sqlx::query() и ручной маппинг, как в других функциях этого файла
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id, chat_id, base_symbol, quote_currency, initial_sum, volatility,
+            target_spot_qty, target_futures_qty, start_timestamp, status,
+            spot_order_id, spot_filled_qty, futures_order_id, futures_filled_qty,
+            end_timestamp, error_message, unhedged_op_id
+        FROM hedge_operations
+        WHERE chat_id = ?         -- Фильтр по пользователю
+          AND status = 'Completed'  -- Только завершенные
+          AND unhedged_op_id IS NULL -- Только те, что еще не расхеджированы
+        ORDER BY end_timestamp DESC -- Сначала более новые
+        "#,
+    )
+    .bind(chat_id)
+    .fetch_all(db)
+    .await?;
+
+    // Ручной маппинг строк в Vec<HedgeOperation>
+    let mut operations = Vec::with_capacity(rows.len());
+    for row in rows {
+        let operation = HedgeOperation {
+            id: row.try_get("id")?,
+            chat_id: row.try_get("chat_id")?,
+            base_symbol: row.try_get("base_symbol")?,
+            quote_currency: row.try_get("quote_currency")?,
+            initial_sum: row.try_get("initial_sum")?,
+            volatility: row.try_get("volatility")?,
+            target_spot_qty: row.try_get("target_spot_qty")?,
+            target_futures_qty: row.try_get("target_futures_qty")?,
+            start_timestamp: row.try_get("start_timestamp")?,
+            status: row.try_get("status")?,
+            spot_order_id: row.try_get("spot_order_id")?,
+            spot_filled_qty: row.try_get("spot_filled_qty")?,
+            futures_order_id: row.try_get("futures_order_id")?,
+            futures_filled_qty: row.try_get("futures_filled_qty")?,
+            end_timestamp: row.try_get("end_timestamp")?,
+            error_message: row.try_get("error_message")?,
+            unhedged_op_id: row.try_get("unhedged_op_id")?,
+        };
+        operations.push(operation);
+    }
+    Ok(operations)
+}

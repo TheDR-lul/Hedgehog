@@ -1,86 +1,54 @@
 // src/exchange/mod.rs
-
-pub mod types;
-pub mod bybit;
-
-pub use bybit::Bybit;
-// Импортируем типы из types и структуры информации об инструментах из bybit
-pub use types::{Balance, OrderSide, Order, OrderStatus};
-pub use bybit::{SpotInstrumentInfo, LinearInstrumentInfo}; // Добавили импорт для Info
-
 use anyhow::Result;
 use async_trait::async_trait;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct FeeRate {
-    pub maker: f64,
-    pub taker: f64,
+// --- ИСПРАВЛЕНО: Импортируем типы отсюда ---
+use crate::exchange::types::{
+    Balance, Order, OrderSide, OrderStatus, FeeRate, FuturesTickerInfo, DetailedOrderStatus,
+    SpotInstrumentInfo, LinearInstrumentInfo // Добавили InstrumentInfo
+};
+// --- УДАЛЕНО: use crate::hedger::params::{SpotInstrumentInfo, LinearInstrumentInfo}; ---
+#[async_trait]
+pub trait Exchange: Send + Sync {
+    async fn check_connection(&mut self) -> Result<()>;
+    async fn get_balance(&self, coin: &str) -> Result<Balance>;
+    async fn get_all_balances(&self) -> Result<Vec<(String, Balance)>>;
+    // --- ИСПРАВЛЕНО: Используем типы из types.rs ---
+    async fn get_spot_instrument_info(&self, symbol: &str) -> Result<SpotInstrumentInfo>;
+    async fn get_linear_instrument_info(&self, symbol: &str) -> Result<LinearInstrumentInfo>;
+    async fn get_fee_rate(&self, symbol: &str, category: &str) -> Result<FeeRate>;
+    async fn place_limit_order(&self, symbol: &str, side: OrderSide, qty: f64, price: f64) -> Result<Order>;
+    async fn place_futures_market_order(&self, symbol: &str, side: OrderSide, qty: f64) -> Result<Order>;
+    async fn place_futures_limit_order(&self, symbol: &str, side: OrderSide, qty: f64, price: f64) -> Result<Order>;
+    async fn place_spot_market_order(&self, symbol: &str, side: OrderSide, qty: f64) -> Result<Order>;
+    async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<()>; // Deprecated
+    async fn get_spot_price(&self, symbol: &str) -> Result<f64>;
+    async fn get_order_status(&self, symbol: &str, order_id: &str) -> Result<OrderStatus>; // Deprecated
+    async fn get_mmr(&self, symbol: &str) -> Result<f64>;
+    async fn get_funding_rate(&self, symbol: &str, days: u16) -> Result<f64>;
+    async fn get_current_leverage(&self, symbol: &str) -> Result<f64>;
+    async fn set_leverage(&self, symbol: &str, leverage: f64) -> Result<()>;
+    async fn cancel_spot_order(&self, symbol: &str, order_id: &str) -> Result<()>;
+    async fn cancel_futures_order(&self, symbol: &str, order_id: &str) -> Result<()>;
+    async fn get_spot_order_status(&self, symbol: &str, order_id: &str) -> Result<OrderStatus>;
+    async fn get_futures_order_status(&self, symbol: &str, order_id: &str) -> Result<OrderStatus>;
+    async fn get_spot_order_execution_details(&self, symbol: &str, order_id: &str) -> Result<DetailedOrderStatus>;
+    async fn get_futures_ticker(&self, symbol: &str) -> Result<FuturesTickerInfo>;
+    async fn get_market_price(&self, symbol: &str, is_spot: bool) -> Result<f64>;
+    async fn get_spot_price_fallback(&self, futures_symbol: &str) -> Result<f64>;
 }
 
+pub mod bybit;
+pub mod types;
+pub mod bybit_ws; // <-- Изменяем объявление на модуль
 
-#[async_trait]
-pub trait Exchange {
-    /// Проверить подключение к бирже
-    async fn check_connection(&mut self) -> Result<()>;
-
-    /// Баланс по символу (например, "USDT")
-    async fn get_balance(&self, symbol: &str) -> Result<Balance>;
-
-    /// Все балансы
-    async fn get_all_balances(&self) -> Result<Vec<(String, Balance)>>;
-
-    /// Получить информацию об инструменте СПОТ (для точности цены/кол-ва)
-    async fn get_spot_instrument_info(&self, symbol: &str) -> Result<SpotInstrumentInfo>;
-
-    /// Получить информацию об инструменте ЛИНЕЙНОМ (для точности кол-ва)
-    async fn get_linear_instrument_info(&self, symbol: &str) -> Result<LinearInstrumentInfo>;
-
-    /// Поддерживающая маржа (MMR)
-    async fn get_mmr(&self, symbol: &str) -> Result<f64>;
-
-    /// Средняя ставка финансирования за N дней
-    async fn get_funding_rate(&self, symbol: &str, days: u16) -> Result<f64>;
-
-    /// Получить ставки комиссии для символа (maker, taker)
-    async fn get_fee_rate(&self, symbol: &str, category: &str) -> Result<FeeRate>;
-
-    /// Разместить лимитный ордер
-    async fn place_limit_order(
-        &self,
-        symbol: &str, // Base symbol (e.g., BTC)
-        side: OrderSide,
-        qty: f64,
-        price: f64,
-    ) -> Result<Order>;
-
-    /// Разместить рыночный ордер на ФЬЮЧЕРСАХ
-    async fn place_futures_market_order(
-        &self,
-        symbol: &str, // Full symbol (e.g., BTCUSDT)
-        side: OrderSide,
-        qty: f64,
-    ) -> Result<Order>;
-
-    /// Разместить рыночный ордер на СПОТЕ
-    async fn place_spot_market_order(
-        &self,
-        symbol: &str, // Base symbol (e.g., BTC)
-        side: OrderSide,
-        qty: f64,
-    ) -> Result<Order>;
-
-    /// Отменить ордер
-    async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<()>;
-
-    /// Получить текущую спотовую цену
-    async fn get_spot_price(&self, symbol: &str) -> Result<f64>;
-
-    /// Получить статус ордера (сколько исполнено и сколько осталось)
-    async fn get_order_status(&self, symbol: &str, order_id: &str) -> Result<OrderStatus>;
-
-    /// Получить текущее кредитное плечо для символа (фьючерсы linear)
-    async fn get_current_leverage(&self, symbol: &str) -> Result<f64>;
-
-    /// Установить кредитное плечо для символа (фьючерсы linear)
-    async fn set_leverage(&self, symbol: &str, leverage: f64) -> Result<()>;
+// Функция для создания экземпляра биржи
+pub async fn create_exchange(
+    api_key: &str,
+    api_secret: &str,
+    base_url: &str,
+    quote_currency: &str,
+) -> Result<Box<dyn Exchange>> {
+    // Пока только Bybit
+    let bybit_client = bybit::Bybit::new(api_key, api_secret, base_url, quote_currency).await?;
+    Ok(Box::new(bybit_client))
 }
