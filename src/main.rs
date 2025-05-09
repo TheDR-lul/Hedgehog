@@ -9,7 +9,7 @@ mod models;
 mod utils;
 mod storage;
 mod telegram;
-
+mod webservice_hedge;
 use anyhow::Result;
 // --- ИЗМЕНЕНО: Используем tokio::sync::OnceCell ---
 use tokio::sync::OnceCell;
