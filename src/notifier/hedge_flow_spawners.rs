@@ -3,19 +3,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 use teloxide::prelude::*;
-// ИЗМЕНЕНО: Убран неиспользуемый MessageId
 use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, MaybeInaccessibleMessage};
 use tokio::sync::Mutex as TokioMutex;
-// ИЗМЕНЕНО: Убран неиспользуемый debug и Context (если они действительно не используются во всем файле)
-// Если debug! используется где-то еще в этой функции, оставьте его.
 use tracing::{info, error, warn}; 
 use anyhow::{anyhow, Result}; 
 use std::collections::HashSet;
 use futures_util::FutureExt;
-use tokio::sync::mpsc;
 
 use crate::webservice_hedge::hedge_task::HedgerWsHedgeTask;
-use crate::webservice_hedge::state::HedgerWsStatus;
+// Неиспользуемый HedgerWsStatus был удален в предыдущем шаге
 use crate::config::Config;
 use crate::exchange::Exchange;
 use crate::exchange::bybit_ws;
@@ -25,7 +21,7 @@ use crate::models::HedgeRequest;
 use crate::storage::{Db, insert_hedge_operation};
 use crate::notifier::{RunningOperations, RunningOperationInfo, OperationType, navigation, callback_data};
 
-// Функция spawn_sequential_hedge_task остается без изменений в этой итерации
+// Функция spawn_sequential_hedge_task остается без изменений
 pub(super) async fn spawn_sequential_hedge_task<E>(
     bot: Bot,
     exchange: Arc<E>,
@@ -184,7 +180,7 @@ pub(super) async fn spawn_ws_hedge_task<E>(
     db: Arc<Db>,
     running_operations: RunningOperations,
     chat_id: ChatId,
-    request: HedgeRequest, // request используется для инициализации HedgerWsHedgeTask
+    request: HedgeRequest,
     initial_bot_message: MaybeInaccessibleMessage,
 ) -> Result<()>
 where
@@ -227,6 +223,7 @@ where
                .await;
 
     let private_subscriptions = vec![SubscriptionType::Order];
+    // ИЗМЕНЕНО: Передаем (*cfg).clone() вместо cfg.clone()
     let mut private_ws_receiver = match bybit_ws::connect_and_subscribe((*cfg).clone(), private_subscriptions).await {
         Ok(receiver) => {
             info!("op_id:{}: Private WebSocket connected for 'order' topic.", operation_id);
@@ -257,6 +254,7 @@ where
     
     let public_stream_category = "spot"; 
 
+    // ИЗМЕНЕНО: Передаем (*cfg).clone() вместо cfg.clone()
     let mut public_ws_receiver = match bybit_ws::connect_public_stream((*cfg).clone(), public_stream_category, orderbook_subscriptions).await {
         Ok(receiver) => {
             info!("op_id:{}: Public WebSocket connected for 'orderbook' topic (category: {}).", operation_id, public_stream_category);
@@ -293,6 +291,7 @@ where
         let msg_id_cb = bot_message_id;
         let chat_id_cb = chat_id;
         let operation_id_cb = operation_id;
+        // ... (остальная часть замыкания коллбэка без изменений) ...
         let stage_cb = update.stage;
         let current_price_cb = update.current_spot_price;
         let limit_price_cb = update.new_limit_price;
@@ -359,16 +358,16 @@ where
         }.boxed()
      });
 
-    // ИЗМЕНЕН ВЫЗОВ HedgerWsHedgeTask::new
+    // ИСПРАВЛЕН ВЫЗОВ HedgerWsHedgeTask::new
     let mut hedge_task = match HedgerWsHedgeTask::new(
         operation_id,
-        request, // request здесь уже есть и имеет тип HedgeRequest
+        request, 
         cfg.clone(),
         db.clone(),
         exchange_rest.clone(), 
         progress_callback,
-        private_ws_receiver,   // <--- Передаем приватный приемник
-        public_ws_receiver,    // <--- Передаем публичный приемник
+        private_ws_receiver,   
+        public_ws_receiver,    
     ).await {
         Ok(task) => {
             info!("op_id:{}: HedgerWsHedgeTask initialized successfully with dual WebSocket streams.", operation_id);
@@ -378,7 +377,6 @@ where
             let error_text = format!("❌ Ошибка инициализации WS стратегии (dual stream): {}", e);
             let _ = bot.edit_message_text(chat_id, bot_message_id, error_text.clone())
                          .reply_markup(navigation::make_main_menu_keyboard()).await;
-            // Статус в БД уже должен быть обновлен внутри HedgerWsHedgeTask::new при ошибке
             return Err(e);
         }
     };
@@ -452,36 +450,53 @@ where
     Ok(())
 }
 
-// Вспомогательная функция для ожидания подтверждений подписок
+// ИЗМЕНЕНА ЛОГИКА wait_for_specific_subscriptions
 async fn wait_for_specific_subscriptions(
     operation_id: i64,
-    ws_receiver: &mut mpsc::Receiver<Result<WebSocketMessage>>,
-    expected_topics: &[String], // Принимаем срез строк
+    // ИЗМЕНЕНО: Тип на tokio::sync::mpsc::Receiver
+    ws_receiver: &mut tokio::sync::mpsc::Receiver<Result<WebSocketMessage>>,
+    expected_topics: &[String],
     timeout_duration: Duration,
 ) -> bool {
     let mut confirmed_topics = HashSet::new();
-    // Создаем HashSet из ожидаемых топиков для быстрой проверки
     let expected_set: HashSet<_> = expected_topics.iter().map(|s| s.as_str()).collect();
 
     info!("op_id:{}: Waiting for specific subscriptions: {:?}...", operation_id, expected_topics);
 
     match tokio::time::timeout(timeout_duration, async {
-        // Цикл продолжается, пока не будут подтверждены все ожидаемые топики
         while confirmed_topics.len() < expected_topics.len() {
             match ws_receiver.recv().await {
                 Some(Ok(WebSocketMessage::SubscriptionResponse { success, topic })) => {
-                    info!("op_id:{}: Received subscription response: success={}, topic={}", operation_id, success, topic);
-                    // Проверяем, есть ли этот топик в списке ожидаемых
-                    if expected_set.contains(topic.as_str()) {
-                        if success {
+                    info!("op_id:{}: Received subscription response: success={}, topic='{}'", operation_id, success, topic);
+                    if success {
+                        if expected_set.contains(topic.as_str()) {
                             confirmed_topics.insert(topic);
-                        } else {
-                            error!("op_id:{}: Failed subscription for expected topic: {}", operation_id, topic);
-                            return false; // Критическая ошибка, если ожидаемая подписка не удалась
+                        } else if topic.is_empty() && expected_set.contains("order") {
+                            // Специальный случай для "order", если Bybit возвращает пустой топик при успехе
+                            info!("op_id:{}: Assuming 'order' subscription success due to empty topic in response.", operation_id);
+                            confirmed_topics.insert("order".to_string()); 
+                        } else if topic.is_empty() && !expected_set.is_empty() {
+                            warn!("op_id:{}: Subscription success with empty topic, but expected_set is {:?}. This might be an issue if not 'order'.", operation_id, expected_set);
+                            // Если мы ожидали что-то конкретное, а пришел пустой топик, это может быть проблемой.
+                            // Для 'orderbook' мы ожидаем непустой топик.
+                            if !expected_set.contains("order") { // Если это не была подписка на 'order'
+                                error!("op_id:{}: Subscription success with empty topic, but expected non-empty topic(s): {:?}", operation_id, expected_set);
+                                return false;
+                            }
                         }
-                    } else {
-                        // Получен ответ на подписку, которой нет в списке ожидаемых для этого стрима
-                        warn!("op_id:{}: Received unexpected subscription response for topic: {} (success: {})", operation_id, topic, success);
+                        // Если topic не пустой и не в expected_set, это просто неожиданная успешная подписка, логируем выше.
+                    } else { // if !success
+                        if expected_set.contains(topic.as_str()) {
+                            error!("op_id:{}: Failed subscription for expected topic: {}", operation_id, topic);
+                            return false; 
+                        } else if topic.is_empty() && expected_set.contains("order") {
+                             error!("op_id:{}: Failed subscription for 'order' (received empty topic and success=false).", operation_id);
+                             return false;
+                        } else if topic.is_empty() && !expected_set.is_empty() {
+                             error!("op_id:{}: Subscription failed with empty topic, expected {:?}.", operation_id, expected_set);
+                             return false;
+                        }
+                        // Если topic не пустой и не в expected_set, это проваленная подписка на что-то неожиданное.
                     }
                 }
                 Some(Ok(WebSocketMessage::Error(e))) => {
@@ -496,13 +511,22 @@ async fn wait_for_specific_subscriptions(
                     error!("op_id:{}: MPSC channel closed during specific subscription wait.", operation_id);
                     return false;
                 }
-                _ => {} // Игнорируем другие типы сообщений (Pong, Connected, Disconnected, etc.)
+                _ => {} 
             }
         }
-        true // Все ожидаемые подписки подтверждены
+        // Проверяем, что все *ожидаемые* топики действительно были подтверждены
+        expected_set.iter().all(|expected| confirmed_topics.contains(*expected))
     }).await {
-        Ok(success) => success, 
-        Err(_) => { 
+        // Ok(true) означает, что цикл завершился и все ожидаемые подписки подтверждены
+        // Ok(false) означает, что цикл завершился, но НЕ все ожидаемые подписки подтверждены или была ошибка
+        Ok(all_confirmed_successfully) => {
+            if !all_confirmed_successfully {
+                 error!("op_id:{}: Not all expected subscriptions were confirmed. Confirmed: {:?}, Expected: {:?}", 
+                    operation_id, confirmed_topics, expected_topics);
+            }
+            all_confirmed_successfully
+        }
+        Err(_) => { // Таймаут
             error!("op_id:{}: Timed out waiting for specific subscriptions. Confirmed: {:?}, Expected: {:?}", 
                 operation_id, confirmed_topics, expected_topics);
             false
