@@ -451,52 +451,65 @@ where
 }
 
 // ИЗМЕНЕНА ЛОГИКА wait_for_specific_subscriptions
+
+// Вспомогательная функция для ожидания подтверждений подписок
 async fn wait_for_specific_subscriptions(
     operation_id: i64,
-    // ИЗМЕНЕНО: Тип на tokio::sync::mpsc::Receiver
-    ws_receiver: &mut tokio::sync::mpsc::Receiver<Result<WebSocketMessage>>,
+    ws_receiver: &mut tokio::sync::mpsc::Receiver<Result<WebSocketMessage>>, // Убедимся, что тип полный
     expected_topics: &[String],
     timeout_duration: Duration,
 ) -> bool {
-    let mut confirmed_topics = HashSet::new();
-    let expected_set: HashSet<_> = expected_topics.iter().map(|s| s.as_str()).collect();
+    let mut confirmed_topics_set = HashSet::new(); // Множество для подтвержденных топиков
+    let expected_set: HashSet<_> = expected_topics.iter().cloned().collect(); // Множество ожидаемых
 
     info!("op_id:{}: Waiting for specific subscriptions: {:?}...", operation_id, expected_topics);
 
     match tokio::time::timeout(timeout_duration, async {
-        while confirmed_topics.len() < expected_topics.len() {
+        // Цикл продолжается, пока количество подтвержденных не совпадет с количеством ожидаемых
+        while confirmed_topics_set.len() < expected_set.len() {
             match ws_receiver.recv().await {
                 Some(Ok(WebSocketMessage::SubscriptionResponse { success, topic })) => {
                     info!("op_id:{}: Received subscription response: success={}, topic='{}'", operation_id, success, topic);
                     if success {
-                        if expected_set.contains(topic.as_str()) {
-                            confirmed_topics.insert(topic);
-                        } else if topic.is_empty() && expected_set.contains("order") {
-                            // Специальный случай для "order", если Bybit возвращает пустой топик при успехе
-                            info!("op_id:{}: Assuming 'order' subscription success due to empty topic in response.", operation_id);
-                            confirmed_topics.insert("order".to_string()); 
-                        } else if topic.is_empty() && !expected_set.is_empty() {
-                            warn!("op_id:{}: Subscription success with empty topic, but expected_set is {:?}. This might be an issue if not 'order'.", operation_id, expected_set);
-                            // Если мы ожидали что-то конкретное, а пришел пустой топик, это может быть проблемой.
-                            // Для 'orderbook' мы ожидаем непустой топик.
-                            if !expected_set.contains("order") { // Если это не была подписка на 'order'
-                                error!("op_id:{}: Subscription success with empty topic, but expected non-empty topic(s): {:?}", operation_id, expected_set);
-                                return false;
+                        if !topic.is_empty() { // Если топик в ответе не пустой
+                            if expected_set.contains(&topic) {
+                                confirmed_topics_set.insert(topic);
+                            } else {
+                                // Успешная подписка на неожиданный топик
+                                warn!("op_id:{}: Received unexpected successful subscription response for topic: '{}'", operation_id, topic);
+                            }
+                        } else { // Если топик в ответе ПУСТОЙ
+                            // Если мы ожидали ровно один топик, и он еще не подтвержден,
+                            // и этот единственный ожидаемый топик не пустой,
+                            // то считаем, что это успешный ответ для него.
+                            if expected_set.len() == 1 && confirmed_topics_set.is_empty() {
+                                if let Some(single_expected_topic) = expected_set.iter().next() {
+                                    if !single_expected_topic.is_empty() {
+                                        info!("op_id:{}: Assuming subscription success for '{}' due to success=true and empty topic in response (single expectation).", operation_id, single_expected_topic);
+                                        confirmed_topics_set.insert(single_expected_topic.clone());
+                                    } else {
+                                        warn!("op_id:{}: Expected single topic was empty string, but received success=true with empty topic. Ambiguous.", operation_id);
+                                    }
+                                }
+                            } else if expected_set.len() > 1 && confirmed_topics_set.len() < expected_set.len() {
+                                warn!("op_id:{}: Received success=true with empty topic, but expected multiple topics ({:?}) and not all confirmed yet. Cannot map empty topic to a specific one.", operation_id, expected_set);
+                                // В этом случае мы не можем однозначно присвоить пустой топик одному из нескольких ожидаемых.
+                                // Это может привести к тайм-ауту, если не придут другие подтверждения.
+                            } else {
+                                // Либо все уже подтверждено, либо expected_set был пуст, либо другая ситуация
+                                warn!("op_id:{}: Received success=true with empty topic, but state is: expected_set {:?}, confirmed_topics_set {:?}.", operation_id, expected_set, confirmed_topics_set);
                             }
                         }
-                        // Если topic не пустой и не в expected_set, это просто неожиданная успешная подписка, логируем выше.
-                    } else { // if !success
-                        if expected_set.contains(topic.as_str()) {
+                    } else { // if !success (подписка не удалась)
+                        if !topic.is_empty() && expected_set.contains(&topic) {
                             error!("op_id:{}: Failed subscription for expected topic: {}", operation_id, topic);
                             return false; 
-                        } else if topic.is_empty() && expected_set.contains("order") {
-                             error!("op_id:{}: Failed subscription for 'order' (received empty topic and success=false).", operation_id);
-                             return false;
                         } else if topic.is_empty() && !expected_set.is_empty() {
-                             error!("op_id:{}: Subscription failed with empty topic, expected {:?}.", operation_id, expected_set);
-                             return false;
+                             error!("op_id:{}: Subscription failed with empty topic, expected {:?}. Assuming failure for one of the expected.", operation_id, expected_set);
+                             return false; // Если провал и пустой топик, а мы что-то ждали - это провал
                         }
                         // Если topic не пустой и не в expected_set, это проваленная подписка на что-то неожиданное.
+                        warn!("op_id:{}: Received failed subscription response for unexpected/unhandled topic: '{}'", operation_id, topic);
                     }
                 }
                 Some(Ok(WebSocketMessage::Error(e))) => {
@@ -514,21 +527,19 @@ async fn wait_for_specific_subscriptions(
                 _ => {} 
             }
         }
-        // Проверяем, что все *ожидаемые* топики действительно были подтверждены
-        expected_set.iter().all(|expected| confirmed_topics.contains(*expected))
+        // Финальная проверка: все ли из expected_set теперь есть в confirmed_topics_set
+        expected_set.iter().all(|expected| confirmed_topics_set.contains(expected))
     }).await {
-        // Ok(true) означает, что цикл завершился и все ожидаемые подписки подтверждены
-        // Ok(false) означает, что цикл завершился, но НЕ все ожидаемые подписки подтверждены или была ошибка
         Ok(all_confirmed_successfully) => {
             if !all_confirmed_successfully {
-                 error!("op_id:{}: Not all expected subscriptions were confirmed. Confirmed: {:?}, Expected: {:?}", 
-                    operation_id, confirmed_topics, expected_topics);
+                 error!("op_id:{}: Not all expected subscriptions were confirmed after loop. Confirmed: {:?}, Expected: {:?}", 
+                    operation_id, confirmed_topics_set, expected_topics);
             }
             all_confirmed_successfully
         }
         Err(_) => { // Таймаут
             error!("op_id:{}: Timed out waiting for specific subscriptions. Confirmed: {:?}, Expected: {:?}", 
-                operation_id, confirmed_topics, expected_topics);
+                operation_id, confirmed_topics_set, expected_topics);
             false
         }
     }
