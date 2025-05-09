@@ -658,9 +658,9 @@ impl Exchange for Bybit {
             SPOT_CATEGORY | LINEAR_CATEGORY => {
                 let uppercased_symbol = symbol.to_uppercase();
                 if uppercased_symbol.ends_with(&self.quote_currency.to_uppercase()) {
-                    uppercased_symbol // Используем символ как есть, если он уже содержит валюту котировки
+                    uppercased_symbol
                 } else {
-                    self.format_pair(symbol) // Иначе, форматируем
+                    self.format_pair(symbol)
                 }
             }
             _ => return Err(anyhow!("Unsupported category for fee rate: {}", category)),
@@ -668,20 +668,18 @@ impl Exchange for Bybit {
         
         debug!(pair = %pair_to_use, %category, "Fetching fee rate for pair");
 
-        // ВАЖНО: Убедитесь, что `pair_to_use` используется далее в функции,
-        // особенно при формировании параметров запроса и поиске в результате.
         let params = [("symbol", pair_to_use.as_str())];
 
         let fee_result: FeeRateResult = self.call_api(
             Method::GET,
             "v5/account/fee-rate",
-            Some(&params), // Используем pair_to_use
+            Some(&params),
             None,
             true,
         ).await?;
 
         let entry = fee_result.list.into_iter()
-            .find(|e| e.symbol == pair_to_use) // Сравниваем с pair_to_use
+            .find(|e| e.symbol == pair_to_use)
             .ok_or_else(|| {
                 warn!("Fee rate entry not found for {} in category {}", pair_to_use, category);
                 anyhow!("Fee rate entry not found for {}/{}", category, pair_to_use)

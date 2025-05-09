@@ -4,7 +4,6 @@ use std::env;
 use anyhow::Result;
 use config::{Config as Loader, Environment, File};
 
-// ... ( HedgeStrategy и WsLimitOrderPlacementStrategy без изменений ) ...
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum HedgeStrategy {
@@ -17,7 +16,6 @@ pub enum WsLimitOrderPlacementStrategy {
     BestAskBid,
     OneTickInside,
 }
-// --- КОНЕЦ ДОБАВЛЕНИЙ ---
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Config {
@@ -41,19 +39,19 @@ pub struct Config {
     pub max_wait_secs:      u64,
     pub max_allowed_leverage: f64,
 
-    // --- Параметры WS стратегии ---
+    // Параметры WS стратегии
     #[serde(default = "default_hedge_strategy")]
     pub hedge_strategy_default: HedgeStrategy,
 
     #[serde(default = "default_ws_auto_chunk_target_count")]
     pub ws_auto_chunk_target_count: u32,
 
+    // --- ИЗМЕНЕНО ЗДЕСЬ ---
     #[serde(default = "default_ws_order_book_depth")]
-    pub ws_order_book_depth: u32,
+    pub ws_order_book_depth: u32, // Оставляем u32, значение по умолчанию изменено ниже
 
-    // --- ИЗМЕНЕНО ТУТ ---
     #[serde(default = "default_ws_max_value_imbalance_ratio")]
-    pub ws_max_value_imbalance_ratio: Option<f64>, // <-- Сделали Option<f64>
+    pub ws_max_value_imbalance_ratio: Option<f64>,
 
     #[serde(default = "default_ws_reconnect_delay_secs")]
     pub ws_reconnect_delay_secs: u64,
@@ -64,22 +62,22 @@ pub struct Config {
     #[serde(default = "default_ws_limit_order_placement_strategy")]
     pub ws_limit_order_placement_strategy: WsLimitOrderPlacementStrategy,
 
-    // --- Добавим недостающий параметр из ТЗ ---
     #[serde(default = "default_ws_stale_price_ratio")]
-    pub ws_stale_price_ratio: Option<f64>, // <-- Добавили и сделали Option<f64>
+    pub ws_stale_price_ratio: Option<f64>,
 }
 
-// --- Функции для значений по умолчанию ---
+// Функции для значений по умолчанию
 fn default_hedge_strategy() -> HedgeStrategy { HedgeStrategy::Sequential }
 fn default_ws_auto_chunk_target_count() -> u32 { 15 }
-fn default_ws_order_book_depth() -> u32 { 10 }
-// --- ИЗМЕНЕНО ТУТ ---
-fn default_ws_max_value_imbalance_ratio() -> Option<f64> { Some(0.05) } // <-- Возвращаем Some(...)
+
+// --- ИЗМЕНЕНО ЗДЕСЬ ---
+fn default_ws_order_book_depth() -> u32 { 50 } // Изменено с 10 на 50 (или 1, если 50 не подойдет)
+
+fn default_ws_max_value_imbalance_ratio() -> Option<f64> { Some(0.05) }
 fn default_ws_reconnect_delay_secs() -> u64 { 5 }
 fn default_ws_ping_interval_secs() -> u64 { 20 }
 fn default_ws_limit_order_placement_strategy() -> WsLimitOrderPlacementStrategy { WsLimitOrderPlacementStrategy::BestAskBid }
-// --- Добавим default для нового параметра ---
-fn default_ws_stale_price_ratio() -> Option<f64> { Some(0.01) } // <-- Добавили
+fn default_ws_stale_price_ratio() -> Option<f64> { Some(0.01) }
 
 impl Config {
     pub fn load() -> Result<Self> {
