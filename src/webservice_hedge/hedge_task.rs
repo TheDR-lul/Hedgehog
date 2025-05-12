@@ -32,8 +32,8 @@ pub struct HedgerWsHedgeTask {
     pub database: Arc<storage::Db>,
     pub state: HedgerWsState,
     pub private_ws_receiver: Receiver<Result<WebSocketMessage>>,
-    pub public_spot_receiver: Receiver<Result<WebSocketMessage>>,   // Для публичных данных спот-рынка
-    pub public_linear_receiver: Receiver<Result<WebSocketMessage>>, // Для публичных данных фьючерсного рынка (linear)
+    pub public_spot_receiver: Receiver<Result<WebSocketMessage>>,
+    pub public_linear_receiver: Receiver<Result<WebSocketMessage>>,
     pub exchange_rest: Arc<dyn Exchange>,
     pub progress_callback: HedgeProgressCallback,
 }
@@ -47,38 +47,36 @@ impl HedgerWsHedgeTask {
         exchange_rest: Arc<dyn Exchange>,
         progress_callback: HedgeProgressCallback,
         private_ws_receiver: Receiver<Result<WebSocketMessage>>,
-        public_spot_receiver: Receiver<Result<WebSocketMessage>>,   // Новый параметр
-        public_linear_receiver: Receiver<Result<WebSocketMessage>>, // Новый параметр
+        public_spot_receiver: Receiver<Result<WebSocketMessage>>,
+        public_linear_receiver: Receiver<Result<WebSocketMessage>>,
     ) -> Result<Self> {
 
         let mut initial_state = match create_initial_hedger_ws_state(
             operation_id,
-            request.clone(), // request используется для получения sum, symbol, volatility
+            request.clone(),
             config.clone(),
             exchange_rest.clone(),
-            database.clone(), // database передается, но не используется в create_initial_hedger_ws_state
+            database.clone(),
         ).await {
             Ok(s) => s,
             Err(e) => {
                 let error_msg = format!("Failed to create initial HedgerWsState: {}", e);
                 error!(operation_id, "{}", error_msg);
-                // Обновляем статус в БД перед возвратом ошибки
                 let _ = storage::update_hedge_final_status(
                     database.as_ref(),
                     operation_id,
-                    "Failed", // Статус
-                    None,     // futures_order_id
-                    0.0,      // futures_filled_qty
-                    Some(&error_msg) // error_message
+                    "Failed",
+                    None,
+                    0.0,
+                    Some(&error_msg)
                 ).await.map_err(|db_err| {
                     warn!(operation_id, "Failed to update DB status for failed state init: {}", db_err);
-                    // Не возвращаем db_err, чтобы не маскировать исходную ошибку e
                 });
-                return Err(anyhow!(error_msg)); // Возвращаем исходную ошибку
+                return Err(anyhow!(error_msg));
             }
         };
 
-        initial_state.status = HedgerWsStatus::Initializing; // Устанавливаем начальный статус
+        initial_state.status = HedgerWsStatus::Initializing;
 
         Ok(Self {
             operation_id,
@@ -86,14 +84,13 @@ impl HedgerWsHedgeTask {
             database,
             state: initial_state,
             private_ws_receiver,
-            public_spot_receiver,   // Сохраняем
-            public_linear_receiver, // Сохраняем
+            public_spot_receiver,
+            public_linear_receiver,
             exchange_rest,
             progress_callback,
         })
     }
 
-    // Вспомогательная функция для вызова основного обработчика с категорией
     async fn handle_ws_message_with_category(&mut self, message: WebSocketMessage, category: &str) -> Result<()> {
         crate::webservice_hedge::hedge_logic::ws_handlers::handle_websocket_message(self, message, category).await
     }
@@ -105,9 +102,10 @@ impl HedgerWsHedgeTask {
         if matches!(self.state.status, HedgerWsStatus::Initializing) {
             info!(operation_id = self.operation_id, "Waiting for initial market data from WebSocket streams...");
             let mut price_data_ready = false;
-            let max_attempts = self.config.ws_auto_chunk_target_count.max(100).min(300) as u32; // Например, от 100 до 300 попыток
+            // Используем значение из config, если оно там есть, или разумное значение по умолчанию
+            let max_attempts = self.config.ws_auto_chunk_target_count.max(100).min(300); // Как в логах (100) или ваше значение
 
-            for attempt in 0..max_attempts {
+            for attempt in 0..max_attempts { // Используем max_attempts
                 if self.state.spot_market_data.best_bid_price.is_some() &&
                    self.state.spot_market_data.best_ask_price.is_some() &&
                    self.state.futures_market_data.best_bid_price.is_some() &&
@@ -118,6 +116,7 @@ impl HedgerWsHedgeTask {
                     self.state.status = HedgerWsStatus::SettingLeverage;
                     break;
                 }
+                // Логгируем с корректным max_attempts
                 warn!(operation_id = self.operation_id, attempt = attempt + 1, "Waiting for initial market data (attempt {}/{})...", attempt + 1, max_attempts);
 
                 tokio::select! {
@@ -130,8 +129,7 @@ impl HedgerWsHedgeTask {
                                 }
                             }
                             Some(Err(e)) => {
-                                warn!(operation_id = self.operation_id, "Error from private_ws_receiver: {}", e);
-                                // Не выходим сразу, даем шанс другим потокам или таймауту
+                                warn!(operation_id = self.operation_id, "Error from private_ws_receiver: {}. Channel might be broken.", e);
                             }
                             None => {
                                 let err_msg = "Private WS channel closed during initial market data wait.";
@@ -150,7 +148,7 @@ impl HedgerWsHedgeTask {
                                }
                             }
                             Some(Err(e)) => {
-                                warn!(operation_id = self.operation_id, "Error from public_spot_receiver: {}", e);
+                                warn!(operation_id = self.operation_id, "Error from public_spot_receiver: {}. Channel might be broken.", e);
                             }
                             None => {
                                 let err_msg = "Public SPOT WS channel closed during initial market data wait.";
@@ -169,7 +167,7 @@ impl HedgerWsHedgeTask {
                                }
                             }
                             Some(Err(e)) => {
-                                warn!(operation_id = self.operation_id, "Error from public_linear_receiver: {}", e);
+                                warn!(operation_id = self.operation_id, "Error from public_linear_receiver: {}. Channel might be broken.", e);
                             }
                             None => {
                                 let err_msg = "Public LINEAR WS channel closed during initial market data wait.";
@@ -221,7 +219,7 @@ impl HedgerWsHedgeTask {
 
             let required_leverage_decimal = if available_collateral.is_zero() {
                 if estimated_total_futures_value.abs() < Decimal::from_f64(0.000001).unwrap_or_default() { Decimal::ONE }
-                else { Decimal::new(i64::MAX, 0) } // Очень большое значение
+                else { Decimal::new(i64::MAX, 0) }
             } else {
                 (estimated_total_futures_value / available_collateral).abs()
             };
@@ -361,19 +359,23 @@ impl HedgerWsHedgeTask {
                         }
                     }
                 },
-                _ = sleep(Duration::from_millis(100)) => {}
+                _ = sleep(Duration::from_millis(100)) => {} // Невелика затримка, якщо немає повідомлень
             }
 
-            if self.private_ws_receiver.is_closed() && self.public_spot_receiver.is_closed() && self.public_linear_receiver.is_closed() {
+            // Перевірка, чи всі канали закриті, для виходу з циклу
+            if self.private_ws_receiver.is_closed() &&
+               self.public_spot_receiver.is_closed() &&
+               self.public_linear_receiver.is_closed() {
                  if !matches!(self.state.status, HedgerWsStatus::Completed | HedgerWsStatus::Cancelled | HedgerWsStatus::Failed(_)) {
                      warn!(operation_id = self.operation_id, status = ?self.state.status, "All WebSocket channels closed, task not in final state. Setting to Failed.");
                      self.state.status = HedgerWsStatus::Failed("All WebSocket channels closed while task active.".to_string());
                      update_final_db_status(self).await;
                  }
                  info!(operation_id = self.operation_id, "Exiting run loop as all WS channels are closed.");
-                 break;
+                 break; // Вихід з основного циклу loop
             }
 
+            // Логіка обробки стану чанків, реконсиляції і т.д.
             let mut should_start_next_chunk = false;
             let mut should_reconcile = false;
             let mut next_chunk_to_process: Option<u32> = None;
@@ -400,28 +402,32 @@ impl HedgerWsHedgeTask {
                 }
             }
             else if matches!(self.state.status, HedgerWsStatus::WaitingImbalance { .. }) {
-                if !check_value_imbalance(self) {
+                if !check_value_imbalance(self) { // Якщо дисбаланс зник
                     info!(operation_id=self.operation_id, "Value imbalance resolved. Proceeding.");
-                    let next_chunk_idx_to_start = self.state.current_chunk_index;
+                    let next_chunk_idx_to_start = self.state.current_chunk_index; // Поточний індекс чанку, на якому зупинились
                     self.state.status = HedgerWsStatus::StartingChunk(next_chunk_idx_to_start);
                     should_start_next_chunk = true;
                     next_chunk_to_process = Some(next_chunk_idx_to_start);
                 }
             }
+            // Якщо статус StartingChunk, то потрібно запустити чанк
             else if let HedgerWsStatus::StartingChunk(idx) = self.state.status {
                 should_start_next_chunk = true;
                 next_chunk_to_process = Some(idx);
             }
+
 
             if should_reconcile {
                 if let Err(error) = reconcile(self).await {
                     error!(operation_id = self.operation_id, %error, "Reconciliation failed");
                     self.state.status = HedgerWsStatus::Failed(format!("Reconciliation failed: {}", error));
                     update_final_db_status(self).await;
-                    return Err(error);
+                    return Err(error); // Повертаємо помилку, щоб зупинити задачу
                 }
+                // Якщо reconcile завершився успішно, статус буде Completed, і цикл завершиться на наступній ітерації
             } else if should_start_next_chunk {
                 if let Some(chunk_idx) = next_chunk_to_process {
+                    // Додаткова перевірка, чи стан все ще StartingChunk перед викликом
                     if self.state.status == HedgerWsStatus::StartingChunk(chunk_idx) {
                         match start_next_chunk(self).await {
                             Ok(skipped) => {
@@ -432,31 +438,39 @@ impl HedgerWsHedgeTask {
                                 error!(operation_id = self.operation_id, chunk = chunk_idx, %error, "Failed to start chunk via start_next_chunk");
                                 self.state.status = HedgerWsStatus::Failed(format!("Failed to start chunk {}: {}", chunk_idx, error));
                                 update_final_db_status(self).await;
-                                return Err(error);
+                                return Err(error); // Повертаємо помилку
                             }
                         }
                     } else {
                          warn!(operation_id=self.operation_id, expected_status=?HedgerWsStatus::StartingChunk(chunk_idx), actual_status=?self.state.status, "Decided to start chunk, but state changed. Retrying on next loop iteration.");
                     }
                 } else {
+                    // Цей випадок не повинен відбуватися, якщо логіка вище правильна
                     warn!(operation_id=self.operation_id, status=?self.state.status, "Inconsistent state: should_start_next_chunk is true, but next_chunk_to_process is None.");
                 }
             }
 
+
+            // Перевірка на завершення, скасування або помилку для виходу з циклу
             if matches!(self.state.status, HedgerWsStatus::Completed | HedgerWsStatus::Cancelled | HedgerWsStatus::Failed(_)) {
                 info!(operation_id = self.operation_id, status = ?self.state.status, "Exiting run loop due to final status.");
-                break;
+                break; // Вихід з основного циклу loop
             }
-        }
+        } // кінець основного циклу loop
 
+        // Фінальна перевірка статусу після виходу з циклу
         if self.state.status == HedgerWsStatus::Completed {
             Ok(())
         } else {
+            // Якщо вийшли з циклу не через Completed (наприклад, через закриття всіх каналів),
+            // але статус не Failed/Cancelled, це може бути непередбачена ситуація.
+            // Однак, update_final_db_status вже мав бути викликаний, якщо статус Failed.
             Err(anyhow!("Hedger task run loop exited with non-completed status: {:?}", self.state.status))
         }
     }
 }
 
+// Вспоміжна функція для логування типу повідомлення
 fn message_type_for_log(message: &WebSocketMessage) -> String {
     match message {
         WebSocketMessage::OrderUpdate(_) => "OrderUpdate".to_string(),
