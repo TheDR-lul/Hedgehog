@@ -3,7 +3,7 @@
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::Value;
-use tracing::warn;
+use tracing::{warn, trace, debug, error}; // Добавлены debug, error
 use crate::exchange::types::{OrderSide, OrderStatusText, DetailedOrderStatus, OrderbookLevel};
 use std::str::FromStr;
 use anyhow::anyhow;
@@ -12,75 +12,63 @@ use anyhow::anyhow;
 pub(super) struct BybitWsResponse {
     pub(super) op: Option<String>,
     pub(super) conn_id: Option<String>,
-    // Сделаем req_id изменяемым, чтобы можно было его заполнить для логов
     #[serde(default)] pub(super) req_id: Option<String>, 
     pub(super) success: Option<bool>,
     pub(super) ret_msg: Option<String>,
     pub(super) topic: Option<String>,
     #[serde(rename = "type")]
-    pub(super) message_type: Option<String>, // "snapshot" или "delta" для ордербука
+    pub(super) message_type: Option<String>, 
     pub(super) data: Option<Value>,
-    pub(super) ts: Option<i64>, // Таймстемп сообщения от биржи (event time)
+    pub(super) ts: Option<i64>, 
     #[serde(rename = "creationTime")]
-    pub(super) _creation_time: Option<i64>, // Не используется активно
+    pub(super) _creation_time: Option<i64>, 
     #[serde(rename = "pong")]
-    pub(super) _pong_ts: Option<i64>, // Не используется активно
-    // Для ордербука V5, seq и u могут быть в data, а cts на верхнем уровне
-    pub(super) cts: Option<i64>, // Таймстемп создания сообщения на клиенте Bybit
+    pub(super) _pong_ts: Option<i64>, 
+    pub(super) cts: Option<i64>, 
 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub(super) struct BybitWsOrderData {
     #[serde(rename = "orderId")] pub(super) order_id: String,
     pub(super) symbol: String,
-    pub(super) side: String, // "Buy" или "Sell"
-    #[serde(rename = "orderStatus")] pub(super) status: String, // e.g., "New", "Filled"
+    pub(super) side: String, 
+    #[serde(rename = "orderStatus")] pub(super) status: String, 
     #[serde(default, with = "super::protocol::str_or_empty_as_f64_option")] pub(super) cum_exec_qty: Option<f64>,
     #[serde(default, with = "super::protocol::str_or_empty_as_f64_option")] pub(super) cum_exec_value: Option<f64>,
     #[serde(default, with = "super::protocol::str_or_empty_as_f64_option")] pub(super) avg_price: Option<f64>,
-    #[serde(default, with = "super::protocol::str_or_empty_as_f64_option")] pub(super) leaves_qty: Option<f64>, // Оставшееся количество
-    #[serde(default, with = "super::protocol::str_or_empty_as_f64_option")] pub(super) last_exec_qty: Option<f64>, // Имя поля в V5 может быть 'lastExecQty'
-    #[serde(default, with = "super::protocol::str_or_empty_as_f64_option")] pub(super) last_exec_price: Option<f64>,// Имя поля в V5 может быть 'lastExecPrice'
+    #[serde(default, with = "super::protocol::str_or_empty_as_f64_option")] pub(super) leaves_qty: Option<f64>, 
+    #[serde(default, rename = "lastExecQty", with = "super::protocol::str_or_empty_as_f64_option")] pub(super) last_filled_qty: Option<f64>,
+    #[serde(default, rename = "lastExecPrice", with = "super::protocol::str_or_empty_as_f64_option")] pub(super) last_filled_price: Option<f64>,
     #[serde(rename = "rejectReason")] pub(super) reject_reason: Option<String>,
-    // Дополнительные поля из V5, если нужны
-    // #[serde(rename = "orderIv")] pub(super) order_iv: Option<String>,
-    // #[serde(rename = "triggerPrice")] pub(super) trigger_price: Option<String>,
-    // #[serde(rename = "takeProfit")] pub(super) take_profit: Option<String>,
-    // #[serde(rename = "stopLoss")] pub(super) stop_loss: Option<String>,
-    // #[serde(rename = "tpTriggerBy")] pub(super) tp_trigger_by: Option<String>,
-    // #[serde(rename = "slTriggerBy")] pub(super) sl_trigger_by: Option<String>,
-    // #[serde(rename = "createdTime")] pub(super) created_time: Option<String>,
-    // #[serde(rename = "updatedTime")] pub(super) updated_time: Option<String>,
+    #[serde(default, rename = "execQty", with = "super::protocol::str_or_empty_as_f64_option")] pub(super) _exec_qty_v5: Option<f64>, // Поле из V5, если отличается от last_exec_qty
+    #[serde(default, rename = "execPrice", with = "super::protocol::str_or_empty_as_f64_option")] pub(super) _exec_price_v5: Option<f64>,// Поле из V5
+    // createdTime и updatedTime обычно нужны для отслеживания, но не для DetailedOrderStatus напрямую
+    // #[serde(rename = "createdTime")] pub(super) _created_time: Option<String>,
+    // #[serde(rename = "updatedTime")] pub(super) _updated_time: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub(super) struct BybitWsTradeData {
-    #[serde(rename = "T")] pub(super) timestamp: i64, // Trade time
+    #[serde(rename = "T")] pub(super) timestamp: i64, 
     #[serde(rename = "s")] pub(super) symbol: String,
-    #[serde(rename = "S")] pub(super) side: String, // Side of taker
-    #[serde(rename = "v", with = "super::protocol::str_or_empty_as_f64")] pub(super) qty: f64, // Trade size
-    #[serde(rename = "p", with = "super::protocol::str_or_empty_as_f64")] pub(super) price: f64, // Trade price
-    // i: Option<String>, // Trade ID - не используем пока
-    // L: Option<String>, // Side of maker - не используем пока
-    // BT: Option<bool>, // Block trade - не используем пока
+    #[serde(rename = "S")] pub(super) side: String, 
+    #[serde(rename = "v", with = "super::protocol::str_or_empty_as_f64")] pub(super) qty: f64, 
+    #[serde(rename = "p", with = "super::protocol::str_or_empty_as_f64")] pub(super) price: f64, 
 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub(super) struct BybitWsOrderbookData {
-    #[serde(rename = "s")] pub(super) symbol: String, // Symbol name
-    #[serde(rename = "b")] pub(super) bids: Vec<[String; 2]>, // Bid levels: [price, size]
-    #[serde(rename = "a")] pub(super) asks: Vec<[String; 2]>, // Ask levels: [price, size]
-    #[serde(rename = "u")] pub(super) update_id: i64, // Update ID. Is unique within a single op_id stream.
-    #[serde(default)] pub(super) seq: Option<i64>, // Sequence no. Only used in a option
-    // ts из BybitWsResponse используется как event time
+    #[serde(rename = "s")] pub(super) symbol: String, 
+    #[serde(rename = "b")] pub(super) bids: Vec<[String; 2]>, 
+    #[serde(rename = "a")] pub(super) asks: Vec<[String; 2]>, 
+    #[serde(rename = "u")] pub(super) update_id: i64, 
+    #[serde(default)] pub(super) seq: Option<i64>, 
+    // ts (event time) и cts (cross time) теперь на верхнем уровне BybitWsResponse
 }
 
 
-// --- Функции парсинга конкретных данных ---
-
 pub(super) fn parse_order_update(data: Value, _event_ts: Option<i64>) -> Result<DetailedOrderStatus, anyhow::Error> {
-    // order_data может быть массивом в V5, берем первый элемент
-    let orders_data_array: Vec<BybitWsOrderData> = serde_json::from_value(data.clone()) // Клонируем data для лога при ошибке
+    let orders_data_array: Vec<BybitWsOrderData> = serde_json::from_value(data.clone())
         .map_err(|e| anyhow!("Не удалось распарсить массив данных ордера: {}. Data: {:?}", e, data))?;
 
     if let Some(order_data) = orders_data_array.into_iter().next() {
@@ -101,8 +89,8 @@ pub(super) fn parse_order_update(data: Value, _event_ts: Option<i64>) -> Result<
             cumulative_executed_value: order_data.cum_exec_value.unwrap_or(0.0),
             average_price: order_data.avg_price.unwrap_or(0.0),
             status_text,
-            last_filled_qty: order_data.last_exec_qty, // Используем last_exec_qty
-            last_filled_price: order_data.last_exec_price, // Используем last_exec_price
+            last_filled_qty: order_data.last_filled_qty,
+            last_filled_price: order_data.last_filled_price,
             reject_reason: order_data.reject_reason,
         })
     } else {
@@ -110,37 +98,66 @@ pub(super) fn parse_order_update(data: Value, _event_ts: Option<i64>) -> Result<
     }
 }
 
-pub(super) fn parse_orderbook_update(data: Value, _event_ts: Option<i64>) -> Result<(String, Vec<OrderbookLevel>, Vec<OrderbookLevel>), anyhow::Error> {
-     // В V5 'data' для ордербука уже является объектом BybitWsOrderbookData
-     let book_data: BybitWsOrderbookData = serde_json::from_value(data.clone()) // Клонируем для лога при ошибке
-         .map_err(|e| anyhow!("Не удалось распарсить данные ордербука: {}. Data: {:?}", e, data))?;
+pub(super) fn parse_orderbook_update(data: Value, event_ts: Option<i64>) -> Result<(String, Vec<OrderbookLevel>, Vec<OrderbookLevel>), anyhow::Error> {
+    debug!("parse_orderbook_update: attempting to parse data: {:?}", data); 
+    let book_data: BybitWsOrderbookData = serde_json::from_value(data.clone())
+        .map_err(|e| {
+            error!("parse_orderbook_update: ОШИБКА ДЕСЕРИАЛИЗАЦИИ BybitWsOrderbookData: {}. Data: {:?}", e, data);
+            anyhow!("Не удалось распарсить BybitWsOrderbookData: {}. Data: {:?}", e, data)
+        })?;
+    trace!("parse_orderbook_update: parsed book_data: {:?}, event_ts: {:?}", book_data, event_ts);
 
-     let parse_level = |level_str_array: [String; 2]| -> Result<OrderbookLevel, anyhow::Error> {
-         let price = Decimal::from_str(&level_str_array[0])
-            .map_err(|e| anyhow!("Не удалось распарсить цену ордербука '{}': {}", level_str_array[0], e))?;
-         let quantity = Decimal::from_str(&level_str_array[1])
-            .map_err(|e| anyhow!("Не удалось распарсить количество ордербука '{}': {}", level_str_array[1], e))?;
-         if quantity < Decimal::ZERO {
+    let parse_level = |level_str_array: [String; 2]| -> Result<OrderbookLevel, anyhow::Error> {
+        trace!("parse_level: parsing: price='{}', quantity='{}'", &level_str_array[0], &level_str_array[1]);
+        let price_str = &level_str_array[0];
+        let quantity_str = &level_str_array[1];
+
+        if price_str.is_empty() || quantity_str.is_empty() {
+            warn!("parse_level: Пустая строка для цены ('{}') или количества ('{}') в уровне ордербука.", price_str, quantity_str);
+            return Err(anyhow!("Пустая строка для цены или количества в уровне ордербука."));
+        }
+
+        let price = Decimal::from_str(price_str)
+            .map_err(|e| {
+                error!("parse_level: НЕ УДАЛОСЬ распарсить ЦЕНУ ордербука '{}': {}", price_str, e);
+                anyhow!("Не удалось распарсить ЦЕНУ ордербука '{}': {}", price_str, e)
+            })?;
+        let quantity = Decimal::from_str(quantity_str)
+            .map_err(|e| {
+                error!("parse_level: НЕ УДАЛОСЬ распарсить КОЛИЧЕСТВО ордербука '{}': {}", quantity_str, e);
+                anyhow!("Не удалось распарсить КОЛИЧЕСТВО ордербука '{}': {}", quantity_str, e)
+            })?;
+        
+        if quantity < Decimal::ZERO {
             warn!("Получено отрицательное количество в уровне ордербука: [{}, {}]", price, quantity);
-            // Можно либо вернуть ошибку, либо проигнорировать этот уровень, либо взять abs()
-            // Для простоты пока оставим как есть, но это странно.
-         }
-         Ok(OrderbookLevel { price, quantity })
-     };
+        }
+        trace!("parse_level: parsed price={}, quantity={}", price, quantity);
+        Ok(OrderbookLevel { price, quantity })
+    };
 
-     let bids = book_data.bids.into_iter().map(parse_level).collect::<Result<Vec<_>, _>>()
-        .map_err(|e| anyhow!("Ошибка парсинга уровней бид: {}", e))?;
-     let asks = book_data.asks.into_iter().map(parse_level).collect::<Result<Vec<_>, _>>()
-        .map_err(|e| anyhow!("Ошибка парсинга уровней аск: {}", e))?;
+    let bids = book_data.bids.into_iter()
+        .map(parse_level)
+        .filter_map(Result::ok) // Собираем только успешно распарсенные, логируем ошибки выше
+        .collect::<Vec<_>>();
 
-     Ok((book_data.symbol, bids, asks))
+    let asks = book_data.asks.into_iter()
+        .map(parse_level)
+        .filter_map(Result::ok) // Собираем только успешно распарсенные
+        .collect::<Vec<_>>();
+    
+    if bids.is_empty() && asks.is_empty() {
+        // Это может быть нормально для дельт, но для снапшота - подозрительно, если не было ошибок парсинга отдельных уровней
+        warn!("parse_orderbook_update: symbol={}, ПУСТЫЕ bids И asks после парсинга! event_ts={:?}", book_data.symbol, event_ts);
+    } else {
+        debug!("parse_orderbook_update: symbol={}, bids_count={}, asks_count={}, event_ts={:?}", book_data.symbol, bids.len(), asks.len(), event_ts);
+    }
+    Ok((book_data.symbol, bids, asks))
 }
 
  pub(super) fn parse_public_trade_update(data: Value) -> Result<Option<(String, f64, f64, OrderSide, i64)>, anyhow::Error> {
-     let trades_data_array: Vec<BybitWsTradeData> = serde_json::from_value(data.clone()) // Клонируем для лога
+     let trades_data_array: Vec<BybitWsTradeData> = serde_json::from_value(data.clone()) 
          .map_err(|e| anyhow!("Не удалось распарсить массив данных публичных сделок: {}. Data: {:?}", e, data))?;
      
-     // Обычно Bybit отправляет массив из одного элемента для publicTrade
      if let Some(trade_data) = trades_data_array.into_iter().next() {
          let side = OrderSide::from_str(&trade_data.side)
             .map_err(|e| anyhow!("Неверная сторона публичной сделки от WS: '{}': {}", trade_data.side, e))?;
