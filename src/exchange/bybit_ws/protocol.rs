@@ -57,10 +57,10 @@ pub(super) async fn authenticate(ws_sender: &mut WsSink, api_key: &str, api_secr
 pub(super) async fn subscribe(ws_sender: &mut WsSink, args: Vec<String>, stream_type: &str) -> Result<String> {
     let topics_part = args.join("_")
         .replace(['.',':','/'], "-")
-        .chars().take(30).collect::<String>();
+        .chars().take(40).collect::<String>();
 
     let req_id = format!("subscribe_{}_{}_{}",
-        stream_type.to_lowercase().replace(" ", "_").replace("/", "_"),
+        stream_type.to_lowercase().replace(" ", "_").replace(['/','\\',':','*','?','"','<','>','|'], ""),
         topics_part,
         SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros()
     );
@@ -78,13 +78,16 @@ pub(super) async fn handle_message(
         Message::Text(text) => {
             debug!("Raw WS Text Received: {}", text);
             match serde_json::from_str::<BybitWsResponse>(&text) {
-                Ok(parsed_response) => {
-                    trace!("Parsed BybitWsResponse: {:?}", parsed_response);
-                    let log_ctx_from_resp = parsed_response.req_id.as_deref()
-                        .or(parsed_response.topic.as_deref())
-                        .unwrap_or("N/A_ctx_in_handle");
+                Ok(parsed_response_value) => { // Переименовано, чтобы не конфликтовать с параметром response в parse_bybit_response
+                    trace!("Parsed BybitWsResponse: {:?}", parsed_response_value);
                     
-                    match parse_bybit_response(parsed_response, log_ctx_from_resp) {
+                    // Создаем log_ctx из данных parsed_response_value
+                    let log_ctx_from_resp = parsed_response_value.req_id.as_deref()
+                        .or(parsed_response_value.topic.as_deref())
+                        .unwrap_or("N/A_ctx_in_handle").to_string(); // Клонируем в String
+
+                    // Передаем parsed_response_value по значению, а log_ctx_from_resp по ссылке
+                    match parse_bybit_response(parsed_response_value, &log_ctx_from_resp) { 
                         Ok(Some(ws_message)) => {
                             debug!(context = %log_ctx_from_resp, "Сгенерировано WebSocketMessage: {:?}", ws_message);
                             if mpsc_sender.send(Ok(ws_message)).await.is_err() {
@@ -110,10 +113,9 @@ pub(super) async fn handle_message(
             }
         }
         Message::Binary(data) => { warn!("Получены неожиданные бинарные WebSocket данные ({} байт)", data.len()); }
-        Message::Ping(data) => { debug!("Получен WebSocket Ping от сервера: {:?}", data); } // Обычно сервер не шлет Ping, а отвечает Pong
+        Message::Ping(data) => { debug!("Получен WebSocket Ping от сервера: {:?}", data); }
         Message::Pong(data) => { 
             debug!("Получен WebSocket Pong от сервера: {:?}", data);
-            // Pong обрабатывается в read_loop для сброса таймера, но можем также передать его дальше, если нужно
             if mpsc_sender.send(Ok(WebSocketMessage::Pong)).await.is_err() {
                 warn!("MPSC получатель сброшен при отправке Pong сообщения.");
                 return Err(anyhow!("MPSC получатель сброшен"));
@@ -131,90 +133,92 @@ pub(super) async fn handle_message(
     Ok(())
 }
 
+// ИСПРАВЛЕНО: parse_bybit_response теперь принимает response по ссылке
 fn parse_bybit_response(response: BybitWsResponse, log_ctx: &str) -> Result<Option<WebSocketMessage>> {
     debug!(context = %log_ctx, "Внутри parse_bybit_response с: op={:?}, topic={:?}, req_id={:?}, success={:?}, ret_msg={:?}", 
-           response.op, response.topic, response.req_id, response.success, response.ret_msg);
+           response.op.as_deref(), response.topic.as_deref(), response.req_id.as_deref(), response.success, response.ret_msg.as_deref());
 
-    if let Some(operation) = response.op {
-        match operation.as_str() {
+    // ИСПРАВЛЕНО: Используем .as_deref() или .as_ref().map(|s| s.as_str()) для Option<String> перед .as_str()
+    if let Some(operation_str) = response.op.as_deref() {
+        match operation_str {
             "auth" => {
                 let success = response.success.unwrap_or(false);
                 let auth_req_id_from_response = response.req_id.as_deref().unwrap_or(log_ctx);
-                if !success { warn!(context = %auth_req_id_from_response, "Аутентификация WebSocket не удалась: {:?}", response.ret_msg); }
+                if !success { warn!(context = %auth_req_id_from_response, "Аутентификация WebSocket не удалась: {:?}", response.ret_msg.as_deref()); }
                 else { info!(context = %auth_req_id_from_response, "Аутентификация WebSocket успешна.");}
                 Ok(Some(WebSocketMessage::Authenticated(success)))
             },
             "subscribe" => {
                 let success = response.success.unwrap_or(false);
                 let response_req_id = response.req_id.as_deref().unwrap_or_else(|| {
-                    warn!(op_subscribe_context = %log_ctx, "Отсутствует 'req_id' в ответе Bybit на 'subscribe'. ret_msg: {:?}", response.ret_msg);
+                    warn!(op_subscribe_context = %log_ctx, "Отсутствует 'req_id' в ответе Bybit на операцию 'subscribe'. ret_msg: {:?}", response.ret_msg.as_deref());
                     "" 
                 });
 
                 if !success { 
-                    warn!(request_id = %response_req_id, "Подписка WebSocket не удалась: {:?}", response.ret_msg); 
+                    warn!(request_id = %response_req_id, "Подписка WebSocket не удалась: {:?}", response.ret_msg.as_deref()); 
                 } else { 
                     info!(request_id = %response_req_id, "Подписка WebSocket успешна (ответ от биржи)."); 
                 }
-                // ВАЖНО: В поле 'topic' нашего сообщения передаем 'req_id' из ответа биржи.
                 Ok(Some(WebSocketMessage::SubscriptionResponse { success, topic: response_req_id.to_string() }))
             },
             "ping" => {
-                debug!(context = %log_ctx, "Получена операция ping от сервера: {:?}", response);
-                // Серверный ping обычно не требует ответа pong от клиента, но мы можем его залогировать или обработать
-                // Для простоты, пока не генерируем специальное сообщение, т.к. наш клиент сам шлет пинги.
-                Ok(None) 
+                debug!(context = %log_ctx, "Получена операция ping от сервера: {:?}", response.req_id.as_deref());
+                Ok(Some(WebSocketMessage::Pong)) 
             }
-            "pong" => { // Ответ на наш op: "ping"
+            "pong" => { 
                 debug!(context = %log_ctx, request_id = response.req_id.as_deref().unwrap_or("N/A"), "Получен Pong от сервера (в ответ на наш Ping).");
                 Ok(Some(WebSocketMessage::Pong))
             },
             _ => {
-                warn!(context = %log_ctx, "Получена неизвестная операция: {}", operation);
-                Err(anyhow!("Неизвестная WS операция: {}", operation))
+                warn!(context = %log_ctx, "Получена неизвестная операция от сервера: {}", operation_str);
+                Err(anyhow!("Неизвестная WS операция от сервера: {}", operation_str))
             }
         }
-    } else if let Some(topic_str) = response.topic.as_ref() {
-        let data = response.data.ok_or_else(|| anyhow!("Отсутствует поле data для топика {}", topic_str))?;
+    } else if let Some(topic_str) = response.topic.as_deref() { 
+        // ИСПРАВЛЕНО: response.data теперь не требует .clone(), так как response передается по значению (но теперь это ссылка)
+        // Значит, response.data нужно клонировать или parse_... функции должны принимать Option<&Value>
+        // Проще клонировать data, если оно будет потреблено.
+        let data_val = response.data.clone().ok_or_else(|| anyhow!("Отсутствует поле data для топика {}", topic_str))?;
         let message_type = response.message_type.as_deref();
-        let event_ts = response.ts; // Используем общий ts из ответа
+        let event_ts = response.ts; 
 
         if topic_str == "order" {
             debug!(context = %topic_str, "Попытка парсинга обновления ордера");
-            crate::exchange::bybit_ws::types_internal::parse_order_update(data, event_ts).map(WebSocketMessage::OrderUpdate).map(Some)
+            crate::exchange::bybit_ws::types_internal::parse_order_update(data_val, event_ts).map(WebSocketMessage::OrderUpdate).map(Some)
         } else if topic_str.starts_with("orderbook.") {
             debug!(context = %topic_str, "Попытка парсинга обновления ордербука (type: {:?})", message_type);
-            let result = crate::exchange::bybit_ws::types_internal::parse_orderbook_update(data, event_ts); // event_ts из BybitWsResponse
+            let result = crate::exchange::bybit_ws::types_internal::parse_orderbook_update(data_val, event_ts);
             match &result {
                 Ok((symbol, bids, asks)) => debug!(context = %topic_str,
                                                "Успешно распарсен ордербук для {}. Биды: {}, Аски: {}, Тип: {:?}, TS: {:?}", 
                                                symbol, bids.len(), asks.len(), message_type, event_ts),
-                Err(e) => warn!(context = %topic_str,
-                                 "Не удалось распарсить обновление ордербука: {}", e),
+                Err(e) => warn!(context = %topic_str, "Не удалось распарсить обновление ордербука: {}", e),
             }
             result.map(|(symbol, bids, asks)| WebSocketMessage::OrderBookL2 {
                 symbol, bids, asks, is_snapshot: message_type == Some("snapshot")
             }).map(Some)
         } else if topic_str.starts_with("publicTrade.") {
             debug!(context = %topic_str, "Попытка парсинга публичной сделки");
-            crate::exchange::bybit_ws::types_internal::parse_public_trade_update(data).map(|opt_data| opt_data.map(
+            crate::exchange::bybit_ws::types_internal::parse_public_trade_update(data_val).map(|opt_data| opt_data.map(
                 |(symbol, price, qty, side, trade_ts)| WebSocketMessage::PublicTrade { symbol, price, qty, side, timestamp: trade_ts }
             ))
         } else {
-            warn!(context = %log_ctx, "Получен неизвестный топик: {}", topic_str);
-            Err(anyhow!("Неизвестный WS топик: {}", topic_str))
+            warn!(context = %log_ctx, "Получен неизвестный топик с данными: {}", topic_str);
+            Err(anyhow!("Неизвестный WS топик с данными: {}", topic_str))
         }
     } else if response.success == Some(false) && response.ret_msg.is_some() {
-         let error_message = response.ret_msg.unwrap_or_else(|| "Неизвестная ошибка".to_string());
-         error!(context = %log_ctx, "Получено сообщение об ошибке WebSocket: {}", error_message);
+         let error_message = response.ret_msg.as_deref().unwrap_or("Неизвестная ошибка от Bybit").to_string(); // Клонируем, так как response заимствован
+         let req_id_ctx = response.req_id.as_deref().unwrap_or(log_ctx);
+         error!(context = %req_id_ctx, "Получено сообщение об ошибке WebSocket от Bybit: {}", error_message);
          Ok(Some(WebSocketMessage::Error(error_message)))
     } else if response.success == Some(true) && response.op.is_none() && response.topic.is_none() {
          let conn_id_str = response.conn_id.as_deref().unwrap_or("N/A_conn");
-         // Это может быть ответ на аутентификацию или Ping/Pong без явного "op" в некоторых случаях
-         info!(context = %log_ctx, conn_id = %conn_id_str, "Получено общее сообщение об успехе без op/topic (вероятно, ответ на auth или pong). Игнорируется как отдельное событие здесь.");
+         info!(context = %log_ctx, conn_id = %conn_id_str, "Получено общее сообщение об успехе без op/topic. req_id: {:?}. Игнорируется.", response.req_id.as_deref());
          Ok(None)
     } else {
-        warn!(context = %log_ctx, "Неожиданный формат WS сообщения (нет op и topic, но не явная ошибка): {:?}", response);
-        Ok(None)
+        warn!(context = %log_ctx, "Неожиданный формат WS сообщения (нет op и topic, но не ошибка): op={:?}, topic={:?}, success={:?}", 
+            response.op.as_deref(), response.topic.as_deref(), response.success);
+        Ok(None) 
     }
 }
