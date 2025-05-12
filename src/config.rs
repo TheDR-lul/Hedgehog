@@ -46,9 +46,8 @@ pub struct Config {
     #[serde(default = "default_ws_auto_chunk_target_count")]
     pub ws_auto_chunk_target_count: u32,
 
-    // --- ИЗМЕНЕНО ЗДЕСЬ ---
     #[serde(default = "default_ws_order_book_depth")]
-    pub ws_order_book_depth: u32, // Оставляем u32, значение по умолчанию изменено ниже
+    pub ws_order_book_depth: u32,
 
     #[serde(default = "default_ws_max_value_imbalance_ratio")]
     pub ws_max_value_imbalance_ratio: Option<f64>,
@@ -64,28 +63,47 @@ pub struct Config {
 
     #[serde(default = "default_ws_stale_price_ratio")]
     pub ws_stale_price_ratio: Option<f64>,
+
+    // --- ДОБАВЛЕНО НОВОЕ ПОЛЕ ---
+    #[serde(default = "default_ws_mpsc_buffer_size")]
+    pub ws_mpsc_buffer_size: Option<u32>, // Размер буфера для MPSC канала WebSocket
 }
 
-// Функции для значений по умолчанию
+// --- Функции для значений по умолчанию ---
 fn default_hedge_strategy() -> HedgeStrategy { HedgeStrategy::Sequential }
 fn default_ws_auto_chunk_target_count() -> u32 { 15 }
-
-// --- ИЗМЕНЕНО ЗДЕСЬ ---
-fn default_ws_order_book_depth() -> u32 { 1 } // Изменено с 10 на 50 (или 1, если 50 не подойдет)
-
+fn default_ws_order_book_depth() -> u32 { 50 } // Увеличил для примера, было 10
 fn default_ws_max_value_imbalance_ratio() -> Option<f64> { Some(0.05) }
 fn default_ws_reconnect_delay_secs() -> u64 { 5 }
 fn default_ws_ping_interval_secs() -> u64 { 20 }
 fn default_ws_limit_order_placement_strategy() -> WsLimitOrderPlacementStrategy { WsLimitOrderPlacementStrategy::BestAskBid }
 fn default_ws_stale_price_ratio() -> Option<f64> { Some(0.01) }
 
+// --- ДОБАВЛЕНА ФУНКЦИЯ ПО УМОЛЧАНИЮ ДЛЯ НОВОГО ПОЛЯ ---
+fn default_ws_mpsc_buffer_size() -> Option<u32> { Some(100) } // Значение по умолчанию 100
+
 impl Config {
     pub fn load() -> Result<Self> {
-        let file = env::var("HEDGER_CONFIG").unwrap_or_else(|_| "Config.toml".into());
-        let loader = Loader::builder()
-            .add_source(File::with_name(&file).required(false))
-            .add_source(Environment::with_prefix("HEDGER").separator("__"))
-            .build()?;
-        Ok(loader.try_deserialize()?)
+        let file_path = env::var("HEDGER_CONFIG").unwrap_or_else(|_| "Config.toml".into());
+        println!("Loading configuration from: {}", file_path); // Для отладки
+        let s = Loader::builder()
+            .add_source(File::with_name(&file_path).required(false))
+            .add_source(Environment::with_prefix("HEDGER").separator("__"));
+        
+        match s.build() {
+            Ok(loader) => {
+                match loader.try_deserialize() {
+                    Ok(config) => Ok(config),
+                    Err(e) => {
+                        eprintln!("Failed to deserialize config: {}", e);
+                        Err(e.into())
+                    }
+                }
+            },
+            Err(e) => {
+                 eprintln!("Failed to build config loader (path: {}): {}", file_path, e);
+                 Err(e.into())
+            }
+        }
     }
 }

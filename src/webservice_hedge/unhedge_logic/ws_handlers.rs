@@ -6,12 +6,13 @@ use rust_decimal_macros::dec;
 use tracing::{debug, error, info, warn, trace};
 
 use crate::exchange::types::{WebSocketMessage, DetailedOrderStatus, OrderSide, OrderStatusText, OrderbookLevel};
-// --- Ссылка на HedgerWsUnhedgeTask ---
 use crate::webservice_hedge::unhedge_task::HedgerWsUnhedgeTask;
 use crate::webservice_hedge::state::{HedgerWsStatus, Leg, OperationType};
-// --- Используем order_management из hedge_logic (пока считаем общим) ---
-// --- И хелперы из ЭТОГО модуля (unhedge_logic) ---
+// Используем хелперы из ЭТОГО модуля (unhedge_logic)
 use crate::webservice_hedge::unhedge_logic::helpers::{get_current_price, send_progress_update};
+// Импортируем функции управления ордерами из СОБСТВЕННОГО модуля unhedge_logic
+use crate::webservice_hedge::unhedge_logic::order_management::{handle_cancel_confirmation, check_stale_orders};
+
 
 // Главный обработчик сообщений WS для Unhedge
 pub async fn handle_websocket_message(task: &mut HedgerWsUnhedgeTask, message: WebSocketMessage) -> Result<()> {
@@ -20,56 +21,54 @@ pub async fn handle_websocket_message(task: &mut HedgerWsUnhedgeTask, message: W
             let status_clone = task.state.status.clone();
             if let HedgerWsStatus::WaitingCancelConfirmation { ref cancelled_order_id, cancelled_leg, .. } = status_clone {
                  if details.order_id == *cancelled_order_id {
-                     info!(operation_id=task.operation_id, order_id=%details.order_id, "Received update for the order being cancelled (unhedge).");
-                     handle_order_update(task, details.clone()).await?;
+                     info!(operation_id=task.operation_id, order_id=%details.order_id, "Получено обновление для отменяемого ордера (расхедж).");
+                     handle_order_update(task, details.clone()).await?; // Локальная функция
 
                      let order_is_inactive = match cancelled_leg {
                          Leg::Spot => task.state.active_spot_order.is_none(),
                          Leg::Futures => task.state.active_futures_order.is_none(),
                      };
 
+                     // Проверяем, что мы все еще в состоянии ожидания отмены и ордер действительно неактивен
                      if matches!(task.state.status, HedgerWsStatus::WaitingCancelConfirmation {.. }) && order_is_inactive {
-                          // TODO: Заменить на unhedge-специфичную или общую реализацию!
-                          warn!(operation_id=task.operation_id, "Need unhedge-specific handle_cancel_confirmation or generic version.");
-                          // hedge_handle_cancel_confirmation(task, cancelled_order_id, cancelled_leg).await?; // НЕ СКОМПИЛИРУЕТСЯ
+                          // Вызываем адаптированную функцию из unhedge_logic::order_management
+                          handle_cancel_confirmation(task, cancelled_order_id, cancelled_leg).await?;
                      } else {
-                          debug!(operation_id=task.operation_id, order_id=%cancelled_order_id, status=?task.state.status, order_is_inactive, "Order update received (unhedge), but order still active or state changed. Not calling handle_cancel_confirmation yet.");
+                          debug!(operation_id=task.operation_id, order_id=%cancelled_order_id, status=?task.state.status, order_is_inactive, "Обновление ордера (расхедж) получено, но ордер все еще активен или статус изменился. Пока не вызываем handle_cancel_confirmation.");
                      }
                      return Ok(());
                  }
             }
-            handle_order_update(task, details).await?;
+            handle_order_update(task, details).await?; // Локальная функция
         }
         WebSocketMessage::OrderBookL2 { symbol, bids, asks, is_snapshot } => {
-            handle_order_book_update(task, symbol, bids, asks, is_snapshot).await?;
-            // TODO: Заменить на unhedge-специфичную или общую реализацию!
-            warn!(operation_id=task.operation_id, "Need unhedge-specific check_stale_orders or generic version.");
-            // hedge_check_stale_orders(task).await?; // НЕ СКОМПИЛИРУЕТСЯ
+            handle_order_book_update(task, symbol, bids, asks, is_snapshot).await?; // Локальная функция
+            // Вызываем адаптированную функцию из unhedge_logic::order_management
+            check_stale_orders(task).await?;
         }
         WebSocketMessage::PublicTrade { symbol, price, qty, side, timestamp } => {
-             handle_public_trade_update(task, symbol, price, qty, side, timestamp).await?;
+             handle_public_trade_update(task, symbol, price, qty, side, timestamp).await?; // Локальная функция
         }
         WebSocketMessage::Error(error_message) => {
-            warn!(operation_id = task.operation_id, %error_message, "Received error message from WebSocket stream");
+            warn!(operation_id = task.operation_id, %error_message, "Получено сообщение об ошибке из WebSocket потока");
+            // Здесь можно добавить логику перехода задачи в состояние Failed, если ошибка критическая
         }
         WebSocketMessage::Disconnected => {
-             error!(operation_id = task.operation_id, "WebSocket disconnected event received.");
-             return Err(anyhow!("WebSocket disconnected"));
+             error!(operation_id = task.operation_id, "Получено событие разрыва WebSocket соединения.");
+             // Ошибка будет передана в цикл run задачи unhedge_task.rs
+             return Err(anyhow!("WebSocket соединение разорвано"));
         }
-        WebSocketMessage::Pong => { debug!(operation_id = task.operation_id, "Pong received"); }
-        WebSocketMessage::Authenticated(success) => { info!(operation_id = task.operation_id, success, "WS Authenticated status received"); }
-        WebSocketMessage::SubscriptionResponse { success, ref topic } => { info!(operation_id = task.operation_id, success, %topic, "WS Subscription response received"); }
-        WebSocketMessage::Connected => { info!(operation_id = task.operation_id, "WS Connected event received (likely redundant)"); }
+        WebSocketMessage::Pong => { debug!(operation_id = task.operation_id, "Pong получен"); }
+        WebSocketMessage::Authenticated(success) => { info!(operation_id = task.operation_id, success, "Получен статус аутентификации WS"); }
+        WebSocketMessage::SubscriptionResponse { success, ref topic } => { info!(operation_id = task.operation_id, success, %topic, "Получен ответ на подписку WS"); }
+        WebSocketMessage::Connected => { info!(operation_id = task.operation_id, "Получено событие подключения WS (вероятно, избыточно)"); }
     }
     Ok(())
 }
 
-// Обработка обновления ордера (Unhedge)
+// Обработка обновления ордера (Unhedge) - эта функция остается без изменений, так как она уже специфична для HedgerWsUnhedgeTask
 async fn handle_order_update(task: &mut HedgerWsUnhedgeTask, details: DetailedOrderStatus) -> Result<()> {
-    info!(operation_id = task.operation_id, order_id = %details.order_id, status = ?details.status_text, filled_qty = details.filled_qty, "Handling UNHEDGE order update");
-
-    // Тип операции здесь всегда Unhedge
-    let operation_type = OperationType::Unhedge;
+    info!(operation_id = task.operation_id, order_id = %details.order_id, status = ?details.status_text, filled_qty = details.filled_qty, "Обработка обновления ордера РАСХЕДЖИРОВАНИЯ");
 
     let mut leg_found = None;
     let mut quantity_diff = Decimal::ZERO;
@@ -85,7 +84,7 @@ async fn handle_order_update(task: &mut HedgerWsUnhedgeTask, details: DetailedOr
         leg_found = Some(Leg::Futures);
         task.state.active_futures_order.as_ref().map(|o| o.filled_quantity).unwrap_or_default()
     } else {
-        warn!(operation_id = task.operation_id, order_id = %details.order_id, "Received update for an unknown or inactive unhedge order.");
+        warn!(operation_id = task.operation_id, order_id = %details.order_id, "Получено обновление для неизвестного или неактивного ордера расхеджирования.");
         return Ok(());
     };
 
@@ -115,9 +114,9 @@ async fn handle_order_update(task: &mut HedgerWsUnhedgeTask, details: DetailedOr
            matches!(order_state.status, OrderStatusText::Filled | OrderStatusText::Cancelled | OrderStatusText::PartiallyFilledCanceled | OrderStatusText::Rejected)
         {
             final_status_reached = true;
-            info!(operation_id=task.operation_id, order_id=%order_state.order_id, final_status=?order_state.status, "{:?} unhedge order reached final state.", leg);
+            info!(operation_id=task.operation_id, order_id=%order_state.order_id, final_status=?order_state.status, "Ордер расхеджирования {:?} достиг финального статуса.", leg);
         }
-    } // Мутабельное заимствование order_state заканчивается здесь
+    } 
 
     if needs_progress_update {
         let price_for_diff = if avg_price > Decimal::ZERO {
@@ -126,19 +125,24 @@ async fn handle_order_update(task: &mut HedgerWsUnhedgeTask, details: DetailedOr
             last_price
         } else {
             // Используем хелпер из unhedge_logic
-            get_current_price(task, leg).ok_or_else(|| anyhow!("Cannot determine price for value calc for unhedge order {}", details.order_id))?
+            get_current_price(task, leg).ok_or_else(|| anyhow!("Не удалось определить цену для расчета стоимости для ордера расхеджирования {}", details.order_id))?
         };
         let value_diff = quantity_diff * price_for_diff;
 
         match leg {
-            Leg::Spot => {
+            Leg::Spot => { // Продажа спота при расхеджировании
                 task.state.cumulative_spot_filled_quantity += quantity_diff;
-                task.state.cumulative_spot_filled_value += value_diff.abs(); // Продажа -> Модуль
-                // Не обновляем task.state.target_total_futures_value
+                // При продаже спота, стоимость (value) обычно положительная, если quantity_diff положительный (т.е. продали еще)
+                // Если цена price_for_diff положительная, то value_diff будет иметь тот же знак, что и quantity_diff.
+                // Мы хотим добавить абсолютное значение изменения стоимости к cumulative_spot_filled_value,
+                // так как это отражает "высвобожденную" стоимость.
+                task.state.cumulative_spot_filled_value += value_diff.abs(); 
             }
-            Leg::Futures => {
+            Leg::Futures => { // Покупка фьючерса при расхеджировании
                 task.state.cumulative_futures_filled_quantity += quantity_diff;
-                task.state.cumulative_futures_filled_value += value_diff.abs(); // Покупка -> Модуль
+                // При покупке фьючерса, стоимость (value) обычно отрицательная (если quantity_diff положительный, т.е. купили еще)
+                // так как это затраты. Мы хотим добавить абсолютное значение изменения стоимости.
+                task.state.cumulative_futures_filled_value += value_diff.abs();
             }
         }
         // Используем хелпер из unhedge_logic
@@ -150,13 +154,13 @@ async fn handle_order_update(task: &mut HedgerWsUnhedgeTask, details: DetailedOr
             Leg::Spot => task.state.active_spot_order = None,
             Leg::Futures => task.state.active_futures_order = None,
         }
-        debug!(operation_id=task.operation_id, order_id=%details.order_id, final_status=?order_status_text, "Cleared active state for {:?} unhedge order.", leg);
+        debug!(operation_id=task.operation_id, order_id=%details.order_id, final_status=?order_status_text, "Очищено активное состояние для ордера расхеджирования {:?}.", leg);
     }
 
     Ok(())
 }
 
-// Обработка обновления стакана (Unhedge)
+// Обработка обновления стакана (Unhedge) - эта функция остается без изменений
 async fn handle_order_book_update(task: &mut HedgerWsUnhedgeTask, symbol: String, bids: Vec<OrderbookLevel>, asks: Vec<OrderbookLevel>, _is_snapshot: bool) -> Result<()> {
     let market_data_ref = if symbol == task.state.symbol_spot { &mut task.state.spot_market_data }
                           else if symbol == task.state.symbol_futures { &mut task.state.futures_market_data }
@@ -169,8 +173,8 @@ async fn handle_order_book_update(task: &mut HedgerWsUnhedgeTask, symbol: String
     Ok(())
 }
 
-// Обработка публичных сделок (Unhedge)
+// Обработка публичных сделок (Unhedge) - эта функция остается без изменений
 async fn handle_public_trade_update(task: &mut HedgerWsUnhedgeTask, symbol: String, price: f64, qty: f64, side: OrderSide, timestamp: i64) -> Result<()> {
-    trace!(operation_id = task.operation_id, %symbol, %price, %qty, ?side, %timestamp, "Received public trade during unhedge (currently ignored)");
+    trace!(operation_id = task.operation_id, %symbol, %price, %qty, ?side, %timestamp, "Получена публичная сделка во время расхеджирования (в настоящее время игнорируется)");
     Ok(())
 }

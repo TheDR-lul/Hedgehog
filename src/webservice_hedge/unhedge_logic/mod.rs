@@ -3,7 +3,8 @@ pub mod chunk_execution;
 pub mod helpers;
 pub mod init;
 pub mod reconciliation;
-pub mod ws_handlers;    
+pub mod ws_handlers; 
+pub mod order_management;   
 
 // Реэкспорт для удобства, если нужно
 //pub use init::initialize_task;
