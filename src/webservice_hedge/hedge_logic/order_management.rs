@@ -3,17 +3,15 @@
 use anyhow::{anyhow, Result, Context};
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
-// --- ИСПРАВЛЕНО: Добавляем trace ---
-use tracing::{error, info, warn, trace}; // Добавили trace
+use tracing::{error, info, warn, trace};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::exchange::types::{OrderSide, OrderStatusText};
 use crate::webservice_hedge::hedge_task::HedgerWsHedgeTask;
 use crate::webservice_hedge::state::{ChunkOrderState, HedgerWsStatus, Leg};
-use crate::webservice_hedge::hedge_logic::helpers::{calculate_limit_price_for_leg, round_down_step};
+use crate::webservice_hedge::hedge_logic::helpers::{calculate_limit_price_for_leg, round_down_step, update_final_db_status}; // Добавили update_final_db_status
 
-// Проверка активных ордеров на "устаревание" цены
-pub async fn check_stale_orders(task: &mut HedgerWsHedgeTask) -> Result<()> {
+pub(super) async fn check_stale_orders(task: &mut HedgerWsHedgeTask) -> Result<()> {
     if !matches!(task.state.status, HedgerWsStatus::RunningChunk(_)) { return Ok(()); }
 
     if let Some(stale_ratio_f64) = task.config.ws_stale_price_ratio {
@@ -21,7 +19,6 @@ pub async fn check_stale_orders(task: &mut HedgerWsHedgeTask) -> Result<()> {
         let stale_ratio_decimal = Decimal::try_from(stale_ratio_f64)?;
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
 
-        // Проверка ордера на СПОТ (Buy)
         let spot_order_opt = task.state.active_spot_order.clone();
         if let Some(spot_order) = spot_order_opt {
             if matches!(spot_order.status, OrderStatusText::New | OrderStatusText::PartiallyFilled) {
@@ -32,13 +29,11 @@ pub async fn check_stale_orders(task: &mut HedgerWsHedgeTask) -> Result<()> {
                             initiate_order_replacement(task, Leg::Spot, "StalePrice".to_string()).await?;
                             return Ok(());
                         }
-                    // --- ИСПРАВЛЕНО: Убираем плейсхолдер ---
                     } else { trace!(operation_id = task.operation_id, "Spot market data is too old for stale check ({:.1}s)", (now_ms - last_update_time) as f64 / 1000.0); }
                 }
             }
         }
 
-        // Проверка ордера на ФЬЮЧЕРС (Sell)
         let futures_order_opt = task.state.active_futures_order.clone();
         if let Some(futures_order) = futures_order_opt {
             if matches!(futures_order.status, OrderStatusText::New | OrderStatusText::PartiallyFilled) {
@@ -49,7 +44,6 @@ pub async fn check_stale_orders(task: &mut HedgerWsHedgeTask) -> Result<()> {
                             initiate_order_replacement(task, Leg::Futures, "StalePrice".to_string()).await?;
                             return Ok(());
                         }
-                    // --- ИСПРАВЛЕНО: Убираем плейсхолдер ---
                     } else { trace!(operation_id = task.operation_id, "Futures market data is too old for stale check ({:.1}s)", (now_ms - last_update_time) as f64 / 1000.0); }
                 }
             }
@@ -58,12 +52,19 @@ pub async fn check_stale_orders(task: &mut HedgerWsHedgeTask) -> Result<()> {
     Ok(())
 }
 
-// Инициирование замены ордера (отправка команды cancel)
-pub async fn initiate_order_replacement(task: &mut HedgerWsHedgeTask, leg_to_cancel: Leg, reason: String) -> Result<()> {
-    // ... (код функции без изменений) ...
-    let (order_to_cancel_opt, symbol, is_spot) = match leg_to_cancel {
-       Leg::Spot => (task.state.active_spot_order.as_ref(), &task.state.symbol_spot, true),
-       Leg::Futures => (task.state.active_futures_order.as_ref(), &task.state.symbol_futures, false),
+pub(super) async fn initiate_order_replacement(task: &mut HedgerWsHedgeTask, leg_to_cancel: Leg, reason: String) -> Result<()> {
+    let (order_to_cancel_opt, symbol_for_api, is_spot) = match leg_to_cancel {
+       Leg::Spot => {
+           // *** ИСПРАВЛЕНИЕ НАЧАЛО ***
+           let base_symbol = task.state.symbol_spot.trim_end_matches(&task.config.quote_currency.to_uppercase()).to_string();
+           if base_symbol.is_empty() || base_symbol == task.state.symbol_spot {
+               error!("op_id:{}: Could not derive base symbol from spot_symbol '{}' for cancel in initiate_order_replacement.", task.operation_id, task.state.symbol_spot);
+               return Err(anyhow!("Could not derive base symbol for spot cancel"));
+           }
+           (task.state.active_spot_order.as_ref(), base_symbol, true)
+           // *** ИСПРАВЛЕНИЕ КОНЕЦ ***
+       },
+       Leg::Futures => (task.state.active_futures_order.as_ref(), task.state.symbol_futures.clone(), false),
     };
 
     if let Some(order_to_cancel) = order_to_cancel_opt {
@@ -72,13 +73,17 @@ pub async fn initiate_order_replacement(task: &mut HedgerWsHedgeTask, leg_to_can
            return Ok(());
        }
        info!(operation_id = task.operation_id, order_id = %order_to_cancel.order_id, ?leg_to_cancel, %reason, "Initiating order replacement: sending cancel request...");
-       let current_chunk = match task.state.status { HedgerWsStatus::RunningChunk(idx) => idx, _ => task.state.current_chunk_index };
+       let current_chunk = match task.state.status { HedgerWsStatus::RunningChunk(idx) => idx, _ => task.state.current_chunk_index.saturating_sub(1).max(1) };
        let order_id_to_cancel_str = order_to_cancel.order_id.clone();
 
        task.state.status = HedgerWsStatus::CancellingOrder { chunk_index: current_chunk, leg_to_cancel, order_id_to_cancel: order_id_to_cancel_str.clone(), reason };
 
-       let cancel_result = if is_spot { task.exchange_rest.cancel_spot_order(symbol, &order_id_to_cancel_str).await }
-                         else { task.exchange_rest.cancel_futures_order(symbol, &order_id_to_cancel_str).await };
+       let cancel_result = if is_spot {
+           // Используем symbol_for_api, который теперь является базовым символом для спота
+           task.exchange_rest.cancel_spot_order(&symbol_for_api, &order_id_to_cancel_str).await
+       } else {
+           task.exchange_rest.cancel_futures_order(&symbol_for_api, &order_id_to_cancel_str).await // Для фьючерсов symbol_for_api уже полный
+       };
 
        if let Err(e) = cancel_result {
             error!(operation_id = task.operation_id, order_id = %order_id_to_cancel_str, %e, "Failed to send cancel request for order replacement");
@@ -94,11 +99,10 @@ pub async fn initiate_order_replacement(task: &mut HedgerWsHedgeTask, leg_to_can
     Ok(())
 }
 
-// Обработка подтверждения отмены и выставление нового ордера
-pub async fn handle_cancel_confirmation(task: &mut HedgerWsHedgeTask, cancelled_order_id: &str, leg: Leg) -> Result<()> {
+pub(super) async fn handle_cancel_confirmation(task: &mut HedgerWsHedgeTask, cancelled_order_id: &str, leg: Leg) -> Result<()> {
      info!(operation_id = task.operation_id, %cancelled_order_id, ?leg, "Handling cancel confirmation: placing replacement order if needed...");
 
-     let (total_target_qty_approx, filled_qty, min_quantity, step, is_spot) = match leg {
+     let (total_target_qty_approx, filled_qty, min_quantity, step, is_spot_leg) = match leg {
          Leg::Spot => {
              let price = crate::webservice_hedge::hedge_logic::helpers::get_current_price(task, Leg::Spot).unwrap_or(Decimal::ONE);
              let target_approx = if price > Decimal::ZERO { task.state.initial_target_spot_value / price } else { Decimal::MAX };
@@ -118,57 +122,66 @@ pub async fn handle_cancel_confirmation(task: &mut HedgerWsHedgeTask, cancelled_
 
       let tolerance = dec!(1e-12);
       if remaining_quantity_rounded < min_quantity && remaining_quantity_rounded.abs() > tolerance {
-            // --- ИСПРАВЛЕНО: Убираем плейсхолдер ---
            warn!(operation_id=task.operation_id, %remaining_quantity_rounded, %min_quantity, ?leg, "Remaining quantity after cancel is dust. Not placing replacement order.");
       }
       else if remaining_quantity_rounded > tolerance {
           info!(operation_id = task.operation_id, %remaining_quantity_rounded, ?leg, "Placing replacement order...");
           let new_limit_price = calculate_limit_price_for_leg(task, leg)?;
 
-          let (symbol, side, qty_precision, price_precision) = match leg {
-              Leg::Spot => (&task.state.symbol_spot, OrderSide::Buy, step.scale(), task.state.spot_tick_size.scale()),
-              Leg::Futures => (&task.state.symbol_futures, OrderSide::Sell, step.scale(), task.state.futures_tick_size.scale()),
+          // *** ИСПРАВЛЕНИЕ НАЧАЛО ***
+          let (symbol_for_api, order_side_for_replacement, qty_precision, price_precision, actual_symbol_for_state) = match leg {
+              Leg::Spot => {
+                  let base_symbol = task.state.symbol_spot.trim_end_matches(&task.config.quote_currency.to_uppercase()).to_string();
+                  if base_symbol.is_empty() || base_symbol == task.state.symbol_spot {
+                       error!("op_id:{}: Could not derive base symbol from spot_symbol '{}' for replacement order.", task.operation_id, task.state.symbol_spot);
+                       return Err(anyhow!("Could not derive base symbol for spot replacement"));
+                  }
+                  (base_symbol, OrderSide::Buy, step.scale(), task.state.spot_tick_size.scale(), task.state.symbol_spot.clone())
+              }
+              Leg::Futures => (task.state.symbol_futures.clone(), OrderSide::Sell, step.scale(), task.state.futures_tick_size.scale(), task.state.symbol_futures.clone()),
           };
+          // *** ИСПРАВЛЕНИЕ КОНЕЦ ***
 
           let quantity_f64 = remaining_quantity_rounded.round_dp(qty_precision).to_f64().unwrap_or(0.0);
           let price_f64 = new_limit_price.round_dp(price_precision).to_f64().unwrap_or(0.0);
 
           if quantity_f64 <= 0.0 || price_f64 <= 0.0 {
-               // --- ИСПРАВЛЕНО: Убираем плейсхолдер ---
                error!(operation_id=task.operation_id, %quantity_f64, %price_f64, ?leg, "Invalid parameters for replacement order!");
-               let current_chunk = match task.state.status { HedgerWsStatus::WaitingCancelConfirmation { chunk_index, .. } => chunk_index, _ => task.state.current_chunk_index };
+               let current_chunk = match task.state.status { HedgerWsStatus::WaitingCancelConfirmation { chunk_index, .. } => chunk_index, _ => task.state.current_chunk_index.saturating_sub(1).max(1) };
                task.state.status = HedgerWsStatus::RunningChunk(current_chunk);
                return Err(anyhow!("Invalid parameters for replacement order"));
           }
 
-           let place_result = if is_spot { task.exchange_rest.place_limit_order(symbol, side, quantity_f64, price_f64).await }
-                             else { task.exchange_rest.place_futures_limit_order(symbol, side, quantity_f64, price_f64).await };
+           let place_result = if is_spot_leg {
+               // Используем symbol_for_api, который является базовым для спота
+               task.exchange_rest.place_limit_order(&symbol_for_api, order_side_for_replacement, quantity_f64, price_f64).await
+           } else {
+               task.exchange_rest.place_futures_limit_order(&symbol_for_api, order_side_for_replacement, quantity_f64, price_f64).await // Для фьючерсов symbol_for_api уже полный
+           };
 
            match place_result {
                Ok(new_order) => {
-                   // --- ИСПРАВЛЕНО: Убираем плейсхолдер ---
                    info!(operation_id=task.operation_id, new_order_id=%new_order.id, ?leg, "Replacement order placed successfully.");
-                   let new_order_state = ChunkOrderState::new(new_order.id, symbol.to_string(), side, new_limit_price, remaining_quantity_rounded);
+                   // Используем actual_symbol_for_state для создания ChunkOrderState, т.к. он содержит полную пару (например, BTCUSDT)
+                   let new_order_state = ChunkOrderState::new(new_order.id, actual_symbol_for_state, order_side_for_replacement, new_limit_price, remaining_quantity_rounded);
                    match leg {
                        Leg::Spot => task.state.active_spot_order = Some(new_order_state),
                        Leg::Futures => task.state.active_futures_order = Some(new_order_state)
                    }
                }
                Err(e) => {
-                    // --- ИСПРАВЛЕНО: Убираем плейсхолдеры и добавляем аргумент в Failed ---
                     let error_msg = format!("Failed to place replacement {:?} order: {}", leg, e);
                     error!(operation_id = task.operation_id, error=%error_msg, ?leg);
-                    task.state.status = HedgerWsStatus::Failed(error_msg); // <-- Добавляем строку ошибки
-                    crate::webservice_hedge::hedge_logic::helpers::update_final_db_status(task).await;
-                    return Err(e).context("Failed to place replacement order");
+                    task.state.status = HedgerWsStatus::Failed(error_msg.clone());
+                    update_final_db_status(task).await; // Используем хелпер из hedge_logic
+                    return Err(anyhow!(error_msg).context("Failed to place replacement order")); // Добавил anyhow! для error_msg
                }
            }
       } else {
-           // --- ИСПРАВЛЕНО: Убираем плейсхолдер ---
            info!(operation_id=task.operation_id, ?leg, "No remaining quantity after cancel confirmation. Not placing replacement.");
       }
 
-      let current_chunk = match task.state.status { HedgerWsStatus::WaitingCancelConfirmation { chunk_index, .. } => chunk_index, _ => task.state.current_chunk_index };
+      let current_chunk = match task.state.status { HedgerWsStatus::WaitingCancelConfirmation { chunk_index, .. } => chunk_index, _ => task.state.current_chunk_index.saturating_sub(1).max(1) };
       task.state.status = HedgerWsStatus::RunningChunk(current_chunk);
      Ok(())
 }
