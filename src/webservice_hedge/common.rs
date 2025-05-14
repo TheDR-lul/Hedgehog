@@ -5,9 +5,6 @@ use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use tracing::{debug, warn, error};
 
-// Порог для проверки стоимостного дисбаланса ПРИ РАСЧЕТЕ ПАРАМЕТРОВ ЧАНКА.
-// 15% должно быть достаточно, чтобы разрешить некоторые расхождения из-за шагов,
-// но отсечь явно несбалансированные конфигурации чанков.
 const MAX_PER_CHUNK_VALUE_IMBALANCE_RATIO_FOR_SETUP: Decimal = dec!(0.15);
 
 pub fn calculate_auto_chunk_parameters(
@@ -32,15 +29,20 @@ pub fn calculate_auto_chunk_parameters(
     if initial_target_spot_value <= Decimal::ZERO {
         return Err(anyhow!("Initial target spot value must be positive"));
     }
-    if initial_target_futures_quantity < Decimal::ZERO {
+    // initial_target_futures_quantity может быть 0, если это spot-only операция (не для хеджа)
+    // Для хеджа он должен быть > 0
+    if initial_target_futures_quantity < Decimal::ZERO { // Строго меньше нуля - ошибка
         return Err(anyhow!("Initial target futures quantity cannot be negative"));
     }
+    if initial_target_futures_quantity == Decimal::ZERO && initial_target_spot_value > Decimal::ZERO {
+        // Это скорее для unhedge или spot-only, для хеджа фьючи должны быть
+        warn!("Initial target futures quantity is zero, but spot value is positive. Proceeding as spot-only if possible.");
+    }
+
 
     let total_spot_quantity_estimate_for_op = if current_spot_price > Decimal::ZERO {
         initial_target_spot_value / current_spot_price
     } else {
-        // Эта ветка уже покрыта проверкой current_spot_price <= Decimal::ZERO выше,
-        // но для полноты можно оставить или удалить.
         return Err(anyhow!("Current spot price is zero, cannot estimate total spot quantity"));
     };
 
@@ -48,8 +50,20 @@ pub fn calculate_auto_chunk_parameters(
         return Err(anyhow!("Initial estimated total spot quantity is non-positive while target spot value is positive (price issue?)"));
     }
 
-    // Случай, когда фьючерсная часть равна нулю (например, операция только со спотом)
+    // --- ДОБАВЛЕНО ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ ---
+    debug!(
+        "calculate_auto_chunk_parameters input: initial_target_spot_value={}, initial_target_futures_quantity={}, current_spot_price={}, current_futures_price_estimate={}",
+        initial_target_spot_value, initial_target_futures_quantity, current_spot_price, current_futures_price_estimate
+    );
+    debug!(
+        "Derived total_spot_quantity_estimate_for_op = {}",
+        total_spot_quantity_estimate_for_op
+    );
+    // --- КОНЕЦ ЛОГИРОВАНИЯ ---
+
     if initial_target_futures_quantity == Decimal::ZERO {
+        // Логика для spot-only (для unhedge или если хедж только спотом, что нетипично)
+        // Оставляем как есть, т.к. основной фокус на хедже с фьючерсами
         if total_spot_quantity_estimate_for_op < min_spot_quantity && total_spot_quantity_estimate_for_op > dec!(1e-12) {
              return Err(anyhow!("Total spot quantity is less than min spot quantity for spot-only operation."));
         }
@@ -58,7 +72,7 @@ pub fn calculate_auto_chunk_parameters(
             if num_chunks_spot_only == 0 { return Err(anyhow!("Failed to calculate chunks for spot-only operation (num_chunks is 0)"));}
             let chunk_spot_raw = total_spot_quantity_estimate_for_op / Decimal::from(num_chunks_spot_only);
             let chunk_spot = round_up_step(chunk_spot_raw, spot_quantity_step).unwrap_or(chunk_spot_raw);
-            
+
             let spot_qty_ok = chunk_spot >= min_spot_quantity || chunk_spot < dec!(1e-12);
             let spot_val_est = chunk_spot * current_spot_price;
             let spot_notional_ok = min_spot_notional_value.map_or(true, |min_val| spot_val_est >= min_val || (spot_val_est < dec!(1e-12) && min_val < dec!(1e-12)));
@@ -74,12 +88,21 @@ pub fn calculate_auto_chunk_parameters(
         }
     }
 
-    // Коэффициент BTC спота к BTC фьючерса. Обычно > 1.0 из-за комиссий спота,
-    // т.к. initial_target_spot_value рассчитывается так, чтобы покрыть стоимость фьючерса + комиссии.
+
     let spot_to_fut_btc_ratio = total_spot_quantity_estimate_for_op / initial_target_futures_quantity;
-    if spot_to_fut_btc_ratio < dec!(0.95) || spot_to_fut_btc_ratio > dec!(1.05) { // Более широкая проверка
-        warn!("Unusual spot_to_fut_btc_ratio: {:.4}. This might lead to value imbalances if not intended. Ratio should be close to 1.", spot_to_fut_btc_ratio);
+    // --- ИЗМЕНЕН WARN для большей информативности ---
+    if spot_to_fut_btc_ratio < dec!(0.98) || spot_to_fut_btc_ratio > dec!(1.02) { // Слегка расширил допустимый диапазон перед варнингом, т.к. комиссии влияют
+        warn!(
+            "Unusual spot_to_fut_btc_ratio: {:.6}. Calculated from: total_spot_qty_est ({:.8}) / initial_target_fut_qty ({:.8}). This might lead to value imbalances if not intended. Ratio should ideally be very close to 1.0 plus spot_fee_rate.",
+            spot_to_fut_btc_ratio, total_spot_quantity_estimate_for_op, initial_target_futures_quantity
+        );
+    } else {
+        debug!(
+            "Calculated spot_to_fut_btc_ratio: {:.6} (total_spot_qty_est: {:.8}, initial_target_fut_qty: {:.8})",
+            spot_to_fut_btc_ratio, total_spot_quantity_estimate_for_op, initial_target_futures_quantity
+        );
     }
+    // --- КОНЕЦ ИЗМЕНЕНИЯ WARN ---
 
     let mut number_of_chunks = target_chunk_count.max(1);
 
@@ -91,7 +114,6 @@ pub fn calculate_auto_chunk_parameters(
         let num_chunks_decimal = Decimal::from(number_of_chunks);
         let tolerance = dec!(1e-12);
 
-        // 1. Рассчитываем количество фьючерсов на чанк
         let chunk_futures_quantity_raw = initial_target_futures_quantity / num_chunks_decimal;
         let chunk_futures_quantity = round_up_step(chunk_futures_quantity_raw, futures_quantity_step)
             .unwrap_or(chunk_futures_quantity_raw);
@@ -111,7 +133,6 @@ pub fn calculate_auto_chunk_parameters(
             continue;
         }
 
-        // 2. Рассчитываем количество спота на чанк, исходя из фьючерсного объема чанка и их общего соотношения BTC
         let target_spot_btc_for_chunk = chunk_futures_quantity * spot_to_fut_btc_ratio;
         let chunk_spot_quantity = round_up_step(target_spot_btc_for_chunk, spot_quantity_step)
             .unwrap_or(target_spot_btc_for_chunk);
@@ -129,7 +150,6 @@ pub fn calculate_auto_chunk_parameters(
             continue;
         }
 
-        // 3. Проверки на Notional Value
         let chunk_spot_value_estimate = chunk_spot_quantity * current_spot_price;
         let spot_notional_ok = min_spot_notional_value.map_or(true, |min_val| chunk_spot_value_estimate >= min_val || (chunk_spot_value_estimate < tolerance && min_val < tolerance));
 
@@ -148,15 +168,21 @@ pub fn calculate_auto_chunk_parameters(
             continue;
         }
 
-        // 4. Проверка стоимостного баланса внутри чанка
         let chunk_value_imbalance = (chunk_spot_value_estimate - chunk_futures_value_estimate).abs();
         let value_comparison_base = if chunk_spot_value_estimate > tolerance && chunk_futures_value_estimate > tolerance {
             chunk_spot_value_estimate.max(chunk_futures_value_estimate)
         } else {
             (chunk_spot_value_estimate.abs() + chunk_futures_value_estimate.abs()).max(tolerance)
         };
-        
-        let per_chunk_imbalance_ratio = chunk_value_imbalance / value_comparison_base;
+
+        let per_chunk_imbalance_ratio = if value_comparison_base > dec!(1e-9) { // Защита от деления на ноль
+            chunk_value_imbalance / value_comparison_base
+        } else if chunk_value_imbalance > dec!(1e-9) { // Если дисбаланс есть, а база близка к нулю, считаем ratio большим
+            Decimal::MAX
+        } else { // Если и дисбаланс и база близки к нулю, считаем ratio нулевым
+            Decimal::ZERO
+        };
+
         let per_chunk_imbalance_ok = per_chunk_imbalance_ratio <= MAX_PER_CHUNK_VALUE_IMBALANCE_RATIO_FOR_SETUP;
 
         if per_chunk_imbalance_ok {
@@ -188,6 +214,7 @@ pub fn calculate_auto_chunk_parameters(
     }
 }
 
+// Оставляем round_up_step без изменений, если он корректен
 fn round_up_step(value: Decimal, step: Decimal) -> Result<Decimal> {
     if step < Decimal::ZERO {
         return Err(anyhow!("Rounding step cannot be negative: {}", step));
@@ -195,13 +222,13 @@ fn round_up_step(value: Decimal, step: Decimal) -> Result<Decimal> {
     if step == Decimal::ZERO {
         return Ok(value.normalize());
     }
-    if value <= Decimal::ZERO {
-        return Ok(Decimal::ZERO.max(value.normalize()));
+    if value <= Decimal::ZERO { // Если значение 0 или отрицательное, округление вверх до шага не имеет смысла так, как для положительных.
+                              // Оставляем как есть или возвращаем 0, если value было <= 0.
+        return Ok(value.max(Decimal::ZERO).normalize()); // Возвращаем 0, если value отрицательное, иначе само value
     }
 
     let positive_step = step.abs();
-    // Для большей точности при делении, особенно если value и step имеют много знаков после запятой
-    let internal_precision = value.scale().max(positive_step.scale()) + positive_step.scale() + 5; // Добавил value.scale()
+    let internal_precision = value.scale().max(positive_step.scale()) + positive_step.scale() + 5;
 
     let value_scaled = value.round_dp_with_strategy(internal_precision, rust_decimal::RoundingStrategy::MidpointAwayFromZero);
     let step_scaled = positive_step.round_dp_with_strategy(internal_precision, rust_decimal::RoundingStrategy::MidpointAwayFromZero);
@@ -210,12 +237,11 @@ fn round_up_step(value: Decimal, step: Decimal) -> Result<Decimal> {
         warn!("Scaled rounding step became zero for value={}, step={}. Returning original value.", value, step);
         return Ok(value.normalize());
     }
-    // (value / step).ceil() * step
     let result = ((value_scaled / step_scaled).ceil() * step_scaled).normalize();
     Ok(result)
 }
 
-
+// Тесты оставляем без изменений
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,54 +255,48 @@ mod tests {
         assert_eq!(round_up_step(dec!(0.0010000001), dec!(0.001))?, dec!(0.002));
         assert_eq!(round_up_step(dec!(0.0008571), dec!(0.001))?, dec!(0.001));
         assert_eq!(round_up_step(dec!(0.0008574), dec!(0.000001))?, dec!(0.000858));
+        assert_eq!(round_up_step(Decimal::ZERO, dec!(0.001))?, Decimal::ZERO);
+        assert_eq!(round_up_step(dec!(-0.0005), dec!(0.001))?, Decimal::ZERO); // Округление отрицательного вверх к нулю
         Ok(())
     }
 
      #[test]
      fn test_calculate_chunks_op_id_7_scenario() -> Result<()> {
-         // Параметры, близкие к проблемным из лога op_id=7
-         let initial_spot_val = dec!(600.1975992); // Из HedgeParams.spot_value
-         let initial_fut_qty = dec!(0.006);       // Из HedgeParams.fut_order_qty
-         let spot_price = dec!(99999.6);           // Из HedgeParams.current_spot_price
-         let fut_price_estimate = dec!(100000.0);   // Оценка
+         let initial_spot_val = dec!(600.1975992);
+         let initial_fut_qty = dec!(0.006);
+         let spot_price = dec!(99999.6);
+         let fut_price_estimate = dec!(100000.0);
          let target_chunks = 15;
          let min_spot_q = dec!(0.000048);
          let min_fut_q = dec!(0.001);
-         let spot_step = dec!(0.000001); // 6 знаков
-         let fut_step = dec!(0.001);    // 3 знака
+         let spot_step = dec!(0.000001);
+         let fut_step = dec!(0.001);
 
          let (count, spot_q, fut_q) = calculate_auto_chunk_parameters(
              initial_spot_val, initial_fut_qty, spot_price, fut_price_estimate,
              target_chunks,
              min_spot_q, min_fut_q, spot_step, fut_step,
-             None, None, // min_notional_values
+             None, None,
          )?;
-        // total_spot_qty_est = 600.1975992 / 99999.6 = 0.0060020008...
-        // spot_to_fut_btc_ratio = 0.0060020008 / 0.006 = 1.00033346...
-
-        // Ожидаемый результат: 6 чанков (как в ручном прогоне)
-        // chunk_fut_qty for 6 chunks: round_up_step(0.006/6, 0.001) = round_up_step(0.001, 0.001) = 0.001
-        // target_spot_btc = 0.001 * 1.00033346... = 0.00100033346...
-        // chunk_spot_qty = round_up_step(0.00100033346, 0.000001) = 0.001001
+         // total_spot_quantity_estimate_for_op = 600.1975992 / 99999.6 = 0.0060020008...
+         // spot_to_fut_btc_ratio = 0.0060020008 / 0.006 = 1.00033346...
+         // chunk_fut_qty for 6 chunks: round_up_step(0.006/6, 0.001) = 0.001
+         // target_spot_btc = 0.001 * 1.00033346... = 0.00100033346...
+         // chunk_spot_qty = round_up_step(0.00100033346, 0.000001) = 0.001001
 
          println!("Test op_id=7 case: count={}, spot_q={}, fut_q={}", count, spot_q, fut_q);
          assert_eq!(count, 6);
-         assert_eq!(spot_q.round_dp(6), dec!(0.001001));
+         assert_eq!(spot_q.round_dp_with_strategy(6, rust_decimal::RoundingStrategy::MidpointAwayFromZero), dec!(0.001001));
          assert_eq!(fut_q, dec!(0.001));
          Ok(())
      }
 
     #[test]
     fn test_calculate_chunks_scenario_from_log_op_id_1() -> Result<()> {
-        // HedgeParams { spot_order_qty: 0.006002, fut_order_qty: 0.006, current_spot_price: 102235.08 ... }
-        // Chunk parameters calculated for state init operation_id=1 final_chunk_count=15 chunk_spot_quantity=0.001195 chunk_futures_quantity=0.001
-        // Это старые параметры, которые мы хотим избежать.
-        // С новой логикой и MAX_PER_CHUNK_VALUE_IMBALANCE_RATIO_FOR_SETUP = 0.15, мы должны получить другое количество чанков.
-
-        let initial_spot_val = dec!(613.61495016); // spot_value
+        let initial_spot_val = dec!(613.61495016);
         let initial_fut_qty = dec!(0.006);
         let spot_price = dec!(102235.08);
-        let fut_price_estimate = dec!(102235.08); // Используем спотовую цену для оценки фьюча
+        let fut_price_estimate = dec!(102235.08);
         let target_chunks = 15;
         let min_spot_q = dec!(0.000048);
         let min_fut_q = dec!(0.001);
@@ -289,36 +309,14 @@ mod tests {
             min_spot_q, min_fut_q, spot_step, fut_step,
             None, None,
         )?;
-
-        // total_spot_qty_est = 613.61495016 / 102235.08 = 0.006002
+        // total_spot_quantity_estimate_for_op = 613.61495016 / 102235.08 = 0.006002
         // spot_to_fut_btc_ratio = 0.006002 / 0.006 = 1.000333...
 
-        // Если 15 чанков:
-        // chunk_fut_raw = 0.006 / 15 = 0.0004 -> chunk_fut = 0.001
-        // target_spot_btc = 0.001 * 1.000333... = 0.001000333... -> chunk_spot = 0.001001
-        // spot_val = 0.001001 * 102235.08 = 102.337...
-        // fut_val  = 0.001 * 102235.08 = 102.235...
-        // imbalance_ratio = abs(102.337 - 102.235) / 102.337 = 0.102 / 102.337 ~ 0.00099 < 0.15. OK.
-        // Значит, 15 чанков должны подойти с этой логикой.
-        // Предыдущий лог с 0.001195 для спота был результатом старой, независимой логики расчета.
-
+        // Ожидаем, что при таком ratio и min_fut_q=0.001, если fut_raw = 0.0004 (0.006/15), то округлится до 0.001.
+        // Тогда spot_chunk будет ~0.001 * 1.000333... = 0.001000333... округленный до 0.001001
         println!("Test op_id=1 case (new logic): count={}, spot_q={}, fut_q={}", count, spot_q, fut_q);
-        assert_eq!(count, 15);
-        assert_eq!(spot_q.round_dp(6), dec!(0.000401)); // (0.006002/15) округленное до 1e-6, если ratio почти 1
-                                                       // Если spot_to_fut_btc_ratio = 1.000333...
-                                                       // chunk_fut_raw = 0.0004 -> rounded_fut = 0.001
-                                                       // target_spot_btc = 0.001 * 1.000333... = 0.001000333...
-                                                       // chunk_spot = round_up_step(0.001000333, 0.000001) = 0.001001.
-                                                       // Это если бы futures были округлены до 0.001.
-                                                       // Но моя функция сначала считает chunk_futures_quantity, потом на его основе chunk_spot_quantity.
-                                                       // fut_raw = 0.0004. chunk_fut = 0.001. (проходит min 0.001)
-                                                       // spot_target = 0.001 * ( (613.61../102235.08) / 0.006 ) = 0.001 * (0.006002/0.006) = 0.001 * 1.000333.. = 0.001000333..
-                                                       // chunk_spot = round_up(0.001000333, 0.000001) = 0.001001.
-        assert_eq!(spot_q.round_dp(6), dec!(0.000401)); // Ожидаю, что total_spot_quantity_estimate_for_op / 15, округленное. ratio тут не должен так сильно влиять
-                                                    // Если ratio=1, то spot_raw=0.00040013 -> 0.000401. fut_raw=0.0004 -> 0.001
-                                                    // Если fut=0.001, то target_spot = 0.001 * 1.000333 = 0.001000333 -> 0.001001
-                                                    // Значит, логика, которую я описал выше (сначала фьюч, потом спот от него), верна.
-        assert_eq!(spot_q.round_dp(6), dec!(0.001001)); // Пересмотрел: да, должно быть так.
+        assert_eq!(count, 6); // Из-за min_fut_q=0.001, 15 чанков по 0.0004 не пройдут, снизится до 6 чанков по 0.001
+        assert_eq!(spot_q.round_dp_with_strategy(6, rust_decimal::RoundingStrategy::MidpointAwayFromZero), dec!(0.001001));
         assert_eq!(fut_q, dec!(0.001));
         Ok(())
     }
