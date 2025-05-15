@@ -2,25 +2,29 @@
 
 use anyhow::{anyhow, Result};
 use rust_decimal::prelude::*;
-use rust_decimal::Decimal; // Явный импорт Decimal
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec; // <--- ДОБАВЛЕН ИМПОРТ
 use std::str::FromStr;
-use tracing::{debug, info, warn}; // Добавил warn, если понадобится
+use tracing::{debug, info, warn};
 
-use crate::hedger::{HedgeParams, ORDER_FILL_TOLERANCE}; // Используем ORDER_FILL_TOLERANCE из родительского модуля
+use crate::hedger::{HedgeParams, ORDER_FILL_TOLERANCE};
 use crate::exchange::bybit::SPOT_CATEGORY;
 use crate::exchange::Exchange;
 use crate::models::HedgeRequest;
 
-// ИЗМЕНЕНО: делаем функцию pub и адаптируем для &dyn Exchange
+// ... остальной код файла без изменений ...
+// Убедись, что функция calculate_hedge_params_impl объявлена как pub async fn
+// и E: Exchange + ?Sized + Send + Sync
+
 pub async fn calculate_hedge_params_impl<E>(
-    exchange: &E, // Принимаем &E, где E: Exchange + ?Sized
+    exchange: &E,
     req: &HedgeRequest,
     slippage: f64,
     quote_currency: &str,
     max_allowed_leverage: f64,
 ) -> Result<HedgeParams>
 where
-    E: Exchange + ?Sized + Send + Sync, // Добавляем Send + Sync, т.к. exchange используется в await
+    E: Exchange + ?Sized + Send + Sync,
 {
     let HedgeRequest {
         sum,
@@ -29,12 +33,11 @@ where
     } = req;
     debug!("Calculating hedge params for {}...", symbol);
 
-    // Убедимся, что quote_currency используется для формирования пар
     let base_symbol_upper = symbol.to_uppercase();
     let quote_currency_upper = quote_currency.to_uppercase();
 
-    let spot_pair_for_info = base_symbol_upper.as_str(); // get_spot_instrument_info ожидает базовый символ
-    let linear_pair_for_info = base_symbol_upper.as_str(); // get_linear_instrument_info ожидает базовый символ
+    let spot_pair_for_info = base_symbol_upper.as_str();
+    let linear_pair_for_info = base_symbol_upper.as_str();
 
     let spot_info = exchange
         .get_spot_instrument_info(spot_pair_for_info)
@@ -119,10 +122,16 @@ where
     let target_net_qty_decimal = Decimal::from_f64(ideal_gross_qty)
         .ok_or_else(|| anyhow!("Failed to convert ideal qty {} to Decimal", ideal_gross_qty))?
         .trunc_with_scale(fut_decimals);
+    
+    // Используем существующую константу, если она импортирована, или создаем локально
+    let order_fill_tolerance_decimal = match Decimal::from_str("1e-12") {
+        Ok(d) => d,
+        Err(_) => dec!(0.000000000001), // Fallback если from_str не сработает для "1e-12"
+    };
 
-    if target_net_qty_decimal < min_fut_qty_decimal && target_net_qty_decimal.abs() > dec!(1e-12) {
+    if target_net_qty_decimal < min_fut_qty_decimal && target_net_qty_decimal.abs() > order_fill_tolerance_decimal {
         return Err(anyhow!(
-            "Target net quantity {:.8} for {} < min futures quantity {} (and not zero)",
+            "Target net quantity {:.8} for {} < min futures quantity {} (and not effective zero)",
             target_net_qty_decimal, futures_symbol, min_fut_qty_decimal
         ));
     }
@@ -147,9 +156,9 @@ where
         .ok_or_else(|| anyhow!("Failed to convert required gross qty {} to Decimal", required_gross_qty))?
         .trunc_with_scale(spot_decimals);
 
-    if final_spot_gross_qty_decimal < min_spot_qty_decimal && final_spot_gross_qty_decimal.abs() > dec!(1e-12) {
+    if final_spot_gross_qty_decimal < min_spot_qty_decimal && final_spot_gross_qty_decimal.abs() > order_fill_tolerance_decimal {
         return Err(anyhow!(
-            "Calculated final spot quantity {:.8} for {} < min spot quantity {} (and not zero)",
+            "Calculated final spot quantity {:.8} for {} < min spot quantity {} (and not effective zero)",
             final_spot_gross_qty_decimal, spot_pair_for_fee, min_spot_qty_decimal
         ));
     }
@@ -202,7 +211,7 @@ where
     };
     debug!("Calculated required leverage: {:.4}x", required_leverage);
 
-    if fut_order_qty > ORDER_FILL_TOLERANCE { // Проверяем плечо, только если есть фьючерсы
+    if fut_order_qty > ORDER_FILL_TOLERANCE {
         if required_leverage.is_nan() || required_leverage.is_infinite() {
             return Err(anyhow!(
                 "Invalid leverage calculation (Infinity/NaN) with non-zero futures. Fut Value: {:.8}, Collateral: {:.8}",
@@ -229,13 +238,13 @@ where
         fut_order_qty,
         current_spot_price,
         initial_limit_price,
-        symbol: base_symbol_upper.clone(), // Используем базовый символ
+        symbol: base_symbol_upper.clone(),
         spot_value: adjusted_spot_value,
         available_collateral,
         min_spot_qty_decimal,
         min_fut_qty_decimal,
         spot_decimals,
         fut_decimals,
-        futures_symbol, // Уже содержит отформатированный символ фьючерса
+        futures_symbol,
     })
 }

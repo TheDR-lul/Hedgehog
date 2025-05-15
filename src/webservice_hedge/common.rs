@@ -5,11 +5,11 @@ use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use tracing::{debug, warn, error};
 
-const MAX_PER_CHUNK_VALUE_IMBALANCE_RATIO_FOR_SETUP: Decimal = dec!(0.15); // 15%
+const MAX_PER_CHUNK_VALUE_IMBALANCE_RATIO_FOR_SETUP: Decimal = dec!(0.15);
 
 pub fn calculate_auto_chunk_parameters(
-    overall_target_spot_btc: Decimal,    // ПРИНИМАЕМ общую цель по споту в BTC
-    overall_target_futures_btc: Decimal, // ПРИНИМАЕМ общую цель по фьючерсу в BTC
+    overall_target_spot_btc: Decimal,
+    overall_target_futures_btc: Decimal,
     current_spot_price: Decimal,
     current_futures_price_estimate: Decimal,
     target_chunk_count: u32,

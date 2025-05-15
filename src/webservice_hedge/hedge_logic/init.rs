@@ -4,24 +4,25 @@ use anyhow::{anyhow, Context, Result};
 use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
 use std::sync::Arc;
-use tracing::{debug, info, warn, error}; // error импортирован
+use tracing::{debug, info, warn, error};
 use std::str::FromStr;
 
 use crate::config::Config;
 use crate::exchange::Exchange;
 use crate::models::HedgeRequest;
-use crate::storage; // Не используем _database напрямую, но может понадобиться для других вызовов
+use crate::storage;
 use crate::webservice_hedge::state::{HedgerWsState};
 use crate::webservice_hedge::common::calculate_auto_chunk_parameters;
 use crate::webservice_hedge::hedge_logic::helpers::{get_step_decimal};
-use crate::hedger::params::calculate_hedge_params_impl; // Публичная функция для расчета
+use crate::hedger::params::calculate_hedge_params_impl;
+
 
 pub async fn create_initial_hedger_ws_state(
     operation_id: i64,
     request: HedgeRequest,
     config: Arc<Config>,
-    exchange_rest: Arc<dyn Exchange>, // Arc<dyn Exchange>
-    _database: Arc<storage::Db>,      // _database пока не используется здесь напрямую
+    exchange_rest: Arc<dyn Exchange>,
+    _database: Arc<storage::Db>,
 ) -> Result<HedgerWsState> {
     info!(operation_id, "Creating initial HedgerWsState for operation...");
 
@@ -29,11 +30,8 @@ pub async fn create_initial_hedger_ws_state(
     let spot_symbol_name = format!("{}{}", base_symbol, config.quote_currency);
     let futures_symbol_name = format!("{}{}", base_symbol, config.quote_currency);
 
-    // 1. Рассчитываем HedgeParams один раз, чтобы получить ОБЩИЕ целевые BTC количества
-    //    и другие стабильные параметры хеджа.
-    //    Используем exchange_rest.as_ref(), который имеет тип &(dyn Exchange + Send + Sync)
     let hedge_params = match calculate_hedge_params_impl(
-        exchange_rest.as_ref(), // Передаем &(dyn Exchange + Send + Sync)
+        exchange_rest.as_ref(),
         &request,
         config.slippage,
         &config.quote_currency,
@@ -52,7 +50,6 @@ pub async fn create_initial_hedger_ws_state(
     let overall_target_futures_btc = Decimal::from_f64(hedge_params.fut_order_qty)
         .ok_or_else(|| anyhow!("Failed to convert hedge_params.fut_order_qty ({}) to Decimal", hedge_params.fut_order_qty))?;
 
-    // 2. Получаем актуальные данные по инструментам и ценам для расчета чанков
     debug!(operation_id, %spot_symbol_name, %futures_symbol_name, "Fetching instrument info and current prices for HedgerWsState chunk calculation...");
     let (
         spot_info_res,
@@ -123,7 +120,6 @@ pub async fn create_initial_hedger_ws_state(
     let initial_user_sum_decimal = Decimal::try_from(request.sum)?;
     let initial_target_spot_value_for_state = Decimal::try_from(hedge_params.spot_value)?;
 
-
     let mut state = HedgerWsState::new_hedge(
         operation_id,
         spot_symbol_name.clone(),
@@ -132,6 +128,9 @@ pub async fn create_initial_hedger_ws_state(
         overall_target_futures_btc,
         initial_user_sum_decimal,
     );
+    // Устанавливаем новое поле
+    state.overall_target_spot_btc_qty = overall_target_spot_btc;
+
     state.spot_tick_size = spot_tick_size;
     state.spot_quantity_step = spot_quantity_step;
     state.min_spot_quantity = min_spot_quantity;

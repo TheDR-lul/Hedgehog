@@ -26,7 +26,7 @@ pub struct Hedger<E> {
     config: Config,
 }
 
-#[derive(Debug, Clone)] // Добавил Clone для HedgeParams
+#[derive(Debug, Clone)]
 pub struct HedgeParams {
     pub spot_order_qty: f64,
     pub fut_order_qty: f64,
@@ -77,10 +77,10 @@ where
         }
     }
 
-    // Этот метод теперь основной для внешнего использования, если есть экземпляр Hedger
     pub async fn calculate_hedge_params(&self, req: &HedgeRequest) -> Result<HedgeParams> {
-        params::calculate_hedge_params_impl(
-            &self.exchange, // self.exchange здесь это E, которое Clone + Exchange
+        // Вызываем теперь публичную функцию из модуля params
+        crate::hedger::params::calculate_hedge_params_impl(
+            &self.exchange,
             req,
             self.slippage,
             &self.quote_currency,
