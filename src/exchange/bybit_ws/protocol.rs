@@ -9,34 +9,88 @@ use serde_json::json;
 use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_tungstenite::tungstenite::protocol::Message;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn}; // Убедимся что error есть
 use crate::exchange::bybit_ws::WsSink;
+// ИЗМЕНЕНО: Добавляем Decimal из rust_decimal для использования в логировании десериализатора
+use rust_decimal::Decimal;
+use rust_decimal::prelude::FromStr;
+
 
 type HmacSha256 = Hmac<Sha256>;
 
+// Модуль для десериализации строки в f64, обрабатывая пустую строку как 0.0
 pub(super) mod str_or_empty_as_f64 {
     use rust_decimal::prelude::{FromStr, ToPrimitive};
     use serde::{self, Deserialize, Deserializer};
-    use rust_decimal::Decimal;
+    use rust_decimal::Decimal; // Убедимся, что Decimal здесь доступен
+    // ИЗМЕНЕНО: Добавлено логирование
+    use tracing::warn;
+
+
     pub fn deserialize<'de, D>(deserializer: D) -> Result<f64, D::Error> where D: Deserializer<'de> {
         let s = String::deserialize(deserializer)?;
-        if s.is_empty() { Ok(0.0) }
-        else {
-            Decimal::from_str(&s).map_err(serde::de::Error::custom)?
-                .to_f64().ok_or_else(|| serde::de::Error::custom("Failed to convert decimal to f64"))
+        warn!("[str_or_empty_as_f64] Received string for f64: '{}'", s); // Лог входящей строки
+        if s.is_empty() {
+            warn!("[str_or_empty_as_f64] Empty string, returning 0.0");
+            Ok(0.0)
+        } else {
+            match Decimal::from_str(&s) {
+                Ok(d) => {
+                    warn!("[str_or_empty_as_f64] Parsed to Decimal: {:?}", d);
+                    match d.to_f64() {
+                        Some(f) => {
+                            warn!("[str_or_empty_as_f64] Converted Decimal to f64: {}", f);
+                            Ok(f)
+                        }
+                        None => {
+                            warn!("[str_or_empty_as_f64] Failed to convert Decimal {:?} to f64", d);
+                            Err(serde::de::Error::custom("Failed to convert decimal to f64"))
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("[str_or_empty_as_f64] Failed to parse string '{}' to Decimal: {}", s, e);
+                    Err(serde::de::Error::custom(format!("Failed to parse string to Decimal: {}", e)))
+                }
+            }
         }
     }
 }
+
+// Модуль для десериализации строки в Option<f64>, обрабатывая пустую строку как None
 pub(super) mod str_or_empty_as_f64_option {
     use rust_decimal::prelude::{FromStr, ToPrimitive};
     use serde::{self, Deserialize, Deserializer};
-    use rust_decimal::Decimal;
+    use rust_decimal::Decimal; // Убедимся, что Decimal здесь доступен
+    // ИЗМЕНЕНО: Добавлено логирование
+    use tracing::warn;
+
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error> where D: Deserializer<'de> {
         let s = String::deserialize(deserializer)?;
+        warn!("[str_or_empty_as_f64_option] Received string for Option<f64>: '{}'", s); // Лог входящей строки
         if s.is_empty() {
-             Ok(None)
+            warn!("[str_or_empty_as_f64_option] Empty string, returning None");
+            Ok(None)
         } else {
-             Ok(Decimal::from_str(&s).ok().and_then(|d| d.to_f64()))
+            match Decimal::from_str(&s) {
+                Ok(d_val) => { // Переименовал d в d_val, чтобы не конфликтовать с D от Deserializer
+                    warn!("[str_or_empty_as_f64_option] Parsed string '{}' to Decimal: {:?}", s, d_val);
+                    match d_val.to_f64() {
+                        Some(f) => {
+                            warn!("[str_or_empty_as_f64_option] Converted Decimal {:?} to Some(f64): {}", d_val, f);
+                            Ok(Some(f))
+                        }
+                        None => {
+                            warn!("[str_or_empty_as_f64_option] Failed to convert Decimal {:?} (from string '{}') to f64, returning None", d_val, s);
+                            Ok(None) // Если не удалось конвертировать в f64, возвращаем None
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("[str_or_empty_as_f64_option] Failed to parse string '{}' to Decimal: {}. Returning None.", s, e);
+                    Ok(None) // Если не удалось распарсить в Decimal, возвращаем None
+                }
+            }
         }
     }
 }
@@ -76,17 +130,15 @@ pub(super) async fn handle_message(
 ) -> Result<()> {
     match message {
         Message::Text(text) => {
-            debug!("Raw WS Text Received: {}", text);
+            info!("Raw WS Text Received: {}", text); 
             match serde_json::from_str::<BybitWsResponse>(&text) {
-                Ok(parsed_response_value) => { // Переименовано, чтобы не конфликтовать с параметром response в parse_bybit_response
-                    trace!("Parsed BybitWsResponse: {:?}", parsed_response_value);
+                Ok(parsed_response_value) => {
+                    debug!("Parsed BybitWsResponse: {:?}", parsed_response_value);
                     
-                    // Создаем log_ctx из данных parsed_response_value
                     let log_ctx_from_resp = parsed_response_value.req_id.as_deref()
                         .or(parsed_response_value.topic.as_deref())
-                        .unwrap_or("N/A_ctx_in_handle").to_string(); // Клонируем в String
+                        .unwrap_or("N/A_ctx_in_handle").to_string();
 
-                    // Передаем parsed_response_value по значению, а log_ctx_from_resp по ссылке
                     match parse_bybit_response(parsed_response_value, &log_ctx_from_resp) { 
                         Ok(Some(ws_message)) => {
                             debug!(context = %log_ctx_from_resp, "Сгенерировано WebSocketMessage: {:?}", ws_message);
@@ -133,12 +185,10 @@ pub(super) async fn handle_message(
     Ok(())
 }
 
-// ИСПРАВЛЕНО: parse_bybit_response теперь принимает response по ссылке
 fn parse_bybit_response(response: BybitWsResponse, log_ctx: &str) -> Result<Option<WebSocketMessage>> {
     debug!(context = %log_ctx, "Внутри parse_bybit_response с: op={:?}, topic={:?}, req_id={:?}, success={:?}, ret_msg={:?}", 
            response.op.as_deref(), response.topic.as_deref(), response.req_id.as_deref(), response.success, response.ret_msg.as_deref());
 
-    // ИСПРАВЛЕНО: Используем .as_deref() или .as_ref().map(|s| s.as_str()) для Option<String> перед .as_str()
     if let Some(operation_str) = response.op.as_deref() {
         match operation_str {
             "auth" => {
@@ -176,15 +226,12 @@ fn parse_bybit_response(response: BybitWsResponse, log_ctx: &str) -> Result<Opti
             }
         }
     } else if let Some(topic_str) = response.topic.as_deref() { 
-        // ИСПРАВЛЕНО: response.data теперь не требует .clone(), так как response передается по значению (но теперь это ссылка)
-        // Значит, response.data нужно клонировать или parse_... функции должны принимать Option<&Value>
-        // Проще клонировать data, если оно будет потреблено.
         let data_val = response.data.clone().ok_or_else(|| anyhow!("Отсутствует поле data для топика {}", topic_str))?;
         let message_type = response.message_type.as_deref();
         let event_ts = response.ts; 
 
         if topic_str == "order" {
-            debug!(context = %topic_str, "Попытка парсинга обновления ордера");
+            debug!(context = %topic_str, "Попытка парсинга обновления ордера. Data for order: {:?}", data_val);
             crate::exchange::bybit_ws::types_internal::parse_order_update(data_val, event_ts).map(WebSocketMessage::OrderUpdate).map(Some)
         } else if topic_str.starts_with("orderbook.") {
             debug!(context = %topic_str, "Попытка парсинга обновления ордербука (type: {:?})", message_type);
@@ -208,7 +255,7 @@ fn parse_bybit_response(response: BybitWsResponse, log_ctx: &str) -> Result<Opti
             Err(anyhow!("Неизвестный WS топик с данными: {}", topic_str))
         }
     } else if response.success == Some(false) && response.ret_msg.is_some() {
-         let error_message = response.ret_msg.as_deref().unwrap_or("Неизвестная ошибка от Bybit").to_string(); // Клонируем, так как response заимствован
+         let error_message = response.ret_msg.as_deref().unwrap_or("Неизвестная ошибка от Bybit").to_string();
          let req_id_ctx = response.req_id.as_deref().unwrap_or(log_ctx);
          error!(context = %req_id_ctx, "Получено сообщение об ошибке WebSocket от Bybit: {}", error_message);
          Ok(Some(WebSocketMessage::Error(error_message)))

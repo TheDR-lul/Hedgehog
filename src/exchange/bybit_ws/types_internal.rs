@@ -3,7 +3,8 @@
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::Value;
-use tracing::{warn, trace, debug, error}; // Добавлены debug, error
+// ИЗМЕНЕНО: Добавил info в импорт tracing
+use tracing::{warn, trace, debug, error, info};
 use crate::exchange::types::{OrderSide, OrderStatusText, DetailedOrderStatus, OrderbookLevel};
 use std::str::FromStr;
 use anyhow::anyhow;
@@ -40,11 +41,8 @@ pub(super) struct BybitWsOrderData {
     #[serde(default, rename = "lastExecQty", with = "super::protocol::str_or_empty_as_f64_option")] pub(super) last_filled_qty: Option<f64>,
     #[serde(default, rename = "lastExecPrice", with = "super::protocol::str_or_empty_as_f64_option")] pub(super) last_filled_price: Option<f64>,
     #[serde(rename = "rejectReason")] pub(super) reject_reason: Option<String>,
-    #[serde(default, rename = "execQty", with = "super::protocol::str_or_empty_as_f64_option")] pub(super) _exec_qty_v5: Option<f64>, // Поле из V5, если отличается от last_exec_qty
-    #[serde(default, rename = "execPrice", with = "super::protocol::str_or_empty_as_f64_option")] pub(super) _exec_price_v5: Option<f64>,// Поле из V5
-    // createdTime и updatedTime обычно нужны для отслеживания, но не для DetailedOrderStatus напрямую
-    // #[serde(rename = "createdTime")] pub(super) _created_time: Option<String>,
-    // #[serde(rename = "updatedTime")] pub(super) _updated_time: Option<String>,
+    #[serde(default, rename = "execQty", with = "super::protocol::str_or_empty_as_f64_option")] pub(super) _exec_qty_v5: Option<f64>,
+    #[serde(default, rename = "execPrice", with = "super::protocol::str_or_empty_as_f64_option")] pub(super) _exec_price_v5: Option<f64>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -63,7 +61,6 @@ pub(super) struct BybitWsOrderbookData {
     #[serde(rename = "a")] pub(super) asks: Vec<[String; 2]>, 
     #[serde(rename = "u")] pub(super) update_id: i64, 
     #[serde(default)] pub(super) seq: Option<i64>, 
-    // ts (event time) и cts (cross time) теперь на верхнем уровне BybitWsResponse
 }
 
 
@@ -72,6 +69,9 @@ pub(super) fn parse_order_update(data: Value, _event_ts: Option<i64>) -> Result<
         .map_err(|e| anyhow!("Не удалось распарсить массив данных ордера: {}. Data: {:?}", e, data))?;
 
     if let Some(order_data) = orders_data_array.into_iter().next() {
+        // ИЗМЕНЕНО: Логирование распарсенной структуры BybitWsOrderData
+        info!("Parsed BybitWsOrderData: {:?}", order_data);
+
         let status_text = OrderStatusText::from_str(&order_data.status)
             .unwrap_or_else(|_| {
                 warn!("Неизвестный статус ордера от WS: '{}'", order_data.status);
@@ -137,16 +137,15 @@ pub(super) fn parse_orderbook_update(data: Value, event_ts: Option<i64>) -> Resu
 
     let bids = book_data.bids.into_iter()
         .map(parse_level)
-        .filter_map(Result::ok) // Собираем только успешно распарсенные, логируем ошибки выше
+        .filter_map(Result::ok) 
         .collect::<Vec<_>>();
 
     let asks = book_data.asks.into_iter()
         .map(parse_level)
-        .filter_map(Result::ok) // Собираем только успешно распарсенные
+        .filter_map(Result::ok) 
         .collect::<Vec<_>>();
     
     if bids.is_empty() && asks.is_empty() {
-        // Это может быть нормально для дельт, но для снапшота - подозрительно, если не было ошибок парсинга отдельных уровней
         warn!("parse_orderbook_update: symbol={}, ПУСТЫЕ bids И asks после парсинга! event_ts={:?}", book_data.symbol, event_ts);
     } else {
         debug!("parse_orderbook_update: symbol={}, bids_count={}, asks_count={}, event_ts={:?}", book_data.symbol, bids.len(), asks.len(), event_ts);

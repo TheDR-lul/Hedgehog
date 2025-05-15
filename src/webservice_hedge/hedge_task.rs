@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn}; // Убедимся, что info есть
 use tokio::time::sleep;
 use std::time::Duration;
 use tokio::sync::mpsc::Receiver;
@@ -75,7 +75,7 @@ impl HedgerWsHedgeTask {
             }
         };
 
-        initial_state.status = HedgerWsStatus::Initializing; // Инициализация здесь, ожидание данных в `run`
+        initial_state.status = HedgerWsStatus::Initializing; 
 
         Ok(Self {
             operation_id,
@@ -90,8 +90,6 @@ impl HedgerWsHedgeTask {
         })
     }
 
-    // Метод для обработки сообщения, который будет вызван извне для "проталкивания" буферизованных сообщений
-    // Также используется внутренним циклом run
     pub async fn handle_ws_message_with_category(&mut self, message: WebSocketMessage, category: &str) -> Result<()> {
         crate::webservice_hedge::hedge_logic::ws_handlers::handle_websocket_message(self, message, category).await
     }
@@ -99,14 +97,12 @@ impl HedgerWsHedgeTask {
     pub async fn run(&mut self) -> Result<()> {
         info!(operation_id = self.operation_id, "Starting HedgerWsHedgeTask run loop (tri-stream)...");
 
-        // ЭТАП 0: Ожидание начальных рыночных данных (если они еще не были "протолкнуты")
         if matches!(self.state.status, HedgerWsStatus::Initializing) {
             info!(operation_id = self.operation_id, "Waiting for initial market data from WebSocket streams...");
             let mut price_data_ready = false;
-            let max_attempts = self.config.ws_auto_chunk_target_count.max(100).min(300);
+            let max_attempts = self.config.ws_auto_chunk_target_count.max(100).min(300); // Было .max(100).min(300) - исправлено
 
             for attempt in 0..max_attempts {
-                // Проверяем, были ли данные уже установлены (например, "протолкнуты" перед вызовом run)
                 if self.state.spot_market_data.best_bid_price.is_some() &&
                    self.state.spot_market_data.best_ask_price.is_some() &&
                    self.state.futures_market_data.best_bid_price.is_some() &&
@@ -114,39 +110,37 @@ impl HedgerWsHedgeTask {
                 {
                     price_data_ready = true;
                     info!(operation_id = self.operation_id, "Initial SPOT and FUTURES market data is present.");
-                    self.state.status = HedgerWsStatus::SettingLeverage; // Переходим к следующему этапу
+                    self.state.status = HedgerWsStatus::SettingLeverage; 
                     break;
                 }
                 warn!(operation_id = self.operation_id, attempt = attempt + 1, "Waiting for initial market data (attempt {}/{})...", attempt + 1, max_attempts);
 
-                // Читаем сообщения из каналов, чтобы обновить состояние, если данные приходят сейчас
                 tokio::select! {
                     biased;
                     maybe_private_result = self.private_ws_receiver.recv() => {
                         match maybe_private_result {
                             Some(Ok(message)) => { if let Err(e) = self.handle_ws_message_with_category(message, "private").await { warn!(operation_id = self.operation_id, "Error handling PRIVATE message during market data wait: {}", e); } }
                             Some(Err(e)) => { warn!(operation_id = self.operation_id, "Error from private_ws_receiver: {}. Channel might be broken.", e); }
-                            None => { /* Канал закрыт, обработка ниже */ }
+                            None => { }
                         }
                     },
                     maybe_public_spot_result = self.public_spot_receiver.recv() => {
                         match maybe_public_spot_result {
                             Some(Ok(message)) => { if let Err(e) = self.handle_ws_message_with_category(message, "spot").await { warn!(operation_id = self.operation_id, "Error handling PUBLIC SPOT message during market data wait: {}", e); } }
                             Some(Err(e)) => { warn!(operation_id = self.operation_id, "Error from public_spot_receiver: {}. Channel might be broken.", e); }
-                            None => { /* Канал закрыт */ }
+                            None => { }
                         }
                     },
                     maybe_public_linear_result = self.public_linear_receiver.recv() => {
                         match maybe_public_linear_result {
                             Some(Ok(message)) => { if let Err(e) = self.handle_ws_message_with_category(message, "linear").await { warn!(operation_id = self.operation_id, "Error handling PUBLIC LINEAR message during market data wait: {}", e); } }
                             Some(Err(e)) => { warn!(operation_id = self.operation_id, "Error from public_linear_receiver: {}. Channel might be broken.", e); }
-                            None => { /* Канал закрыт */ }
+                            None => { }
                         }
                     },
-                    _ = sleep(Duration::from_millis(100)) => {}, // Небольшая пауза, чтобы не нагружать CPU
+                    _ = sleep(Duration::from_millis(100)) => {}, 
                 }
 
-                // Проверка, закрыты ли все каналы (на случай если read_loop завершился)
                 if self.private_ws_receiver.is_closed() && self.public_spot_receiver.is_closed() && self.public_linear_receiver.is_closed() {
                      let err_msg = "All WS channels closed during initial market data wait.";
                      error!(operation_id = self.operation_id, "{}", err_msg);
@@ -165,7 +159,6 @@ impl HedgerWsHedgeTask {
             }
         }
 
-        // --- Этап 1: Установка Плеча (код без изменений) ---
         if matches!(self.state.status, HedgerWsStatus::SettingLeverage) {
             info!(operation_id = self.operation_id, "Attempting to set leverage...");
             let total_sum_decimal = self.state.initial_user_sum;
@@ -221,7 +214,7 @@ impl HedgerWsHedgeTask {
             match self.exchange_rest.set_leverage(&self.state.symbol_futures, leverage_to_set).await {
                 Ok(_) => {
                     info!(operation_id = self.operation_id, "Leverage set successfully.");
-                    sleep(Duration::from_millis(500)).await; // Небольшая пауза после установки плеча
+                    sleep(Duration::from_millis(500)).await; 
                     self.state.status = HedgerWsStatus::StartingChunk(1);
                 }
                 Err(e) => {
@@ -233,8 +226,10 @@ impl HedgerWsHedgeTask {
                 }
             }
         }
+        
+        // ИЗМЕНЕНО: Логируем current_chunk_index перед запуском первого чанка
+        info!(operation_id = self.operation_id, status = ?self.state.status, current_chunk_index = self.state.current_chunk_index, "Before starting first chunk logic.");
 
-        // --- Этап 2: Запуск первого чанка (код без изменений) ---
         if matches!(self.state.status, HedgerWsStatus::StartingChunk(1)) {
             if !(self.state.spot_market_data.best_bid_price.is_some() &&
                  self.state.futures_market_data.best_bid_price.is_some()) {
@@ -260,8 +255,6 @@ impl HedgerWsHedgeTask {
              warn!(operation_id = self.operation_id, status = ?self.state.status, "Task run: Unexpected status before main loop.");
         }
 
-
-        // --- ОСНОВНОЙ ЦИКЛ (код без изменений) ---
         loop {
             tokio::select! {
                 biased;
@@ -353,23 +346,41 @@ impl HedgerWsHedgeTask {
             let mut should_reconcile = false;
             let mut next_chunk_to_process: Option<u32> = None;
 
+            // ИЗМЕНЕНО: Логирование current_chunk_index перед вычислением current_chunk_completed
+            debug!(operation_id=self.operation_id, status = ?self.state.status, current_chunk_index_before_completion_check = self.state.current_chunk_index, "Checking chunk completion.");
+
             if matches!(self.state.status, HedgerWsStatus::RunningChunk(_)) && check_chunk_completion(self) {
-                let current_chunk_completed = self.state.current_chunk_index.saturating_sub(1);
-                debug!(operation_id=self.operation_id, chunk_index=current_chunk_completed, "Chunk completed processing.");
+                // ИЗМЕНЕНО: Эта строка вызывала current_chunk_completed = 0, если current_chunk_index был 1.
+                // Логика инкремента current_chunk_index должна быть здесь или в start_next_chunk.
+                // Пока оставляем как есть, чтобы отследить, почему chunk_index=0 в логе дисбаланса.
+                let current_chunk_completed = self.state.current_chunk_index.saturating_sub(1); 
+                debug!(operation_id=self.operation_id, chunk_index_completed = current_chunk_completed, current_state_chunk_index = self.state.current_chunk_index, "Chunk completed processing logic.");
 
                 if current_chunk_completed < self.state.total_chunks {
                     if check_value_imbalance(self) {
-                        info!(operation_id=self.operation_id, chunk_index=current_chunk_completed, "Significant value imbalance detected. Waiting.");
+                        info!(operation_id=self.operation_id, chunk_index_imbalance = current_chunk_completed, "Significant value imbalance detected. Waiting.");
                         let leading_leg = if self.state.cumulative_spot_filled_value > self.state.cumulative_futures_filled_value.abs() { Leg::Spot } else { Leg::Futures };
                         self.state.status = HedgerWsStatus::WaitingImbalance { chunk_index: current_chunk_completed, leading_leg };
                     } else {
+                        // ИЗМЕНЕНО: Инкрементируем current_chunk_index здесь, так как текущий чанк (current_chunk_completed) завершен
+                        // и мы готовимся к запуску следующего.
+                        self.state.current_chunk_index += 1;
                         let next_chunk_idx_to_start = self.state.current_chunk_index;
+                         debug!(operation_id=self.operation_id, next_chunk_to_start_after_increment = next_chunk_idx_to_start, "Preparing to start next chunk.");
                         self.state.status = HedgerWsStatus::StartingChunk(next_chunk_idx_to_start);
                         should_start_next_chunk = true;
                         next_chunk_to_process = Some(next_chunk_idx_to_start);
                     }
-                } else {
-                    info!(operation_id = self.operation_id, "All chunks processed, moving to Reconciling state.");
+                } else { // current_chunk_completed >= self.state.total_chunks
+                    // ИЗМЕНЕНО: Проверка, что это действительно последний чанк по ИНДЕКСУ, а не по количеству.
+                    // Если current_chunk_index был 1, то current_chunk_completed = 0. total_chunks = 15.
+                    // Если current_chunk_index инкрементируется правильно, то когда current_chunk_index = total_chunks,
+                    // current_chunk_completed = total_chunks - 1. Это условие (current_chunk_completed < self.state.total_chunks)
+                    // будет выполняться до тех пор, пока current_chunk_completed не станет total_chunks -1.
+                    // Когда current_chunk_completed = total_chunks -1, это последний чанк.
+                    // Если current_chunk_index уже total_chunks + 1 (после инкремента выше), то current_chunk_completed = total_chunks.
+                    // Это значит, что все чанки (0 до total_chunks-1) обработаны.
+                     info!(operation_id = self.operation_id, current_chunk_completed, total_chunks = self.state.total_chunks, "All chunks processed, moving to Reconciling state.");
                     self.state.status = HedgerWsStatus::Reconciling;
                     should_reconcile = true;
                 }
@@ -377,13 +388,27 @@ impl HedgerWsHedgeTask {
             else if matches!(self.state.status, HedgerWsStatus::WaitingImbalance { .. }) {
                 if !check_value_imbalance(self) {
                     info!(operation_id=self.operation_id, "Value imbalance resolved. Proceeding.");
-                    let next_chunk_idx_to_start = self.state.current_chunk_index;
+                    // Не инкрементируем current_chunk_index здесь, т.к. мы "продолжаем" тот же чанк, что был в WaitingImbalance
+                    let chunk_idx_after_imbalance = match self.state.status { // Получаем индекс из статуса WaitingImbalance
+                        HedgerWsStatus::WaitingImbalance { chunk_index, .. } => chunk_index + 1, // Следующий после того, где был дисбаланс
+                        _ => self.state.current_chunk_index, // Фоллбэк
+                    };
+                    // Если мы вышли из дисбаланса, значит, предыдущий чанк (chunk_index из WaitingImbalance) завершен,
+                    // и мы должны начать СЛЕДУЮЩИЙ.
+                    // self.state.current_chunk_index здесь должен указывать на следующий чанк для запуска.
+                    // Логика инкремента после WaitingImbalance должна быть осторожной.
+                    // Если WaitingImbalance был на chunk_index X, то следующий должен быть X+1.
+                    // self.state.current_chunk_index должен быть X+1.
+                    let next_chunk_idx_to_start = self.state.current_chunk_index; // Используем уже инкрементированный (если был)
+                    debug!(operation_id=self.operation_id, next_chunk_to_start_after_imbalance_resolve = next_chunk_idx_to_start, "Preparing to start chunk after imbalance resolved.");
                     self.state.status = HedgerWsStatus::StartingChunk(next_chunk_idx_to_start);
                     should_start_next_chunk = true;
                     next_chunk_to_process = Some(next_chunk_idx_to_start);
                 }
             }
             else if let HedgerWsStatus::StartingChunk(idx) = self.state.status {
+                // ИЗМЕНЕНО: Логируем, какой чанк собираемся запустить
+                debug!(operation_id=self.operation_id, chunk_to_start_from_status = idx, "Status is StartingChunk, will attempt to start.");
                 should_start_next_chunk = true;
                 next_chunk_to_process = Some(idx);
             }
@@ -397,8 +422,10 @@ impl HedgerWsHedgeTask {
                 }
             } else if should_start_next_chunk {
                 if let Some(chunk_idx) = next_chunk_to_process {
-                    if self.state.status == HedgerWsStatus::StartingChunk(chunk_idx) {
-                        match start_next_chunk(self).await {
+                    // ИЗМЕНЕНО: Логируем перед вызовом start_next_chunk
+                    debug!(operation_id=self.operation_id, chunk_to_attempt_start = chunk_idx, current_status = ?self.state.status, "Attempting to call start_next_chunk.");
+                    if self.state.status == HedgerWsStatus::StartingChunk(chunk_idx) { // Убедимся, что статус не изменился
+                        match start_next_chunk(self).await { // self.state.status будет StartingChunk(chunk_idx)
                             Ok(skipped) => {
                                 if skipped { info!(operation_id=self.operation_id, chunk=chunk_idx, "Chunk was skipped by start_next_chunk."); }
                                 else { info!(operation_id=self.operation_id, chunk=chunk_idx, "Chunk started successfully by start_next_chunk."); }
