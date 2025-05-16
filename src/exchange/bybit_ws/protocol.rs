@@ -9,86 +9,81 @@ use serde_json::json;
 use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_tungstenite::tungstenite::protocol::Message;
-use tracing::{debug, error, info, trace, warn}; // Убедимся что error есть
+use tracing::{debug, error, info, trace, warn};
 use crate::exchange::bybit_ws::WsSink;
-// ИЗМЕНЕНО: Добавляем Decimal из rust_decimal для использования в логировании десериализатора
-use rust_decimal::Decimal;
+use rust_decimal::Decimal; 
 use rust_decimal::prelude::FromStr;
 
 
 type HmacSha256 = Hmac<Sha256>;
 
-// Модуль для десериализации строки в f64, обрабатывая пустую строку как 0.0
 pub(super) mod str_or_empty_as_f64 {
     use rust_decimal::prelude::{FromStr, ToPrimitive};
     use serde::{self, Deserialize, Deserializer};
-    use rust_decimal::Decimal; // Убедимся, что Decimal здесь доступен
-    // ИЗМЕНЕНО: Добавлено логирование
+    use rust_decimal::Decimal; 
     use tracing::warn;
 
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<f64, D::Error> where D: Deserializer<'de> {
         let s = String::deserialize(deserializer)?;
-        warn!("[str_or_empty_as_f64] Received string for f64: '{}'", s); // Лог входящей строки
+        warn!("[Hedgehog Custom Deserializer str_or_empty_as_f64] Received string for f64: '{}'", s);
         if s.is_empty() {
-            warn!("[str_or_empty_as_f64] Empty string, returning 0.0");
+            warn!("[Hedgehog Custom Deserializer str_or_empty_as_f64] Input string is empty. Returning 0.0");
             Ok(0.0)
         } else {
             match Decimal::from_str(&s) {
-                Ok(d) => {
-                    warn!("[str_or_empty_as_f64] Parsed to Decimal: {:?}", d);
-                    match d.to_f64() {
-                        Some(f) => {
-                            warn!("[str_or_empty_as_f64] Converted Decimal to f64: {}", f);
-                            Ok(f)
+                Ok(d_val) => {
+                    warn!("[Hedgehog Custom Deserializer str_or_empty_as_f64] Parsed string '{}' to Decimal: {:?}", s, d_val);
+                    match d_val.to_f64() {
+                        Some(f_val) => {
+                            warn!("[Hedgehog Custom Deserializer str_or_empty_as_f64] Converted Decimal {:?} to f64: {}", d_val, f_val);
+                            Ok(f_val)
                         }
                         None => {
-                            warn!("[str_or_empty_as_f64] Failed to convert Decimal {:?} to f64", d);
-                            Err(serde::de::Error::custom("Failed to convert decimal to f64"))
+                            warn!("[Hedgehog Custom Deserializer str_or_empty_as_f64] Failed to convert Decimal {:?} (from string '{}') to f64.", d_val, s);
+                            Err(serde::de::Error::custom(format!("Failed to convert Decimal {} (from string '{}') to f64", d_val, s)))
                         }
                     }
                 }
                 Err(e) => {
-                    warn!("[str_or_empty_as_f64] Failed to parse string '{}' to Decimal: {}", s, e);
-                    Err(serde::de::Error::custom(format!("Failed to parse string to Decimal: {}", e)))
+                    warn!("[Hedgehog Custom Deserializer str_or_empty_as_f64] Failed to parse string '{}' to Decimal: {}. Error.", s, e);
+                    Err(serde::de::Error::custom(format!("Failed to parse string '{}' to Decimal: {}", s, e)))
                 }
             }
         }
     }
 }
 
-// Модуль для десериализации строки в Option<f64>, обрабатывая пустую строку как None
 pub(super) mod str_or_empty_as_f64_option {
     use rust_decimal::prelude::{FromStr, ToPrimitive};
     use serde::{self, Deserialize, Deserializer};
-    use rust_decimal::Decimal; // Убедимся, что Decimal здесь доступен
-    // ИЗМЕНЕНО: Добавлено логирование
+    use rust_decimal::Decimal;
     use tracing::warn;
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error> where D: Deserializer<'de> {
         let s = String::deserialize(deserializer)?;
-        warn!("[str_or_empty_as_f64_option] Received string for Option<f64>: '{}'", s); // Лог входящей строки
+        warn!("[Hedgehog Custom Deserializer str_or_empty_as_f64_option] Received string for Option<f64>: '{}'", s);
         if s.is_empty() {
-            warn!("[str_or_empty_as_f64_option] Empty string, returning None");
+            warn!("[Hedgehog Custom Deserializer str_or_empty_as_f64_option] Input string is empty. Returning None.");
             Ok(None)
         } else {
             match Decimal::from_str(&s) {
-                Ok(d_val) => { // Переименовал d в d_val, чтобы не конфликтовать с D от Deserializer
-                    warn!("[str_or_empty_as_f64_option] Parsed string '{}' to Decimal: {:?}", s, d_val);
+                Ok(d_val) => { 
+                    warn!("[Hedgehog Custom Deserializer str_or_empty_as_f64_option] Parsed string '{}' to Decimal: {:?}", s, d_val);
                     match d_val.to_f64() {
-                        Some(f) => {
-                            warn!("[str_or_empty_as_f64_option] Converted Decimal {:?} to Some(f64): {}", d_val, f);
-                            Ok(Some(f))
+                        Some(f_val) => {
+                            warn!("[Hedgehog Custom Deserializer str_or_empty_as_f64_option] Converted Decimal {:?} to Some(f64): {}", d_val, f_val);
+                            Ok(Some(f_val))
                         }
                         None => {
-                            warn!("[str_or_empty_as_f64_option] Failed to convert Decimal {:?} (from string '{}') to f64, returning None", d_val, s);
-                            Ok(None) // Если не удалось конвертировать в f64, возвращаем None
+                            warn!("[Hedgehog Custom Deserializer str_or_empty_as_f64_option] Failed to convert Decimal {:?} (from string '{}') to f64. Returning None.", d_val, s);
+                            Ok(None) 
                         }
                     }
                 }
                 Err(e) => {
-                    warn!("[str_or_empty_as_f64_option] Failed to parse string '{}' to Decimal: {}. Returning None.", s, e);
-                    Ok(None) // Если не удалось распарсить в Decimal, возвращаем None
+                    warn!("[Hedgehog Custom Deserializer str_or_empty_as_f64_option] Failed to parse string '{}' to Decimal: {}. Returning None.", s, e);
+                    Ok(None) 
                 }
             }
         }
@@ -130,7 +125,7 @@ pub(super) async fn handle_message(
 ) -> Result<()> {
     match message {
         Message::Text(text) => {
-            info!("Raw WS Text Received: {}", text); 
+            debug!("Raw WS Text Received: {}", text); 
             match serde_json::from_str::<BybitWsResponse>(&text) {
                 Ok(parsed_response_value) => {
                     debug!("Parsed BybitWsResponse: {:?}", parsed_response_value);
