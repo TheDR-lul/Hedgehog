@@ -7,7 +7,7 @@ use tracing::{debug, error, info, warn, trace};
 
 use crate::exchange::types::{WebSocketMessage, DetailedOrderStatus, OrderSide, OrderStatusText, OrderbookLevel};
 use crate::webservice_hedge::unhedge_task::HedgerWsUnhedgeTask;
-use crate::webservice_hedge::state::{HedgerWsStatus, Leg, OperationType};
+use crate::webservice_hedge::state::{HedgerWsStatus, Leg};
 // Используем хелперы из ЭТОГО модуля (unhedge_logic)
 use crate::webservice_hedge::unhedge_logic::helpers::{get_current_price, send_progress_update};
 // Импортируем функции управления ордерами из СОБСТВЕННОГО модуля unhedge_logic

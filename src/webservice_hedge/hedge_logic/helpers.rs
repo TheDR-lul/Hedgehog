@@ -10,7 +10,7 @@ use crate::config::WsLimitOrderPlacementStrategy;
 use crate::exchange::types::OrderSide;
 use crate::storage;
 use crate::webservice_hedge::hedge_task::HedgerWsHedgeTask;
-use crate::webservice_hedge::state::{HedgerWsStatus, Leg, ChunkOrderState}; // Добавили ChunkOrderState
+use crate::webservice_hedge::state::{HedgerWsStatus, Leg}; // Добавили ChunkOrderState
 use crate::hedger::HedgeProgressUpdate;
 
 
@@ -169,7 +169,7 @@ pub async fn send_progress_update(task: &mut HedgerWsHedgeTask) -> Result<()> {
         crate::hedger::HedgeStage::Spot => {
             let spot_price_for_total_qty = get_current_price(task, Leg::Spot).unwrap_or(Decimal::ONE);
             let approx_total_spot_qty = if spot_price_for_total_qty > Decimal::ZERO {
-                (task.state.initial_target_spot_value / spot_price_for_total_qty)
+                task.state.initial_target_spot_value / spot_price_for_total_qty
             } else {
                 task.state.initial_target_spot_value // Fallback, если цена 0, хотя это маловероятно
             };

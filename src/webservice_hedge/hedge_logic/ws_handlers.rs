@@ -8,10 +8,9 @@ use tracing::{debug, error, info, warn, trace};
 
 use crate::exchange::types::{WebSocketMessage, DetailedOrderStatus, OrderSide, OrderStatusText, OrderbookLevel};
 use crate::webservice_hedge::hedge_task::HedgerWsHedgeTask;
-use crate::webservice_hedge::state::{HedgerWsStatus, Leg, OperationType, ChunkOrderState};
+use crate::webservice_hedge::state::{HedgerWsStatus, Leg, OperationType};
 use crate::webservice_hedge::hedge_logic::order_management::handle_cancel_confirmation;
 use crate::webservice_hedge::hedge_logic::helpers::{get_current_price, send_progress_update};
-use crate::hedger::ORDER_FILL_TOLERANCE;
 
 const ORDER_FILL_TOLERANCE_DECIMAL: Decimal = dec!(1e-8);
 
@@ -99,7 +98,7 @@ async fn handle_order_update(task: &mut HedgerWsHedgeTask, details: DetailedOrde
     let mut avg_price_from_state = Decimal::ZERO;
     let mut last_filled_price_opt: Option<Decimal> = None;
     let mut final_status_reached = false;
-    let mut order_status_text_for_log = details.status_text.clone(); 
+    let order_status_text_for_log = details.status_text.clone(); 
 
     let old_filled_qty_in_state: Decimal = if task.state.active_spot_order.as_ref().map_or(false, |o| o.order_id == details.order_id) {
         leg_found = Some(Leg::Spot);

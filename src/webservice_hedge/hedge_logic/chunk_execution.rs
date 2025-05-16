@@ -24,8 +24,8 @@ pub(crate) async fn start_next_chunk(task: &mut HedgerWsHedgeTask) -> Result<boo
     task.state.active_spot_order = None;
     task.state.active_futures_order = None;
 
-    let mut spot_quantity_chunk: Decimal;
-    let mut futures_quantity_chunk: Decimal;
+    let spot_quantity_chunk: Decimal;
+    let futures_quantity_chunk: Decimal;
     let is_last_chunk = chunk_index == task.state.total_chunks;
 
     // --- ИСПРАВЛЕНО: Расчет оставшегося количества до общей цели ---
